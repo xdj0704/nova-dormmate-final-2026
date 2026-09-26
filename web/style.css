@@ -269,6 +269,71 @@ h1 {
   text-align: center;
 }
 
+/* ---------- 现场快照 ---------- */
+
+.camera-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* 禁用态要看得出来。摄像头没打开时「拍照」就是灰的，
+   这一条同时说明"还不能点"，比点了没反应强。 */
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* .primary:hover 的 opacity 会盖过上面那条，单独再说一次 */
+.primary:disabled:hover { opacity: 0.45; }
+
+.camera-stage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+}
+
+/* 预览和快照共用一个外框：并排时两块一样宽，看着是一对 */
+.camera-box {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-1);
+  overflow: hidden;
+}
+
+/* 按原始比例显示，不裁不拉：预览里看到多少，拍下来就是多少。
+   所以不用 object-fit: cover —— 裁掉的那部分会让两者对不上。 */
+.camera-box video,
+.camera-box img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* 还没画面时的占位。min-height 让两块都空着时也一样高 */
+.camera-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  min-height: 180px;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.camera-caption {
+  padding: 8px 14px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- 节点卡片 ---------- */
 
 .cards {

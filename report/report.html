@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DormMate 宿舍环境报告</title>
+<style>
+:root { --ink: #1f2328; --muted: #6a737d; --line: #e1e4e8; --panel: #f6f8fa; }
+* { box-sizing: border-box; }
+body {
+  max-width: 900px; margin: 0 auto; padding: 32px 20px 64px;
+  font: 15px/1.7 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  color: var(--ink); background: #fff;
+}
+h1 { margin: 0 0 6px; font-size: 24px; }
+h2 { margin: 32px 0 12px; padding-bottom: 6px; font-size: 18px;
+     border-bottom: 1px solid var(--line); }
+p { margin: 8px 0; }
+.meta { margin: 0; color: var(--muted); font-size: 13px; }
+.path { word-break: break-all; }
+.note { color: var(--muted); font-size: 13px; }
+.empty { color: var(--muted); font-size: 14px; }
+.cards { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
+.card { flex: 1 1 150px; padding: 12px 14px; background: var(--panel);
+        border: 1px solid var(--line); border-radius: 8px; }
+.card .label { display: block; color: var(--muted); font-size: 12px; }
+.card .value { display: block; margin-top: 2px; font-size: 22px; font-weight: 600; }
+.card .value small { font-size: 13px; font-weight: 400; color: var(--muted); }
+table { width: 100%; margin: 8px 0; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 6px 10px; border: 1px solid var(--line); text-align: left; }
+th { background: var(--panel); font-weight: 600; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.total td { font-weight: 600; }
+.dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+       border-radius: 50%; }
+.bar { display: block; height: 8px; min-width: 3px; border-radius: 4px; }
+.warn { padding: 10px 14px; margin: 16px 0; font-size: 14px; background: #fff5f5;
+        border-left: 4px solid #C1440E; border-radius: 0 6px 6px 0; }
+img { max-width: 100%; height: auto; border: 1px solid var(--line);
+      border-radius: 8px; }
+@media print { body { max-width: none; } h2 { break-after: avoid; } }
+</style>
+</head>
+<body>
+<h1>DormMate 宿舍环境报告</h1>
+<p class="meta">生成时间：2026-09-26 14:36:22　·　数据来源：dormmate.csv <span class="path">(C:\Users\xdj\Desktop\DormMate Final\data\dormmate.csv)</span>　·　数据时间范围：2026-09-22 20:30:00 ~ 2026-09-22 20:30:55</p>
+<section>
+<h2>摘要</h2>
+<div class="cards"><div class="card"><span class="label">记录数</span><span class="value">12 <small>条</small></span></div><div class="card"><span class="label">温度最高</span><span class="value">31 <small>℃</small></span></div><div class="card"><span class="label">温度最低</span><span class="value">16 <small>℃</small></span></div><div class="card"><span class="label">湿度最高</span><span class="value">80 <small>%</small></span></div><div class="card"><span class="label">湿度最低</span><span class="value">60 <small>%</small></span></div></div>
+<p class="note">状态一律按统一规则重算（rule_status），不采用 CSV 里写的 status。</p>
+<table><thead><tr><th>状态</th><th class="num">条数</th><th class="num">占比</th><th>分布</th></tr></thead><tbody><tr><td><span class="dot" style="background:#1F6FB2"></span>偏冷</td><td class="num">3</td><td class="num">25.0%</td><td><span class="bar" style="width:25.0%;background:#1F6FB2"></span></td></tr><tr><td><span class="dot" style="background:#C1440E"></span>偏热</td><td class="num">3</td><td class="num">25.0%</td><td><span class="bar" style="width:25.0%;background:#C1440E"></span></td></tr><tr><td><span class="dot" style="background:#2E7D6F"></span>偏湿</td><td class="num">3</td><td class="num">25.0%</td><td><span class="bar" style="width:25.0%;background:#2E7D6F"></span></td></tr><tr><td><span class="dot" style="background:#4E7A2E"></span>正常</td><td class="num">3</td><td class="num">25.0%</td><td><span class="bar" style="width:25.0%;background:#4E7A2E"></span></td></tr><tr class="total"><td>合计</td><td class="num">12</td><td class="num">100.0%</td><td></td></tr></tbody></table>
+</section>
+<section>
+<h2>需要关注的记录</h2>
+<p class="note">rule_status 不是「正常」的都算，共 9 条。</p><table>
+<thead><tr>
+<th>时间</th>
+<th class="num">温度 ℃</th>
+<th class="num">湿度 %</th>
+<th>状态</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>2026-09-22 20:30:00</td>
+<td class="num">16</td>
+<td class="num">60</td>
+<td>偏冷</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:10</td>
+<td class="num">25</td>
+<td class="num">80</td>
+<td>偏湿</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:15</td>
+<td class="num">31</td>
+<td class="num">78</td>
+<td>偏热</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:20</td>
+<td class="num">16</td>
+<td class="num">60</td>
+<td>偏冷</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:30</td>
+<td class="num">25</td>
+<td class="num">80</td>
+<td>偏湿</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:35</td>
+<td class="num">31</td>
+<td class="num">78</td>
+<td>偏热</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:40</td>
+<td class="num">16</td>
+<td class="num">60</td>
+<td>偏冷</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:50</td>
+<td class="num">25</td>
+<td class="num">80</td>
+<td>偏湿</td>
+</tr>
+<tr>
+<td>2026-09-22 20:30:55</td>
+<td class="num">31</td>
+<td class="num">78</td>
+<td>偏热</td>
+</tr>
+</tbody>
+</table>
+</section>
+<section>
+<h2>趋势图</h2>
+<img src="trend.png" alt="温度与湿度随时间的变化">
+</section>
+</body>
+</html>

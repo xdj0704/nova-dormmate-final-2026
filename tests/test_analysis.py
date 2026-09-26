@@ -1,0 +1,1164 @@
+"""analysis/ 的测试：规则转发、路径推导、CSV 读取、基础统计。
+
+    py -3.14 -m unittest discover -s tests -t . -v
+
+需要 pandas（装在 64 位 Python 3.14 里），所以用 py -3.14 跑。
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import logging
+import math
+import tempfile
+import unittest
+import warnings
+from contextlib import redirect_stdout
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+import status_rules
+from analysis import analysis, rules
+
+# 画图那几只用 matplotlib 的测试要跳过而不是报错：matplotlib 是 Step 2-4
+# 才引进来的依赖，没装的时候"读 CSV + 统计"这套仍然该能跑能测。
+try:
+    import matplotlib  # noqa: F401
+
+    HAS_MPL = True
+except ImportError:
+    HAS_MPL = False
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+BOM = chr(0xFEFF)
+HEADER = "time,temperature,humidity,status"
+
+
+def write_csv(text: str, name: str = "t.csv", bom: bool = True) -> Path:
+    """把文本写成临时 CSV，默认带 BOM，模拟网页导出的文件。"""
+    path = Path(tempfile.mkdtemp()) / name
+    path.write_text((BOM if bom else "") + text, encoding="utf-8", newline="")
+    return path
+
+
+def capture(func, *args, **kwargs) -> str:
+    """接住函数打印的内容，只返回文本。"""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        func(*args, **kwargs)
+    return buf.getvalue()
+
+
+class TestRulesForwarding(unittest.TestCase):
+    """analysis/rules.py 必须是转发，不是第二份实现。"""
+
+    def test_judge_status_就是根模块那个函数(self):
+        self.assertIs(rules.judge_status, status_rules.compute_status)
+
+    def test_阈值也从根模块借过来(self):
+        self.assertEqual(rules.TEMP_LOW, status_rules.TEMP_LOW)
+        self.assertEqual(rules.TEMP_HIGH, status_rules.TEMP_HIGH)
+        self.assertEqual(rules.HUMIDITY_HIGH, status_rules.HUMIDITY_HIGH)
+
+    def test_四组回归数据(self):
+        for temperature, humidity, expected in rules.REGRESSION_CASES:
+            with self.subTest(temperature=temperature, humidity=humidity):
+                self.assertEqual(rules.judge_status(temperature, humidity), expected)
+
+    def test_回归数据的期望值和老师给的一致(self):
+        self.assertEqual(
+            rules.REGRESSION_CASES,
+            [(25, 60, "正常"), (16, 60, "偏冷"), (31, 60, "偏热"), (25, 80, "偏湿")],
+        )
+
+    def test_31度80湿度是偏热不是偏湿(self):
+        # 约定里点名的坑：温度规则先命中
+        self.assertEqual(rules.judge_status(31, 80), "偏热")
+
+    def test_run_tests_全通过(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            passed = rules.run_tests()
+        self.assertTrue(passed)
+        self.assertIn("4/4 通过", buf.getvalue())
+
+    def test_run_tests_有失败时返回False(self):
+        # 把期望值改错，确认它真的会报失败，而不是永远返回 True
+        original = rules.REGRESSION_CASES
+        rules.REGRESSION_CASES = [(25, 60, "偏热")]   # 25/60 实际是「正常」
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                passed = rules.run_tests()
+        finally:
+            rules.REGRESSION_CASES = original
+
+        self.assertFalse(passed)
+        self.assertIn("0/1 通过", buf.getvalue())
+        self.assertIn("不通过", buf.getvalue())
+
+
+class TestResolveCsv(unittest.TestCase):
+    """相对路径按项目根展开，这样在任何目录下运行都找得到文件。"""
+
+    def test_默认文件在项目根的_data_下(self):
+        self.assertEqual(analysis.DEFAULT_CSV, analysis.ROOT / "data" / "dormmate.csv")
+        self.assertTrue(analysis.DEFAULT_CSV.is_absolute())
+
+    def test_相对路径按项目根展开(self):
+        self.assertEqual(
+            analysis.resolve_csv("data/dormmate.csv"),
+            analysis.ROOT / "data" / "dormmate.csv",
+        )
+
+    def test_绝对路径原样返回(self):
+        self.assertEqual(
+            analysis.resolve_csv(r"C:\tmp\x.csv"),
+            Path(r"C:\tmp\x.csv"),
+        )
+
+    def test_项目根就是仓库根(self):
+        # analysis/ 的上一级：status_rules.py 和 web/ 都在那儿
+        self.assertTrue((analysis.ROOT / "status_rules.py").is_file())
+        self.assertTrue((analysis.ROOT / "web").is_dir())
+
+
+class TestLoad(unittest.TestCase):
+    def test_utf8sig_吃掉了BOM_列名是干净的(self):
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,31,78,偏热\r\n")
+        df = analysis.load(path)
+        self.assertEqual(list(df.columns), ["time", "temperature", "humidity", "status"])
+        # 中文没有乱码 —— 乱码的话这里就会是别的字符串
+        self.assertEqual(df["status"][0], "偏热")
+
+    def test_文件确实带BOM_普通读取会看到多出来的字符(self):
+        """证明 fixture 里真有 BOM，以及为什么要在 encoding 上做文章。
+
+        注意：这里【不能】拿 pandas 当反面对照 —— pandas 3.x 的 read_csv
+        自己就会吃掉 BOM，用 coding="utf-8" 读出来照样是干净的 time。
+        换标准库按 utf-8 读才试得出来：第一个字符就是 U+FEFF。
+
+        我们仍然显式写 utf-8-sig：既是要求，也免得依赖 pandas 版本的行为
+        （旧版 pandas 和标准库都会把这个 BOM 留在列名里）。
+        """
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,31,78,偏热\r\n")
+
+        self.assertEqual(path.read_bytes()[:3], b"\xef\xbb\xbf")   # 文件头真有 BOM
+        with open(path, encoding="utf-8") as handle:
+            self.assertTrue(handle.readline().startswith(BOM))     # 标准库会留着它
+
+    def test_没有BOM的文件也能读(self):
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,25,60,正常\r\n", bom=False)
+        df = analysis.load(path)
+        self.assertEqual(list(df.columns)[0], "time")
+
+    def test_文件不存在时给一句人话而不是报错栈(self):
+        missing = analysis.ROOT / "data" / "根本没有这个文件.csv"
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(missing)
+        message = str(ctx.exception)
+        self.assertIn("找不到 CSV", message)
+        self.assertIn("导出 CSV", message)      # 告诉用户这个文件从哪来
+
+    def test_缺列时指出缺了哪列(self):
+        path = write_csv("time,temperature,status\r\n2026-09-22 20:30:00,31,偏热\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        self.assertIn("humidity", str(ctx.exception))
+
+    def test_只有表头也能读(self):
+        path = write_csv(f"{HEADER}\r\n")
+        df = analysis.load(path)
+        self.assertEqual(len(df), 0)
+
+
+class TestDescribe(unittest.TestCase):
+    def frame(self) -> pd.DataFrame:
+        return pd.DataFrame({
+            "time": ["2026-09-22 20:30:00", "2026-09-22 20:30:05", "2026-09-22 20:30:10"],
+            "temperature": [16.0, 25.0, 31.5],
+            "humidity": [60.0, 80.0, 45.0],
+            "status": ["偏冷", "偏湿", "偏热"],
+        })
+
+    def test_统计值(self):
+        stats = analysis.describe(self.frame())
+        self.assertEqual(stats["records"], 3)
+        self.assertEqual(stats["temp_max"], 31.5)
+        self.assertEqual(stats["temp_min"], 16.0)
+        self.assertEqual(stats["humidity_max"], 80.0)
+        self.assertEqual(stats["humidity_min"], 45.0)
+
+    def test_打印了记录数和极值(self):
+        text = capture(analysis.describe, self.frame())
+        self.assertIn("记录数：3", text)
+        self.assertIn("最高 31.5", text)
+        self.assertIn("最低 16", text)          # 16.0 打成 16，不拖一个没用的 .0
+        self.assertIn("最高 80", text)
+        self.assertIn("最低 45", text)
+
+    def test_空表不炸也不求极值(self):
+        empty = self.frame().iloc[0:0]
+        stats = analysis.describe(empty)
+        self.assertEqual(stats["records"], 0)
+        self.assertIsNone(stats["temp_max"])
+        self.assertIsNone(stats["humidity_min"])
+
+
+class TestMain(unittest.TestCase):
+    def test_端到端跑一遍(self):
+        path = write_csv(
+            f"{HEADER}\r\n"
+            "2026-09-22 20:30:00,16,60,偏冷\r\n"
+            "2026-09-22 20:30:05,31,78,偏热\r\n"
+        )
+        # 两个 --no-*：跑测试不该往项目里的 report/ 写东西。
+        # 画图和出报告本身在 TestPlotTrend / TestWriteReport 里单独测，
+        # 那边写的是临时目录。
+        text = capture(analysis.main, [str(path), "--no-plot", "--no-report"])
+
+        self.assertIn("前 5 行：", text)
+        self.assertIn("记录数：2", text)
+        self.assertIn("最高 31", text)
+        self.assertNotIn("趋势图：", text)
+        self.assertNotIn("报告：", text)
+
+    def test_默认会画图并出报告(self):
+        if not analysis.DEFAULT_CSV.is_file():
+            self.skipTest("data/dormmate.csv 不存在（演示数据，可以没有）")
+        if not HAS_MPL:
+            self.skipTest("需要 matplotlib")
+
+        folder = Path(tempfile.mkdtemp())
+        trend, report = folder / "trend.png", folder / "report.html"
+        original = analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML
+        analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = trend, report
+        try:
+            text = capture(analysis.main, [str(analysis.DEFAULT_CSV)])
+        finally:
+            analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = original
+
+        self.assertTrue(trend.is_file())
+        self.assertTrue(report.is_file())
+        self.assertIn("趋势图：", text)
+        self.assertIn("报告：", text)
+        # 报告里的图是相对路径，而图就写在它旁边 —— 拷走整个目录不会断图
+        self.assertIn('<img src="trend.png"', report.read_text(encoding="utf-8"))
+
+    def test_no_report不写HTML(self):
+        folder = Path(tempfile.mkdtemp())
+        out = folder / "report.html"
+        original = analysis.DEFAULT_REPORT_HTML
+        analysis.DEFAULT_REPORT_HTML = out
+        try:
+            text = capture(analysis.main,
+                           [str(analysis.DEFAULT_CSV), "--no-plot", "--no-report"])
+        finally:
+            analysis.DEFAULT_REPORT_HTML = original
+
+        self.assertFalse(out.exists())
+        self.assertIn("跳过 report.html", text)
+
+    def test_默认参数能用(self):
+        # 不传参数时用的是 data/dormmate.csv，路径解析成项目根下那个
+        parser_default = analysis.resolve_csv(str(analysis.DEFAULT_CSV))
+        self.assertEqual(parser_default, analysis.DEFAULT_CSV)
+
+
+class TestSampleData(unittest.TestCase):
+    """data/dormmate.csv 是给演示用的样例，里面的 status 必须和规则对得上。
+
+    文件不在就跳过 —— 它是演示数据，不是代码，删掉不该让测试挂。
+    """
+
+    def setUp(self):
+        if not analysis.DEFAULT_CSV.is_file():
+            self.skipTest("data/dormmate.csv 不存在（演示数据，可以没有）")
+        self.df = analysis.load(analysis.DEFAULT_CSV)
+
+    def test_每一行的status都等于规则算出来的(self):
+        for row in self.df.itertuples():
+            with self.subTest(time=row.time, temperature=row.temperature):
+                self.assertEqual(
+                    row.status,
+                    rules.judge_status(row.temperature, row.humidity),
+                )
+
+    def test_覆盖了四种状态(self):
+        self.assertEqual(
+            set(self.df["status"]),
+            {"偏冷", "偏热", "偏湿", "正常"},
+        )
+
+
+def frame_from(rows: list[tuple]) -> pd.DataFrame:
+    """(time, temperature, humidity, status) 的行列表 -> DataFrame。"""
+    return pd.DataFrame(
+        {
+            "time": [row[0] for row in rows],
+            "temperature": [row[1] for row in rows],
+            "humidity": [row[2] for row in rows],
+            "status": [row[3] for row in rows],
+        }
+    )
+
+
+class TestAddRuleStatus(unittest.TestCase):
+    """rule_status 必须是【重算】出来的，不是把 CSV 的 status 抄一遍。"""
+
+    def test_多了一列rule_status_而且在最后(self):
+        out = analysis.add_rule_status(
+            frame_from([("t1", 25.0, 60.0, "正常")])
+        )
+        self.assertIn("rule_status", out.columns)
+        self.assertEqual(list(out.columns)[-1], "rule_status")
+
+    def test_不改传进来的df(self):
+        original = frame_from([("t1", 25.0, 60.0, "正常")])
+        columns_before = list(original.columns)
+
+        analysis.add_rule_status(original)
+
+        self.assertEqual(list(original.columns), columns_before)
+
+    def test_四组回归数据都按规则算(self):
+        out = analysis.add_rule_status(
+            frame_from([
+                ("t1", 25.0, 60.0, "正常"),
+                ("t2", 16.0, 60.0, "偏冷"),
+                ("t3", 31.0, 60.0, "偏热"),
+                ("t4", 25.0, 80.0, "偏湿"),
+            ])
+        )
+        self.assertEqual(list(out["rule_status"]), ["正常", "偏冷", "偏热", "偏湿"])
+
+    def test_31度80湿度算成偏热(self):
+        out = analysis.add_rule_status(frame_from([("t1", 31.0, 80.0, "偏湿")]))
+        self.assertEqual(out["rule_status"][0], "偏热")
+
+    def test_温湿度缺失标成缺失而不是悄悄算成正常(self):
+        # NaN 和任何数比大小都是 False，直接丢给规则会一路走到「正常」，
+        # 报告里就成了一条假数据。这条就是盯着这个坑。
+        out = analysis.add_rule_status(frame_from([("t1", float("nan"), 60.0, "正常")]))
+        self.assertEqual(out["rule_status"][0], analysis.MISSING)
+        self.assertNotEqual(out["rule_status"][0], "正常")
+
+    def test_湿度缺失也一样(self):
+        out = analysis.add_rule_status(frame_from([("t1", 25.0, float("nan"), "正常")]))
+        self.assertEqual(out["rule_status"][0], analysis.MISSING)
+
+
+class TestFindMismatches(unittest.TestCase):
+    def test_一致时返回空列表(self):
+        df = analysis.add_rule_status(
+            frame_from([("t1", 25.0, 60.0, "正常"), ("t2", 31.0, 78.0, "偏热")])
+        )
+        self.assertEqual(analysis.find_mismatches(df), [])
+
+    def test_挑出对不上的行_字段一起给出(self):
+        df = analysis.add_rule_status(
+            frame_from([
+                ("2026-09-22 20:30:00", 25.0, 60.0, "正常"),
+                ("2026-09-22 20:30:05", 31.0, 80.0, "偏湿"),   # 31/80 该是偏热
+            ])
+        )
+        found = analysis.find_mismatches(df)
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["time"], "2026-09-22 20:30:05")
+        self.assertEqual(found[0]["temperature"], 31.0)
+        self.assertEqual(found[0]["humidity"], 80.0)
+        self.assertEqual(found[0]["status"], "偏湿")        # CSV 里写的
+        self.assertEqual(found[0]["rule_status"], "偏热")   # 规则算的
+
+    def test_status为空的行算不一致(self):
+        df = analysis.add_rule_status(frame_from([("t1", 25.0, 60.0, float("nan"))]))
+        found = analysis.find_mismatches(df)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["status"], "")            # 不是字符串 "nan"
+
+    def test_缺失温湿度的行算不一致(self):
+        df = analysis.add_rule_status(frame_from([("t1", float("nan"), 60.0, "正常")]))
+        self.assertEqual(len(analysis.find_mismatches(df)), 1)
+
+    def test_结果可以直接json序列化(self):
+        df = analysis.add_rule_status(frame_from([("t1", 31.0, 80.0, "偏湿")]))
+        json.dumps(analysis.find_mismatches(df), ensure_ascii=False)   # 不抛异常即可
+
+
+class TestCountStatuses(unittest.TestCase):
+    def test_四种状态都在_没有的是0(self):
+        df = analysis.add_rule_status(frame_from([("t1", 25.0, 60.0, "正常")]))
+        self.assertEqual(
+            analysis.count_statuses(df),
+            {"偏冷": 0, "偏热": 0, "偏湿": 0, "正常": 1},
+        )
+
+    def test_顺序固定_不按出现次数排(self):
+        df = analysis.add_rule_status(
+            frame_from([
+                ("t1", 25.0, 60.0, "正常"),
+                ("t2", 25.0, 60.0, "正常"),
+                ("t3", 16.0, 60.0, "偏冷"),
+            ])
+        )
+        counts = analysis.count_statuses(df)
+        self.assertEqual(list(counts), analysis.STATUS_ORDER)
+        self.assertEqual(list(counts), ["偏冷", "偏热", "偏湿", "正常"])
+
+    def test_统计的是rule_status不是CSV的status(self):
+        df = analysis.add_rule_status(frame_from([("t1", 31.0, 80.0, "偏湿")]))
+        counts = analysis.count_statuses(df)
+        self.assertEqual(counts["偏热"], 1)
+        self.assertEqual(counts["偏湿"], 0)
+
+    def test_缺失也单独统计_不悄悄吞掉(self):
+        df = analysis.add_rule_status(frame_from([("t1", float("nan"), 60.0, "正常")]))
+        self.assertEqual(analysis.count_statuses(df)[analysis.MISSING], 1)
+
+    def test_空表全是0(self):
+        df = analysis.add_rule_status(frame_from([]))
+        self.assertEqual(set(analysis.count_statuses(df).values()), {0})
+
+
+class TestFindAttention(unittest.TestCase):
+    def test_只留不是正常的(self):
+        df = analysis.add_rule_status(
+            frame_from([
+                ("t1", 25.0, 60.0, "正常"),
+                ("t2", 16.0, 60.0, "偏冷"),
+                ("t3", 25.0, 80.0, "偏湿"),
+            ])
+        )
+        attention = analysis.find_attention(df)
+        self.assertEqual([item["rule_status"] for item in attention], ["偏冷", "偏湿"])
+        self.assertEqual([item["time"] for item in attention], ["t2", "t3"])
+
+    def test_全正常时是空列表(self):
+        df = analysis.add_rule_status(frame_from([("t1", 25.0, 60.0, "正常")]))
+        self.assertEqual(analysis.find_attention(df), [])
+
+    def test_按规则算而不是按CSV的status筛(self):
+        # CSV 写着「正常」，但 31/80 按规则是偏热 —— 要进关注列表
+        df = analysis.add_rule_status(frame_from([("t1", 31.0, 80.0, "正常")]))
+        self.assertEqual(len(analysis.find_attention(df)), 1)
+
+
+class TestTimeRange(unittest.TestCase):
+    """时间范围：格式固定，字典序就是时间序，不用 parse 成 datetime。"""
+
+    def test_取最早和最晚(self):
+        df = frame_from([
+            ("2026-09-22 20:30:10", 25.0, 60.0, "正常"),
+            ("2026-09-22 20:30:00", 25.0, 60.0, "正常"),
+            ("2026-09-22 20:30:05", 25.0, 60.0, "正常"),
+        ])
+        self.assertEqual(
+            analysis.time_range(df),
+            ("2026-09-22 20:30:00", "2026-09-22 20:30:10"),
+        )
+
+    def test_跨天也按时间先后(self):
+        df = frame_from([
+            ("2026-09-22 23:59:59", 25.0, 60.0, "正常"),
+            ("2026-09-23 00:00:01", 25.0, 60.0, "正常"),
+        ])
+        self.assertEqual(
+            analysis.time_range(df),
+            ("2026-09-22 23:59:59", "2026-09-23 00:00:01"),
+        )
+
+    def test_空单元格不算数(self):
+        df = frame_from([
+            (float("nan"), 25.0, 60.0, "正常"),
+            ("2026-09-22 20:30:05", 25.0, 60.0, "正常"),
+        ])
+        self.assertEqual(analysis.time_range(df), ("2026-09-22 20:30:05",) * 2)
+
+    def test_没有可用时间时返回两个空串(self):
+        self.assertEqual(analysis.time_range(frame_from([])), ("", ""))
+        self.assertEqual(
+            analysis.time_range(frame_from([(float("nan"), 25.0, 60.0, "正常")])),
+            ("", ""),
+        )
+
+
+class TestSummarize(unittest.TestCase):
+    def good(self) -> pd.DataFrame:
+        return analysis.add_rule_status(
+            frame_from([
+                ("2026-09-22 20:30:00", 25.0, 60.0, "正常"),
+                ("2026-09-22 20:30:05", 16.0, 60.0, "偏冷"),
+            ])
+        )
+
+    def bad(self) -> pd.DataFrame:
+        return analysis.add_rule_status(
+            frame_from([
+                ("2026-09-22 20:30:00", 25.0, 60.0, "正常"),
+                ("2026-09-22 20:30:05", 31.0, 80.0, "偏湿"),   # 规则说是偏热
+            ])
+        )
+
+    def test_返回的键和顺序(self):
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(self.good(), Path("x.csv"))
+        self.assertEqual(
+            list(summary),
+            ["file", "records", "time_first", "time_last",
+             "temp_max", "temp_min", "humidity_max", "humidity_min",
+             "status_counts", "mismatches", "attention"],
+        )
+
+    def test_内容对得上(self):
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(self.good(), Path("x.csv"))
+
+        self.assertEqual(summary["file"], "x.csv")
+        self.assertEqual(summary["records"], 2)
+        self.assertEqual(summary["time_first"], "2026-09-22 20:30:00")
+        self.assertEqual(summary["time_last"], "2026-09-22 20:30:05")
+        self.assertEqual(summary["temp_max"], 25.0)
+        self.assertEqual(summary["temp_min"], 16.0)
+        self.assertEqual(summary["humidity_max"], 60.0)
+        self.assertEqual(summary["humidity_min"], 60.0)
+        self.assertEqual(summary["status_counts"]["正常"], 1)
+        self.assertEqual(summary["status_counts"]["偏冷"], 1)
+        self.assertEqual(summary["status_counts"]["偏热"], 0)
+        self.assertEqual(summary["mismatches"], [])
+        self.assertEqual(len(summary["attention"]), 1)
+
+    def test_verbose为假时什么都不打印(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            summary = analysis.summarize(self.good(), Path("x.csv"), verbose=False)
+        self.assertEqual(buf.getvalue(), "")
+        self.assertEqual(summary["records"], 2)          # 数据照样是全的
+        self.assertEqual(summary["status_counts"]["正常"], 1)
+
+    def test_verbose为假时也照样补rule_status(self):
+        raw = frame_from([("t1", 31.0, 80.0, "偏湿")])
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(raw, verbose=False)
+        self.assertEqual(summary["status_counts"]["偏热"], 1)
+
+    def test_整个字典能json序列化(self):
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(self.bad(), Path("x.csv"))
+        text = json.dumps(summary, ensure_ascii=False)
+        self.assertIn("偏热", text)
+
+    def test_不传路径时file是None(self):
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(self.good())
+        self.assertIsNone(summary["file"])
+
+    def test_没有rule_status列时自己补上(self):
+        raw = frame_from([("t1", 31.0, 80.0, "偏湿")])
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(raw)          # 故意传没算过的 df
+        self.assertEqual(summary["status_counts"]["偏热"], 1)
+        self.assertEqual(len(summary["mismatches"]), 1)
+
+    def test_一致时不打警告(self):
+        text = capture(analysis.summarize, self.good(), Path("x.csv"))
+        self.assertIn("规则复核：2 行的 status 和规则算出来的一致", text)
+        self.assertNotIn("警告", text)
+
+    def test_不一致时打警告并点名两个规则文件(self):
+        text = capture(analysis.summarize, self.bad(), Path("x.csv"))
+        self.assertIn("警告", text)
+        self.assertIn("1 / 2 行", text)
+        # 警告要能指着人去看哪两个文件
+        self.assertIn("shared/rules.js", text)
+        self.assertIn("status_rules.py", text)
+        self.assertIn("偏湿", text)      # CSV 里写的
+        self.assertIn("偏热", text)      # 规则算的
+
+    def test_关注列表里不会有正常(self):
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(self.bad(), Path("x.csv"))
+        self.assertNotIn("正常", [item["rule_status"] for item in summary["attention"]])
+
+    def test_打印了状态统计和关注条数(self):
+        text = capture(analysis.summarize, self.good(), Path("x.csv"))
+        self.assertIn("状态统计", text)
+        self.assertIn("合计", text)
+        self.assertIn("需要关注的记录（rule_status 不是「正常」）：1 条", text)
+
+    def test_全部正常时说没有要关注的(self):
+        df = analysis.add_rule_status(frame_from([("t1", 25.0, 60.0, "正常")]))
+        text = capture(analysis.summarize, df)
+        self.assertIn("需要关注的记录：没有", text)
+
+    def test_空表不炸(self):
+        empty = analysis.add_rule_status(frame_from([]))
+        text = capture(analysis.summarize, empty)
+        self.assertIn("没有数据行", text)
+
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(empty)
+        self.assertEqual(summary["records"], 0)
+        self.assertIsNone(summary["temp_max"])
+        self.assertEqual(set(summary["status_counts"].values()), {0})
+        self.assertEqual(summary["attention"], [])
+
+    def test_超过打印上限时提示还剩多少条_但summary里不截断(self):
+        rows = [(f"t{i}", 16.0, 60.0, "偏冷") for i in range(analysis.MAX_PRINT + 5)]
+        df = analysis.add_rule_status(frame_from(rows))
+
+        text = capture(analysis.summarize, df)
+
+        self.assertIn(f"还有 5 条", text)
+        with redirect_stdout(io.StringIO()):
+            summary = analysis.summarize(df)
+        self.assertEqual(len(summary["attention"]), analysis.MAX_PRINT + 5)
+
+
+class TestTrendSeries(unittest.TestCase):
+    """趋势图的数据整理。纯 python，不碰 matplotlib，所以没装也能测。"""
+
+    def test_按时间升序排(self):
+        # CSV 是追加写的，正常按时间；但几份导出拼起来就会乱序，
+        # 乱序画出来折线会来回折返，所以这里必须重排。
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:10", 25.0, 60.0, "正常"),
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026-09-22 20:30:05", 31.0, 78.0, "偏热"),
+        ]))
+        self.assertEqual(
+            [when.strftime(analysis.TIME_FORMAT) for when in series["times"]],
+            ["2026-09-22 20:30:00",
+             "2026-09-22 20:30:05",
+             "2026-09-22 20:30:10"],
+        )
+        self.assertEqual(series["temperature"], [16.0, 31.0, 25.0])
+
+    def test_温湿度各自一条列表(self):
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026-09-22 20:30:05", 25.0, 80.0, "偏湿"),
+        ]))
+        self.assertEqual(series["temperature"], [16.0, 25.0])
+        self.assertEqual(series["humidity"], [60.0, 80.0])
+        self.assertEqual(series["skipped"], 0)
+
+    def test_时间空的行不画并计入skipped(self):
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            (None, 25.0, 60.0, "正常"),
+            ("", 31.0, 60.0, "偏热"),
+        ]))
+        self.assertEqual(len(series["times"]), 1)
+        self.assertEqual(series["skipped"], 2)
+
+    def test_时间格式不对的行也计入skipped(self):
+        # 不按统一格式写的时间没法和别的行排到一根轴上，宁可跳过也不猜
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026/09/22 20:30:05", 25.0, 60.0, "正常"),
+            ("20:30:10", 31.0, 60.0, "偏热"),
+        ]))
+        self.assertEqual(len(series["times"]), 1)
+        self.assertEqual(series["skipped"], 2)
+
+    def test_温度空但湿度有值照样画湿度(self):
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", None, 60.0, "正常"),
+            ("2026-09-22 20:30:05", 16.0, None, "偏冷"),
+        ]))
+        self.assertEqual(len(series["times"]), 2)
+        self.assertTrue(math.isnan(series["temperature"][0]))
+        self.assertEqual(series["temperature"][1], 16.0)
+        self.assertEqual(series["humidity"][0], 60.0)
+        self.assertTrue(math.isnan(series["humidity"][1]))
+
+    def test_缺失用nan而不是None(self):
+        # 折线里 None 会报错看不清，nan 才会在那个位置断开
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", None, None, "正常"),
+        ]))
+        for value in series["temperature"] + series["humidity"]:
+            self.assertIsInstance(value, float)
+
+    def test_空表返回空列表而不是报错(self):
+        series = analysis.trend_series(frame_from([]))
+        self.assertEqual(series["times"], [])
+        self.assertEqual(series["temperature"], [])
+        self.assertEqual(series["skipped"], 0)
+
+
+class TestDateFormat(unittest.TestCase):
+    """横轴标签越短越不容易挤：同一天的只打时分秒，跨天的才补月日。"""
+
+    def test_同一天只打时分秒(self):
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026-09-22 20:31:00", 16.0, 60.0, "偏冷"),
+        ]))
+        self.assertEqual(analysis._date_format(series), "%H:%M:%S")
+
+    def test_跨天补上月日(self):
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026-09-24 20:30:00", 16.0, 60.0, "偏冷"),
+        ]))
+        self.assertEqual(analysis._date_format(series), "%m-%d %H:%M")
+
+    def test_只有一个点时用时分秒(self):
+        series = analysis.trend_series(frame_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+        ]))
+        self.assertEqual(analysis._date_format(series), "%H:%M:%S")
+
+
+class TestCjkFontList(unittest.TestCase):
+    def test_字体列表就是统一约定的那几个(self):
+        self.assertEqual(
+            analysis.CJK_FONTS,
+            ["Microsoft YaHei", "SimHei", "PingFang SC", "Arial Unicode MS"],
+        )
+
+    def test_默认存到report目录下的trendpng(self):
+        self.assertEqual(analysis.DEFAULT_TREND.name, "trend.png")
+        self.assertEqual(analysis.DEFAULT_TREND.parent.name, "report")
+
+
+@unittest.skipUnless(HAS_MPL, "需要 matplotlib")
+class TestPlotTrend(unittest.TestCase):
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp())
+        self.rows = [
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026-09-22 20:30:05", 25.0, 60.0, "正常"),
+            ("2026-09-22 20:30:10", 31.0, 78.0, "偏热"),
+            ("2026-09-22 20:30:15", 25.0, 80.0, "偏湿"),
+        ]
+
+    def test_写出一个真的png(self):
+        out = self.folder / "t.png"
+        self.assertEqual(analysis.plot_trend(frame_from(self.rows), out, verbose=False), out)
+        self.assertTrue(out.is_file())
+        # 不只看文件在不在：确认真的是 PNG，不是一段报错文本
+        self.assertEqual(out.read_bytes()[:8], PNG_MAGIC)
+
+    def test_目录不存在会自动建(self):
+        out = self.folder / "深" / "几层" / "t.png"
+        analysis.plot_trend(frame_from(self.rows), out, verbose=False)
+        self.assertTrue(out.is_file())
+
+    def test_空表也出一张图(self):
+        # 报告里引用的图片路径不该时有时无
+        out = self.folder / "t.png"
+        analysis.plot_trend(frame_from([]), out, verbose=False)
+        self.assertEqual(out.read_bytes()[:8], PNG_MAGIC)
+
+    def test_全是空值的行也能出图(self):
+        out = self.folder / "t.png"
+        analysis.plot_trend(
+            frame_from([("2026-09-22 20:30:00", None, None, "正常")]),
+            out,
+            verbose=False,
+        )
+        self.assertEqual(out.read_bytes()[:8], PNG_MAGIC)
+
+    def test_设了中文字体并关掉负号方块(self):
+        analysis.plot_trend(frame_from(self.rows), self.folder / "t.png", verbose=False)
+        plt = analysis._pyplot()
+        self.assertEqual(list(plt.rcParams["font.sans-serif"])[:4], analysis.CJK_FONTS)
+        self.assertFalse(plt.rcParams["axes.unicode_minus"])
+
+    def test_画完不留下没关掉的figure(self):
+        # 反复画图不 close 会一直堆在内存里，几十次之后脚本会越来越慢
+        plt = analysis._pyplot()
+        for index in range(3):
+            analysis.plot_trend(frame_from(self.rows), self.folder / f"t{index}.png",
+                                verbose=False)
+        self.assertEqual(plt.get_fignums(), [])
+
+    def test_verbose为假时一个字都不打印(self):
+        text = capture(analysis.plot_trend, frame_from(self.rows),
+                       self.folder / "t.png", verbose=False)
+        self.assertEqual(text, "")
+
+    def test_打印里点名字体和点数(self):
+        text = capture(analysis.plot_trend, frame_from(self.rows),
+                       self.folder / "t.png")
+        self.assertIn("趋势图：", text)
+        self.assertIn("4 个点", text)
+        self.assertIn("中文字体：", text)
+
+    def test_没找到中文字体时打警告(self):
+        # 换台没装中文字体的机器（比如 Linux CI）跑，得说清楚为什么是方块，
+        # 而不是让人对着图猜。
+        # 这一只是故意用不存在的字体画的：matplotlib 会为每个缺字的文本往
+        # stderr 刷一行 findfont 警告、再抛一串 Glyph missing。把日志压到
+        # ERROR、warning 收起来，别让几十行噪音盖住真正的测试输出。
+        quiet = logging.getLogger("matplotlib.font_manager")
+        level = quiet.level
+        original = analysis.CJK_FONTS
+        quiet.setLevel(logging.ERROR)
+        analysis.CJK_FONTS = ["绝对不存在的字体"]
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                text = capture(analysis.plot_trend, frame_from(self.rows),
+                               self.folder / "t.png")
+        finally:
+            analysis.CJK_FONTS = original
+            quiet.setLevel(level)
+        self.assertIn("警告", text)
+
+    def test_只有一个点时横轴自己撑开不报警(self):
+        # 所有点时间相同（只有一行数据）时横轴跨度是 0，AutoDateLocator 挑不出
+        # 刻度间隔，每画一次就刷一串警告。撑成 60 秒的窗口才行。
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            analysis.plot_trend(frame_from([self.rows[0]]), self.folder / "t.png",
+                                verbose=False)
+        noisy = [str(item.message) for item in caught
+                 if "AutoDateLocator" in str(item.message)]
+        self.assertEqual(noisy, [])
+
+    def test_温湿度有点是空的时候打出来(self):
+        text = capture(analysis.plot_trend,
+                       frame_from([("2026-09-22 20:30:00", None, 60.0, "正常")]),
+                       self.folder / "t.png")
+        self.assertIn("温度有 1 个点是空的", text)
+
+    def test_时间跳过的行数会打出来(self):
+        text = capture(analysis.plot_trend,
+                       frame_from([
+                           ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+                           ("昨天下午", 25.0, 60.0, "正常"),
+                       ]),
+                       self.folder / "t.png")
+        self.assertIn("1 行的时间是空的", text)
+
+
+def summary_from(rows: list[tuple], path: Path | None = None) -> dict:
+    """行列表 -> summarize() 的返回（不打印）。报告那几只测试都用它。"""
+    return analysis.summarize(frame_from(rows), path, verbose=False)
+
+
+# 三行：一冷一正常一热。关注 2 条，规则复核通过。
+REPORT_ROWS = [
+    ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+    ("2026-09-22 20:30:05", 25.0, 60.0, "正常"),
+    ("2026-09-22 20:30:10", 31.0, 78.0, "偏热"),
+]
+STAMP = "2026-01-02 03:04:05"
+
+
+class TestEsc(unittest.TestCase):
+    """要插进 HTML 的文本一律转义 —— summary 里的字符串全都来自 CSV。"""
+
+    def test_尖括号被转义(self):
+        self.assertEqual(
+            analysis._esc("<script>alert(1)</script>"),
+            "&lt;script&gt;alert(1)&lt;/script&gt;",
+        )
+
+    def test_引号和与号被转义(self):
+        self.assertEqual(analysis._esc('a"b&c'), "a&quot;b&amp;c")
+
+    def test_None打成破折号而不是None(self):
+        self.assertEqual(analysis._esc(None), "—")
+
+    def test_数字也能进来(self):
+        self.assertEqual(analysis._esc(31.0), "31.0")
+
+
+class TestFormatHelpers(unittest.TestCase):
+    """占比和范围只有一份实现，Markdown 报告和 HTML 报告共用。"""
+
+    def test_占比一位小数(self):
+        self.assertEqual(analysis.format_percent(1, 4), "25.0%")
+        self.assertEqual(analysis.format_percent(1, 3), "33.3%")
+
+    def test_没有记录时给破折号而不是nan(self):
+        self.assertEqual(analysis.format_percent(0, 0), "—")
+
+    def test_范围首尾相同只打一个(self):
+        summary = {"time_first": "2026-09-22 20:30:00",
+                   "time_last": "2026-09-22 20:30:00"}
+        self.assertEqual(analysis.format_range(summary), "2026-09-22 20:30:00")
+
+    def test_范围两头都在(self):
+        summary = {"time_first": "2026-09-22 20:30:00",
+                   "time_last": "2026-09-22 20:30:55"}
+        self.assertEqual(analysis.format_range(summary),
+                         "2026-09-22 20:30:00 ~ 2026-09-22 20:30:55")
+
+    def test_范围空的时候给一句人话(self):
+        self.assertEqual(analysis.format_range({"time_first": "", "time_last": ""}),
+                         "（没有记录）")
+
+
+class TestHtmlTable(unittest.TestCase):
+    def test_表头和数据都在(self):
+        text = analysis._html_table(["时间", "状态"], [["t1", "偏冷"]])
+        self.assertIn("<th>时间</th>", text)
+        self.assertIn("<td>偏冷</td>", text)
+        self.assertTrue(text.startswith("<table>"))
+        self.assertTrue(text.endswith("</table>"))
+
+    def test_右对齐列是数字列(self):
+        text = analysis._html_table(["a", "b"], [["x", "1"]], right=(1,))
+        self.assertIn('<th class="num">b</th>', text)
+        self.assertIn('<td class="num">1</td>', text)
+
+    def test_空表给占位并跨满整行(self):
+        text = analysis._html_table(["a", "b", "c"], [])
+        self.assertIn('colspan="3"', text)
+        self.assertIn("（没有记录）", text)
+
+    def test_单元格里的尖括号被转义(self):
+        text = analysis._html_table(["h"], [["<b>粗</b>"]])
+        self.assertNotIn("<b>", text)
+        self.assertIn("&lt;b&gt;", text)
+
+
+class TestTableSection(unittest.TestCase):
+    """给后面「事件复盘 / 今日摘要 / ML 异常分析」预留的拼装方式。"""
+
+    def test_就是标题加一张表(self):
+        item = analysis.table_section("事件复盘", ["时间", "事件"],
+                                     [["2026-09-22 20:30", "开门"]])
+        self.assertEqual(sorted(item), ["html", "title"])
+        self.assertEqual(item["title"], "事件复盘")
+        self.assertIn("<table>", item["html"])
+        self.assertIn("开门", item["html"])
+
+    def test_表头和数据里的尖括号都被转义(self):
+        item = analysis.table_section("<b>标题</b>", ["<i>h</i>"], [["<u>x</u>"]])
+        self.assertNotIn("<i>", item["html"])
+        self.assertNotIn("<u>", item["html"])
+
+
+class TestBuildReport(unittest.TestCase):
+    def setUp(self):
+        self.summary = summary_from(REPORT_ROWS, Path("data/dormmate.csv"))
+        self.html = analysis.build_report(self.summary, generated_at=STAMP)
+
+    def test_是一份完整的HTML文档(self):
+        self.assertTrue(self.html.startswith("<!DOCTYPE html>"))
+        self.assertIn('<html lang="zh-CN">', self.html)
+        self.assertIn('<meta charset="utf-8">', self.html)
+        self.assertTrue(self.html.rstrip().endswith("</html>"))
+
+    def test_抬头有生成时间数据来源和范围(self):
+        self.assertIn(f"生成时间：{STAMP}", self.html)
+        self.assertIn("dormmate.csv", self.html)          # 文件名
+        self.assertIn("data", self.html)                  # 完整路径也留着
+        self.assertIn("2026-09-22 20:30:00 ~ 2026-09-22 20:30:10", self.html)
+
+    def test_生成时间不传就用当前时间(self):
+        html = analysis.build_report(self.summary)
+        self.assertIn(datetime.now().strftime("%Y-%m-%d %H:%M"), html)
+
+    def test_摘要的数字全部来自summary(self):
+        for text in ("31", "16", "78", "60"):
+            with self.subTest(value=text):
+                self.assertIn(text, self.html)
+        # 记录数在卡片里，跟着数据走
+        self.assertIn('记录数</span><span class="value">3 ', self.html)
+
+    def test_数据换了报告里的数字跟着换(self):
+        other = analysis.build_report(
+            summary_from([("2026-09-22 21:00:00", 20.0, 50.0, "正常")]),
+            generated_at=STAMP,
+        )
+        self.assertIn('记录数</span><span class="value">1 ', other)
+        self.assertNotIn(">31<", other)     # 上一份里的温度最高值不该出现
+        self.assertIn("20", other)
+
+    def test_各状态的条数和占比(self):
+        # 3 条里每种出现的状态各 1 条 = 33.3%，没出现的偏湿是 0 条。
+        # 只数单元格里的 ">33.3%<"：同一个数字在分布条的 style="width:33.3%"
+        # 里还会出现一次，直接数 "33.3%" 会数出双份。
+        self.assertEqual(self.html.count(">33.3%<"), 3)
+        self.assertIn('<td class="num">0</td>', self.html)
+        self.assertIn("0.0%", self.html)
+        self.assertIn("合计", self.html)
+        self.assertIn("100.0%", self.html)
+
+    def test_占比跟着条数变(self):
+        # 4 条里 3 条偏冷 = 75.0%，不是写死的 25%
+        html = analysis.build_report(summary_from([
+            ("2026-09-22 20:30:00", 16.0, 60.0, "偏冷"),
+            ("2026-09-22 20:30:05", 17.0, 60.0, "偏冷"),
+            ("2026-09-22 20:30:10", 16.5, 60.0, "偏冷"),
+            ("2026-09-22 20:30:15", 25.0, 60.0, "正常"),
+        ]), generated_at=STAMP)
+        self.assertIn("75.0%", html)
+        self.assertIn("25.0%", html)
+
+    def test_关注表格只列不是正常的(self):
+        self.assertIn("20:30:00", self.html)      # 偏冷，要列
+        self.assertIn("20:30:10", self.html)      # 偏热，要列
+        self.assertNotIn("20:30:05", self.html)   # 正常，不该出现
+        self.assertIn("共 2 条", self.html)
+
+    def test_没有要关注的记录时说清楚(self):
+        html = analysis.build_report(
+            summary_from([("2026-09-22 20:30:00", 25.0, 60.0, "正常")]),
+            generated_at=STAMP,
+        )
+        self.assertIn("没有，全部是「正常」", html)
+        self.assertIn("共 0 条", html)
+
+    def test_趋势图用相对路径(self):
+        # 报告要能整个 report/ 目录拷走，绝对路径到别人机器上就是断图
+        self.assertIn('<img src="trend.png"', self.html)
+
+    def test_图不在时给一句占位而不是断图(self):
+        folder = Path(tempfile.mkdtemp())
+        html = analysis.build_report(self.summary, generated_at=STAMP,
+                                     trend_path=folder / "不存在.png")
+        self.assertNotIn("<img", html)
+        self.assertIn("没有 trend.png", html)
+
+    def test_图在旁边时就是img(self):
+        folder = Path(tempfile.mkdtemp())
+        (folder / analysis.TREND_FILE).write_bytes(PNG_MAGIC)
+        html = analysis.build_report(self.summary, generated_at=STAMP,
+                                     trend_path=folder / analysis.TREND_FILE)
+        self.assertIn('<img src="trend.png"', html)
+
+    def test_规则不一致时最上面有横幅(self):
+        # 31/80 按规则是偏热，CSV 里写成偏湿 —— 规则没同步
+        html = analysis.build_report(summary_from([
+            ("2026-09-22 20:30:00", 31.0, 80.0, "偏湿"),
+        ]), generated_at=STAMP)
+        self.assertIn("规则复核没通过", html)
+        self.assertIn("shared/rules.js", html)
+        self.assertIn("status_rules.py", html)
+
+    def test_规则一致时没有横幅(self):
+        self.assertNotIn("规则复核没通过", self.html)
+
+    def test_空数据也能出一份报告(self):
+        html = analysis.build_report(summary_from([]), generated_at=STAMP)
+        self.assertIn("（没有记录）", html)
+        self.assertNotIn("nan%", html)
+        self.assertNotIn("None", html)       # 极值是 None，要打成「—」
+
+    def test_不改传进来的summary(self):
+        before = json.dumps(self.summary, ensure_ascii=False, sort_keys=True)
+        analysis.build_report(self.summary, [analysis.table_section("x", ["a"], [["1"]])],
+                              generated_at=STAMP)
+        self.assertEqual(
+            json.dumps(self.summary, ensure_ascii=False, sort_keys=True), before)
+
+    def test_额外区块按顺序接在趋势图后面(self):
+        html = analysis.build_report(self.summary, [
+            analysis.table_section("事件复盘", ["时间", "事件"], [["20:30", "开门"]]),
+            {"title": "今日摘要", "html": "<p>一句话</p>"},
+        ], generated_at=STAMP)
+        self.assertLess(html.index("趋势图"), html.index("事件复盘"))
+        self.assertLess(html.index("事件复盘"), html.index("今日摘要"))
+        self.assertIn("<p>一句话</p>", html)
+
+    def test_区块标题被转义而内容是原样插入的(self):
+        # title 是纯文本（转义），html 是我们自己拼的（原样）
+        html = analysis.build_report(
+            self.summary,
+            [{"title": "<b>标题</b>", "html": "<p class='x'>正文</p>"}],
+            generated_at=STAMP,
+        )
+        self.assertIn("&lt;b&gt;标题&lt;/b&gt;", html)
+        self.assertIn("<p class='x'>正文</p>", html)
+
+    def test_没有额外区块时不凭空多出东西(self):
+        self.assertEqual(self.html.count("<section>"), 3)
+
+    def test_CSV里的怪值不会撑破页面(self):
+        html = analysis.build_report(summary_from([
+            ("<script>alert(1)</script>", 31.0, 80.0, "偏湿"),
+        ]), generated_at=STAMP)
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+
+class TestWriteReport(unittest.TestCase):
+    def setUp(self):
+        self.summary = summary_from(REPORT_ROWS)
+        self.folder = Path(tempfile.mkdtemp())
+
+    def test_目录不存在会自动建(self):
+        out = self.folder / "深" / "几层" / "report.html"
+        self.assertEqual(analysis.write_report(self.summary, out, generated_at=STAMP), out)
+        self.assertTrue(out.is_file())
+
+    def test_写出来的内容和build_report一致(self):
+        out = self.folder / "report.html"
+        analysis.write_report(self.summary, out, generated_at=STAMP)
+        # 趋势图那处要对齐：write_report 找的是【报告旁边】那张图，
+        # 所以比对时也得把 trend_path 指到同一个临时目录，不然比的是两份
+        # 不同的东西（一个 <img>、一个占位）
+        self.assertEqual(
+            out.read_text(encoding="utf-8"),
+            analysis.build_report(self.summary, generated_at=STAMP,
+                                  trend_path=self.folder / analysis.TREND_FILE),
+        )
+
+    def test_是LF换行不是CRLF(self):
+        out = self.folder / "report.html"
+        analysis.write_report(self.summary, out, generated_at=STAMP)
+        self.assertNotIn(b"\r\n", out.read_bytes())
+
+    def test_是UTF8不带BOM(self):
+        out = self.folder / "report.html"
+        analysis.write_report(self.summary, out, generated_at=STAMP)
+        raw = out.read_bytes()
+        self.assertFalse(raw.startswith(BOM.encode("utf-8")))
+        self.assertIn("宿舍环境报告", raw.decode("utf-8"))
+
+    def test_默认路径和趋势图在同一个目录(self):
+        self.assertEqual(analysis.DEFAULT_REPORT_HTML.name, "report.html")
+        self.assertEqual(analysis.DEFAULT_REPORT_HTML.parent,
+                         analysis.DEFAULT_TREND.parent)
+
+    def test_按报告所在目录找趋势图(self):
+        # 图应该找在报告旁边那一张，不是项目里那张
+        out = self.folder / "report.html"
+        analysis.write_report(self.summary, out, generated_at=STAMP)
+        self.assertIn("没有 trend.png", out.read_text(encoding="utf-8"))
+
+
+class TestPrintHelpers(unittest.TestCase):
+    """表格是按显示宽度补空格的：中文算 2 列，否则终端里表格是歪的。"""
+
+    def test_中文按两列算(self):
+        self.assertEqual(analysis._width("偏冷"), 4)
+        self.assertEqual(analysis._width("abc"), 3)
+        self.assertEqual(analysis._width("a偏"), 3)
+
+    def test_补空格按显示宽度(self):
+        self.assertEqual(analysis._width(analysis._pad("偏冷", 6)), 6)
+        self.assertEqual(analysis._width(analysis._rpad("3", 6)), 6)
+
+    def test_右对齐是往左边补(self):
+        self.assertEqual(analysis._rpad("3", 4), "   3")
+
+    def test_列宽取最宽的那个(self):
+        rows = [["状态", "条数"], ["偏冷", "3"]]
+        self.assertEqual(analysis._widths(rows), [4, 4])
+
+    def test_数字格式化(self):
+        self.assertEqual(analysis._num(31.0), "31")      # 不拖没用的 .0
+        self.assertEqual(analysis._num(25.5), "25.5")
+        self.assertEqual(analysis._num(None), "—")       # 缺失不打印 "None"
+
+    def test_空单元格转成空串而不是nan(self):
+        self.assertEqual(analysis._clean(float("nan")), "")
+        self.assertEqual(analysis._clean("  偏热  "), "偏热")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
