@@ -1,0 +1,11 @@
+# 装的时候要用 64 位解释器：
+#     py -3.14 -m pip install -r requirements.txt
+#
+# 为什么强调 64 位：pandas 和 matplotlib 早就不发布 32 位 Windows 包了。
+# PATH 上的 python 是 32 位的，在它上面 pip install pandas 会去找源码包，
+# 然后因为缺少 MSVC 编译环境失败。64 位的那个解释器（C:\Program Files\Python314）
+# 有现成的 wheel，直接装就行。
+
+paho-mqtt>=2.0
+pandas>=2.2
+matplotlib>=3.8

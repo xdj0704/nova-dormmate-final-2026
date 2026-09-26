@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DormMate 宿舍环境监测</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div>
+      <h1>DormMate 宿舍环境监测</h1>
+      <p class="sub">多节点宿舍环境助手 · M1 单节点实时链路</p>
+    </div>
+    <div class="top-actions">
+      <span id="conn" class="conn conn--pending">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="conn-text">连接中…</span>
+      </span>
+      <button id="theme" class="ghost" type="button">深色</button>
+    </div>
+  </header>
+
+  <p class="meta">
+    Broker <code id="broker-label">ws://localhost:9001</code>
+    · 订阅 <code id="topic-label">dormmate/+/env</code>
+  </p>
+
+  <section class="panel">
+    <h2>手动录入分析</h2>
+    <form id="manual-form" class="manual" novalidate>
+      <div class="field">
+        <label for="temp-input">温度（℃）</label>
+        <input id="temp-input" type="text" inputmode="decimal"
+               autocomplete="off" placeholder="-20 ~ 60">
+      </div>
+      <div class="field">
+        <label for="hum-input">湿度（%）</label>
+        <input id="hum-input" type="text" inputmode="decimal"
+               autocomplete="off" placeholder="0 ~ 100">
+      </div>
+      <button class="primary" type="submit">分析</button>
+    </form>
+    <p id="manual-error" class="form-error" role="alert"></p>
+    <div id="manual-result" class="manual-result" hidden></div>
+
+    <div class="history">
+      <div class="history-head">
+        <h3>录入历史 <span id="history-count" class="count"></span></h3>
+        <div class="head-actions">
+          <span id="export-note" class="note" role="status"></span>
+          <button id="export" class="ghost" type="button">导出 CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th class="num">温度 ℃</th>
+              <th class="num">湿度 %</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody id="history-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="cards" class="cards" aria-live="polite"></section>
+
+  <div id="empty" class="empty">
+    等待数据…
+    <span>请确认 Mosquitto 已启动，且 <code>simulator.py</code> 正在发布。</span>
+  </div>
+
+  <section class="log">
+    <div class="log-head">
+      <h2>最近消息 <span id="log-count" class="count"></span></h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>节点</th>
+            <th class="num">温度 ℃</th>
+            <th class="num">湿度 %</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="foot">
+    状态判定规则（按顺序，命中即停）：<code>&lt;18</code> 偏冷 →
+    <code>≥30</code> 偏热 → <code>湿度 ≥75</code> 偏湿 → 正常
+  </footer>
+
+</div>
+
+<script src="vendor/mqtt.min.js"></script>
+<script src="../shared/rules.js"></script>
+<script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,488 @@
+/* DormMate 看板样式
+   颜色以角色（role）命名，深浅色只在这里切换，下面各组件只引用角色。 */
+
+:root {
+  color-scheme: light;
+
+  /* 版面与墨色 */
+  --page:           #f9f9f7;
+  --surface-1:      #fcfcfb;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --hairline:       #e1e0d9;
+  --border:         rgba(11, 11, 11, 0.10);
+  --focus:          #2a78d6;   /* 输入框聚焦环，纯 UI 用色，不代表任何状态 */
+
+  /* 状态色：固定四档，不随主题变化，永远配图标 + 文字，不靠颜色单独表意 */
+  --status-good:     #0ca30c;  /* 正常 */
+  --status-warning:  #fab219;  /* 偏冷 */
+  --status-serious:  #ec835a;  /* 偏湿 */
+  --status-critical: #d03b3b;  /* 偏热 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --hairline:       #2c2c2a;
+    --border:         rgba(255, 255, 255, 0.10);
+    --focus:          #3987e5;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:           #0d0d0d;
+  --surface-1:      #1a1a19;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --hairline:       #2c2c2a;
+  --border:         rgba(255, 255, 255, 0.10);
+  --focus:          #3987e5;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+code {
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  font-size: 0.9em;
+  color: var(--text-secondary);
+}
+
+/* ---------- 顶栏 ---------- */
+
+.top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.sub {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ghost {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ghost:hover { color: var(--text-primary); }
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-1);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-warning);
+}
+
+.conn--on  .conn-dot { background: var(--status-good); }
+.conn--off .conn-dot { background: var(--status-critical); }
+
+.meta {
+  margin: 16px 0 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.meta code { color: var(--text-secondary); }
+
+/* ---------- 手动录入 ---------- */
+
+.panel { margin-bottom: 28px; }
+
+.manual {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field label {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.field input {
+  width: 148px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+}
+
+.field input::placeholder { color: var(--text-muted); }
+
+.field input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.primary {
+  padding: 8px 18px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--text-primary);
+  color: var(--surface-1);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary:hover { opacity: 0.88; }
+
+.primary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* 保留 min-height，出错时不会把下面内容顶下去 */
+.form-error {
+  margin: 10px 0 0;
+  min-height: 18px;
+  color: var(--status-critical);
+  font-size: 13px;
+}
+
+/* 结果区：按状态带不同的 is-* class，卡片的颜色从这里的 --c 继承 */
+.manual-result {
+  --c: var(--text-muted);   /* 还没出结果时的兜底 */
+  margin-top: 4px;
+  max-width: 420px;
+}
+
+.manual-result .card {
+  border-color: color-mix(in oklab, var(--c) 45%, transparent);
+  background: color-mix(in oklab, var(--c) 8%, var(--surface-1));
+}
+
+.advice {
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* ---------- 录入历史 ---------- */
+
+.history { margin-top: 26px; }
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.history-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 记录条数不设上限，但页面不能跟着无限变长：表格内部滚动，表头吸顶 */
+.history .table-wrap {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.history thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+}
+
+/* 一条记录都没有时的占位行 */
+.history-empty {
+  padding: 26px 16px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ---------- 节点卡片 ---------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  --c: var(--text-muted);   /* 未识别状态时的兜底 */
+  padding: 18px 20px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-1);
+}
+
+.card--fresh { animation: fresh 700ms ease-out; }
+
+@keyframes fresh {
+  from { box-shadow: 0 0 0 2px color-mix(in oklab, var(--c) 45%, transparent); }
+  to   { box-shadow: 0 0 0 2px transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card--fresh { animation: none; }
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.node-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 徽章：底色是状态色的浅色调，文字用墨色保证可读，颜色只是辅助 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid color-mix(in oklab, var(--c) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--c) 14%, transparent);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge svg { display: block; color: var(--c); }
+
+.tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.tile-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tile-value {
+  margin-top: 2px;
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+
+.tile-unit {
+  margin-left: 2px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.card-foot {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* 状态色绑定 */
+.is-good     { --c: var(--status-good); }
+.is-warning  { --c: var(--status-warning); }
+.is-serious  { --c: var(--status-serious); }
+.is-critical { --c: var(--status-critical); }
+.is-unknown  { --c: var(--text-muted); }
+
+/* ---------- 空状态 ---------- */
+
+.empty {
+  display: none;
+  padding: 40px 20px;
+  border: 1px dashed var(--hairline);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-size: 14px;
+}
+
+.empty.is-shown { display: block; }
+
+.empty span {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ---------- 最近消息表 ---------- */
+
+.log { margin-top: 36px; }
+
+h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.log-head h2 { margin: 0; }
+
+.count {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* 标题右侧的按钮组，.log-head / .history-head 共用 */
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.note {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-1);
+  overflow: hidden;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 9px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+}
+
+th {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+td {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+/* 成列的数字才对得齐 */
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+td.time { font-variant-numeric: tabular-nums; }
+
+td .mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+td .mini svg { display: block; color: var(--c); width: 12px; height: 12px; }
+
+.foot {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 12px;
+}
