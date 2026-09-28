@@ -269,6 +269,62 @@ h1 {
   text-align: center;
 }
 
+/* ---------- 语音指令 ---------- */
+
+.voice-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* 正在收音：按钮换个说法（文字由 JS 改），再套一圈聚焦环。
+   用 --focus 不用状态色 —— 那四档状态色是留给环境 status 的，
+   「正在听」不是一种环境状态，借来用会让人以为页面在报警。 */
+.primary.is-listening {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.voice-stage {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.voice-box {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-1);
+}
+
+.voice-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* overflow-wrap 是给没有空格的长串兜底的：识别结果偶尔会是一长串
+   英文或数字，不换行会把这块撑宽、把并排的另一块挤扁 */
+.voice-text {
+  margin: 6px 0 0;
+  min-height: 22px;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 占位文案（还没说话 / 还没执行过）弱化，和真结果区分开 */
+.voice-text.is-placeholder { color: var(--text-muted); }
+
+.voice-hint {
+  margin: 14px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 /* ---------- 现场快照 ---------- */
 
 .camera-actions {

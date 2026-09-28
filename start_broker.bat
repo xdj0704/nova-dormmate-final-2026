@@ -1,7 +1,11 @@
 @echo off
-chcp 65001 >nul
-REM å¯åŠ¨æœ¬æœº Mosquittoï¼š1883(TCP) + 9001(WebSocket)
-REM è‹¥æç¤ºæ‰¾ä¸åˆ° mosquittoï¼Œå…ˆå®‰è£…ï¼šwinget install --id EclipseFoundation.Mosquitto -e
+REM ±¾ÎÄ¼ş±ØĞëÊÇ GBK ±àÂë + CRLF ĞĞÎ²£¬ÇÒ¿ÌÒâ²»Ğ´ chcp 65001¡£
+REM Ô­Òò£ºcmd.exe °´×Ö½Ú×·×Ù×Ô¼ºÔÚÅú´¦ÀíÀïµÄÎ»ÖÃ¡£ÎÄ¼ş±àÂëºÍ¿ØÖÆÌ¨
+REM ´úÂëÒ³²»Ò»ÖÂ£¬»òÖĞÍ¾ chcp ÇĞ´úÂëÒ³£¬¶¼»áÈÃËü°ÑºóÃæµÄĞĞÅü¿ª ¡ª¡ª
+REM Ö¢×´ÊÇ REM ±ä³É EM¡¢netsh ÄÇĞĞ±»½Ø³ÉÁ½½Ø£¬±¨Ò»´®"²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî"¡£
+REM Êµ²âÓÃ UTF-8 + chcp 65001 + LF Ê±£¬Èı¸ö .bat ¸÷ÓĞ 6/6/2 ´¦½âÎö´íÎó¡£
+REM Æô¶¯±¾»ú Mosquitto£º1883(TCP) + 9001(WebSocket)
+REM ÈôÌáÊ¾ÕÒ²»µ½ mosquitto£¬ÏÈ°²×°£ºwinget install --id EclipseFoundation.Mosquitto -e
 cd /d "%~dp0"
 mosquitto -c mosquitto\dormmate.conf -v
 pause

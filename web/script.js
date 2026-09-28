@@ -91,6 +91,11 @@ const el = {
   camImage: document.getElementById('cam-image'),
   camShotHint: document.getElementById('cam-shot-hint'),
   camCaption: document.getElementById('cam-caption'),
+  voiceStart: document.getElementById('voice-start'),
+  voiceNote: document.getElementById('voice-note'),
+  voiceError: document.getElementById('voice-error'),
+  voiceHeard: document.getElementById('voice-heard'),
+  voiceAction: document.getElementById('voice-action'),
 };
 
 function esc(value) {
@@ -613,6 +618,180 @@ function takeSnapshot() {
   return { ok: true, message: `已拍照，${time}` };
 }
 
+/* ---------- 语音指令（Step 3-2） ----------
+
+   用浏览器自带的 SpeechRecognition（Chrome / Edge 上带 webkit 前缀）。
+   每次点击只识别一句：continuous = false，拿到结果或出错都让它结束。
+   不做连续听 —— 连续模式下"一句话说完了"由引擎自己判断，教室里一吵
+   就会把旁边的闲聊也识别进来。 */
+
+const VOICE_LANG = 'zh-CN';
+
+/* 非空就表示"正在听"。用来挡住重复点击 —— 连点两次会走到 start() 抛
+   InvalidStateError，比直接忽略第二次点击难解释得多。 */
+let recognition = null;
+
+/* 固定指令。用「包含」判断而不是整句相等：识别引擎会把标点和语气词
+   一起吐出来（"朗读一下。"、"帮我拍张照"），整句比对永远匹配不上。
+   数组顺序就是判断顺序，第一条命中的赢 —— 说"朗读并且拍照"会走朗读。 */
+const VOICE_COMMANDS = [
+  { keyword: '朗读', run: speakStatus },
+  { keyword: '拍照', run: takeSnapshot },
+];
+
+/* 错误码 -> 人话。注意这张表只能"加一句解释"，不能拿它替掉错误码：
+   表里没有的码（浏览器各版本一直在加新的）也得照样显示出来。 */
+const VOICE_ERRORS = {
+  'not-allowed': '麦克风权限被拒绝了。点地址栏左边的图标，把「麦克风」改成「允许」，然后重试。',
+  'service-not-allowed': '浏览器拒绝了语音识别服务（策略限制，或当前不是安全上下文）。',
+  'audio-capture': '没找到麦克风。确认设备接好了、没被别的程序占用，然后重试。',
+  'no-speech': '没听到声音。靠近麦克风、说大声一点再试。',
+  network: '连不上语音识别服务（network）。Chrome 是把录音传到服务器上识别的，断网或代理拦截都会这样。',
+  aborted: '识别被中断了。再点一次「语音指令」重试。',
+  'language-not-supported': '识别服务不支持 zh-CN。',
+};
+
+function speechRecognitionCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+/* 原始的 event.error 一定写在最前面：解释文案可能对不上，错误码不会骗人。 */
+function voiceErrorMessage(code) {
+  const name = code || 'unknown';
+  const hint = VOICE_ERRORS[name];
+  return hint ? `语音识别出错（${name}）：${hint}` : `语音识别出错（${name}）`;
+}
+
+function setVoiceError(text) { if (el.voiceError) el.voiceError.textContent = text; }
+function setVoiceNote(text) { if (el.voiceNote) el.voiceNote.textContent = text; }
+
+/* 两个结果区。isPlaceholder 由调用方明确传进来，决定用弱色还是正常墨色 ——
+   不去比较文本内容猜"这是不是占位文案"，那样迟早会被真结果撞上。 */
+function setVoiceHeard(text, isPlaceholder = false) {
+  if (!el.voiceHeard) return;
+  el.voiceHeard.textContent = text;
+  el.voiceHeard.classList.toggle('is-placeholder', isPlaceholder);
+}
+
+function setVoiceAction(text, isPlaceholder = false) {
+  if (!el.voiceAction) return;
+  el.voiceAction.textContent = text;
+  el.voiceAction.classList.toggle('is-placeholder', isPlaceholder);
+}
+
+/* 占位：Step 3-3 在这里接语音合成，把下面这段念出来。
+   现在先打到控制台，好确认取到的是哪几个节点。 */
+function speakStatus() {
+  const lines = [...nodes.entries()].sort().map(
+    ([id, p]) => `${id} ${fmt(p.temperature)}℃ ${fmt(p.humidity)}% ${p.status}`,
+  );
+  const text = lines.length ? lines.join('；') : '还没有收到任何节点的数据';
+  console.log('[DormMate] speakStatus() 占位输出：', text);
+  return { ok: true, message: '朗读还没实现（Step 3-3），内容已打到控制台' };
+}
+
+/* 把识别到的文字派发给固定指令。
+   命令自己返回 {ok, message}，这里只负责显示 —— 成功还是失败是命令
+   自己的事，路由层不替它判断。 */
+function handleVoiceText(text) {
+  const heard = String(text || '').trim();
+  setVoiceHeard(heard, false);
+
+  if (!heard) {
+    setVoiceAction('没识别到内容，再说一次', true);
+    return;
+  }
+
+  const cmd = VOICE_COMMANDS.find((c) => heard.includes(c.keyword));
+  if (!cmd) {
+    setVoiceAction(`未识别的指令：${heard}`, false);
+    return;
+  }
+
+  const outcome = cmd.run();
+  if (outcome && outcome.message) setVoiceAction(outcome.message, false);
+  else setVoiceAction(`已执行「${cmd.keyword}」`, true);
+}
+
+function resetVoiceButton() {
+  if (!el.voiceStart) return;
+  el.voiceStart.textContent = '语音指令';
+  el.voiceStart.classList.remove('is-listening');
+}
+
+function startVoiceCommand() {
+  const Ctor = speechRecognitionCtor();
+  if (!Ctor) {
+    setVoiceError(
+      '这个浏览器不支持语音识别（window.SpeechRecognition 不存在）。换新版 Chrome / Edge。',
+    );
+    return;
+  }
+  if (recognition) return;   // 正在听，忽略这次点击
+
+  setVoiceError('');
+  setVoiceNote('请说指令…');
+
+  const rec = new Ctor();
+  rec.lang = VOICE_LANG;        // 中文
+  rec.continuous = false;       // 只识别一句，说完就结束
+  rec.interimResults = false;   // 只要最终结果，不要边听边变的中间稿
+
+  recognition = rec;
+
+  rec.onstart = () => {
+    if (el.voiceStart) {
+      el.voiceStart.textContent = '正在听…';
+      el.voiceStart.classList.add('is-listening');
+    }
+    setVoiceNote('正在收音…');
+  };
+
+  rec.onresult = (event) => {
+    /* results 是个列表，每项带 isFinal。interimResults=false 时通常只有
+       一条 final，但别假设只有一条 —— 全拼起来更稳。 */
+    let text = '';
+    for (let i = event.resultIndex || 0; i < event.results.length; i++) {
+      text += event.results[i][0].transcript;
+    }
+    handleVoiceText(text);
+  };
+
+  rec.onerror = (event) => {
+    setVoiceError(voiceErrorMessage(event && event.error));
+  };
+
+  rec.onend = () => {
+    recognition = null;
+    resetVoiceButton();
+    setVoiceNote('');
+  };
+
+  try {
+    rec.start();
+  } catch (err) {
+    /* 正常走不到这里（上面已经挡住重复点击），兜个底：别让异常冒出去，
+       把按钮永远卡在"正在听"。 */
+    recognition = null;
+    resetVoiceButton();
+    setVoiceError(`启动语音识别失败：${(err && err.message) || err}`);
+  }
+}
+
+/* 离开页面时把还在听的会话掐掉，别让麦克风一直开着 */
+function stopVoiceCommand() {
+  if (!recognition) return;
+  /* 主动 abort 也会触发 onerror（error === 'aborted'），但那是我们自己
+     干的，不该当成错误显示给用户，所以先把回调摘掉再中止。 */
+  recognition.onerror = null;
+  try {
+    recognition.abort();
+  } catch (err) {
+    console.warn('[DormMate] 中止语音识别时出错：', err);
+  }
+  recognition = null;
+}
+
 /* ---------- 数据校验（MQTT 侧） ---------- */
 
 function normalize(raw, topicNodeId) {
@@ -754,6 +933,15 @@ if (el.camOpen) {
   /* 离开页面（关标签、手机切走被回收）时把摄像头关掉。
      用 pagehide 不用 beforeunload：移动端 Safari 常常不触发后者。 */
   window.addEventListener('pagehide', closeCamera);
+}
+
+/* 语音指令。和上面两块一样先判存在性。 */
+if (el.voiceStart) {
+  el.voiceStart.addEventListener('click', startVoiceCommand);
+
+  /* 离开页面时中止会话 —— 和摄像头一样，不收拾的话麦克风会一直开着。
+     两条 pagehide 是分开注册的，互不影响。 */
+  window.addEventListener('pagehide', stopVoiceCommand);
 }
 
 /* ---------- 启动 ---------- */

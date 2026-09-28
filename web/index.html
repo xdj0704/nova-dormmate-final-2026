@@ -70,6 +70,31 @@
     </div>
   </section>
 
+  <section class="panel voice">
+    <h2>语音指令</h2>
+    <div class="voice-actions">
+      <button id="voice-start" class="primary" type="button">语音指令</button>
+      <span id="voice-note" class="note" role="status"></span>
+    </div>
+    <p id="voice-error" class="form-error" role="alert"></p>
+
+    <div class="voice-stage">
+      <div class="voice-box">
+        <div class="voice-label">识别到的文字</div>
+        <!-- 起手带 is-placeholder：占位文案用弱色，认出真结果后 JS 把它摘掉 -->
+        <p id="voice-heard" class="voice-text is-placeholder">点「语音指令」开始说话</p>
+      </div>
+      <div class="voice-box">
+        <div class="voice-label">执行结果</div>
+        <p id="voice-action" class="voice-text is-placeholder">还没有执行过指令</p>
+      </div>
+    </div>
+
+    <p class="voice-hint">
+      固定指令：说「朗读」播报当前状态 · 说「拍照」拍下现场画面 · 其余会提示未识别。
+    </p>
+  </section>
+
   <section class="panel camera">
     <h2>现场快照</h2>
     <div class="camera-actions">

@@ -1,13 +1,41 @@
 # DormMate Final · 多节点宿舍环境助手
 
-M1：单个宿舍（dorm-a）的环境数据从模拟器 → MQTT → 浏览器看板的完整实时链路。
-Step 2-2：网页导出的 CSV 交给 Python 读回来做基础统计。
-Step 3-1：看板加「现场快照」—— 摄像头预览 + 拍照。
+## 项目简介
+
+DormMate Final 是一个**宿舍环境监测助手**。它把宿舍的温湿度采集上来，经 MQTT 推到
+浏览器，实时显示成一块看板；看板上还能手动录入一组数据做即时分析、把记录导出成 CSV；
+再往后是给看板装上"眼睛"和"嘴"—— 现场拍照与语音指令。导出的 CSV 交给 Python 侧读回来，
+做规则复核、状态统计、趋势图和 HTML 报告，形成**采集 → 展示 → 导出 → 分析**的闭环。
+
+前端是**纯静态**的（不需要构建、不需要 CDN，`mqtt.min.js` 已本地化），
+后端只有本机一个 Mosquitto Broker，没有服务器程序、没有数据库。
+
+课程 Challenge 项目。**目前是单节点（`dorm-a`）**，多节点（`dorm-a` / `dorm-b` / `dorm-c`）
+是 M5 的目标。
+
+## 主要功能
+
+| 模块 | 状态 | 说明 |
+|---|---|---|
+| 实时看板 | ✅ 已完成（M1） | 通过 WebSocket 订阅 `dormmate/+/env`，每个节点一张卡片（温度 / 湿度 / 状态徽章）。状态用**颜色 + 图标**双重编码，不靠颜色单独表意；支持深 / 浅色主题 |
+| 手动录入分析 | ✅ 已完成 | 在页面上直接输入一组温湿度，前端按统一规则算出 status 并给出建议文案，带范围校验（温度 -20~60℃，湿度 0~100%） |
+| 录入历史 + 导出 CSV | ✅ 已完成 | 表内滚动、表头吸顶；导出为 CRLF 换行 + UTF-8 BOM，Excel / WPS 打开不乱码 |
+| Python 分析 | ✅ 已完成（Step 2-2~2-5） | 读 CSV → 规则复核 → 状态统计 → 出 `report/trend.png` 趋势图 → 出 `report/report.html`；支线还能渲染一份 Markdown 报告 |
+| 现场快照 | ✅ 已完成（Step 3-1） | 摄像头预览 + 一键拍照，快照显示在页面右侧，标明拍摄时间与分辨率 |
+| 语音指令（ASR） | ✅ 已完成（Step 3-2） | 说「朗读」播报当前状态、说「拍照」拍下现场画面，识别到的文字和执行结果显示在页面上 |
+| 语音播报（TTS） | ⏳ **待完成**（Step 3-3） | `speakStatus()` 目前只把要念的内容打到 Console，还没有真正念出来 |
+| 多节点 | ⏳ **待完成**（M5） | `dorm-b` / `dorm-c` 尚未启用，眼下只有 `dorm-a` 在发数据 |
+| Dashboard / 3D 看板 | ⏳ **待完成** | `shared/rules.js` 是按"看板 / Dashboard / 3D 共用一份规则"设计的，后两者还没开始 |
+
+每个模块的具体做法、测试条数和踩过的坑，记在下面各自的 Step 小节里。
+不清楚某处为什么这么写时，先看那一节的「几个决定」表格。
 
 ## 目录结构
 
 ```
-DormMate Final/
+nova-dormmate-final-2026/    # 仓库根
+├── README.md                # 本文档
+├── requirements.txt         # Python 依赖：paho-mqtt + pandas + matplotlib
 ├── status_rules.py          # 规则（Python 侧唯一实现，发布端算 status 用）
 ├── config.py                # Broker / 端口 / Topic / 节点 等统一配置
 ├── simulator.py             # M1 数据源：生成并发布环境数据
@@ -30,12 +58,12 @@ DormMate Final/
 │   ├── test_analysis.py     # analysis 读取、统计、趋势图与报告的测试（134 条，需要 pandas / matplotlib）
 │   ├── test_report.py       # 报告渲染的测试（30 条，需要 pandas）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
-│   └── script.test.js       # 前端回归测试（102 条，纯 Node 无依赖）
+│   └── script.test.js       # 前端回归测试（130 条，纯 Node 无依赖）
 ├── mosquitto/dormmate.conf  # Mosquitto 配置：1883(TCP) + 9001(WebSocket)
 ├── web/                     # 前端看板（纯静态，无需构建）
 │   ├── index.html
 │   ├── style.css
-│   ├── script.js            # 订阅渲染 + 手动录入 + 录入历史 + 导出 CSV + 现场快照
+│   ├── script.js            # 订阅渲染 + 手动录入 + 录入历史 + 导出 CSV + 现场快照 + 语音指令
 │   └── vendor/mqtt.min.js   # 本地化的 mqtt.js，不依赖 CDN
 ├── fixbom.py                # 把源码里误写的字面 BOM 换回可见转义
 ├── start_broker.bat         # 一键启动 Mosquitto
@@ -49,6 +77,45 @@ JS 侧 `shared/rules.js`。除此之外任何地方都不应该再出现 `temper
 Python 侧现在有两个 `judge_status`，但只有一份实现：`analysis/rules.py`
 是 `status_rules.compute_status` 的**转发**（`import ... as judge_status`），
 阈值也是从根模块借的，不存在第二组数字。
+
+## CSS 修改位置
+
+样式全在 `web/style.css`（609 行），**没有引入任何 CSS 框架，纯手写**，
+也没有预处理器 —— 改完存盘刷新即可，不需要构建。
+
+### 要改配色，只改文件开头这一处
+
+颜色全部以**角色**（role）命名，收在文件最前面的变量里，下面的组件只引用变量、
+不写具体色值。所以换主题不需要翻遍全文。
+
+| 位置 | 内容 |
+|---|---|
+| `:root`（第 4–22 行） | 版面与墨色：`--page` 页面底色、`--surface-1` 卡片底色、`--text-primary` / `--text-secondary` / `--text-muted` 三级文字、`--hairline` 分隔线、`--border` 描边、`--focus` 聚焦环 |
+| `:root` 里的四档状态色（第 18–21 行） | `--status-good` 正常 / `--status-warning` 偏冷 / `--status-serious` 偏湿 / `--status-critical` 偏热 |
+| `@media (prefers-color-scheme: dark)`（第 24–36 行） | 跟随系统的深色主题，**只重定义版面与墨色** |
+| `:root[data-theme="dark"]`（第 38–48 行） | 点右上角「深色」按钮后的手动主题，优先级高于系统设置 |
+
+⚠ 四档状态色**故意不随主题变化**（深色模式下也是同一组值），改的时候注意这点：
+它们代表的是环境状态，不是界面风格。
+
+### 分块位置
+
+每一块开头都有一行 `/* ---------- 名字 ---------- */` 注释，在编辑器里搜中文名就能跳过去：
+
+| 块 | 起始行 |
+|---|---|
+| 顶栏（标题 / 连接徽章 / 主题按钮） | 第 74 行 |
+| 手动录入表单 | 第 146 行 |
+| 录入历史表 | 第 234 行 |
+| 语音指令 | 第 272 行 |
+| 现场快照 | 第 328 行 |
+| 节点卡片 | 第 393 行 |
+| 空状态 | 第 493 行 |
+| 最近消息表 | 第 514 行 |
+
+状态色到具体 class 的绑定在第 486–491 行（`.is-good` / `.is-warning` / `.is-serious` /
+`.is-critical` / `.is-unknown`），卡片和徽章的底色 / 描边都从这里的 `--c` 继承下来 ——
+所以给一张卡片换状态色，只需要换它外层那个 class，不用碰卡片自己的规则。
 
 ## 统一约定
 
@@ -186,6 +253,24 @@ py -3.14 -m http.server 8000 --bind 0.0.0.0 --directory .
 
 Windows 上也可以用 `start_broker.bat` 和 `start_web.bat` 各点一下。
 
+**用 VS Code 的 Live Server 也行**：工作区打开项目根，右键 `web/index.html` →
+「Open with Live Server」，地址是 `http://127.0.0.1:5500/web/index.html`。
+
+根目录的要求和上面 `http.server` 那条**完全一样** —— Live Server 默认以**工作区根**
+为服务器根，`../shared/rules.js` 落在根之内，所以能取到。**不要把根设成 `web/`**，
+那样 `../` 越界，`rules.js` 404，手动录入点了没反应（症状和排查见上一节）。
+
+两个区别要知道：
+
+- Live Server 默认只绑 `127.0.0.1`（本机），**手机打不开**。要让别的设备访问，
+  还是得走上面那条 `--bind 0.0.0.0` 的命令，或者 `start_web.bat`。
+- 它带**保存即刷新**。而刷新会清空「录入历史」（见「已知限制」），所以演示时
+  改完文件记得先回页面上点一次「导出 CSV」。
+
+端口是 5500 不影响任何东西：`127.0.0.1` 和 `localhost` 一样算安全上下文，
+所以摄像头和语音指令照常能用；看板的 Broker 地址按 `location.hostname` 算出来
+仍是 `ws://127.0.0.1:9001`，不是写死的端口。
+
 ## 让手机 / 别的电脑打开看板
 
 三个端口里，只有 1883 本来就绑在 `0.0.0.0`（M5 多节点要用），
@@ -256,7 +341,7 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 ```bash
 py -3.14 -m unittest discover -s tests -t . -v   # ①②③ Python 侧，共 186 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
-node tests/script.test.js                         # ⑤ 页面 JS 侧，102 条
+node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ```
 
 `unittest discover` 会把 `tests/` 下三个 `test_*.py` 一起收进来
@@ -273,7 +358,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，102 条
 | ② 134 条 | `analysis/rules.py` 是转发而非第二份实现（`assertIs` 直接比函数对象）、路径按项目根推导、CSV 读取（BOM / 缺列 / 缺文件 / 只有表头）、统计值、样例数据的 status 与规则一致；Step 2-3 的 `rule_status` 重算、不一致行识别（含温湿度缺失不能算成「正常」）、状态计数、关注列表、`summary` 的键与 JSON 可序列化、时间范围、`verbose=False`、表格的中文列宽；Step 2-4 的趋势数据整理（排序 / 跳过的行 / 缺失留 nan）、横轴时间格式、字体列表、写出的确实是 PNG、目录自动创建、空表也出图、画完不留下没关的 figure、横轴跨度为 0 时不刷警告；Step 2-5 的 HTML 转义（`<script>` 撑不破页面）、表格拼装、数字全部来自 summary（换一份数据数字跟着换）、占比与合计、关注表格只列非正常、趋势图的相对路径与占位、规则不一致时的横幅、`sections` 额外区块的顺序与转义约定、写文件的编码 / LF / 目录自动创建 |
 | ③ 30 条 | 报告的段落齐全、占比、表格里的竖线/换行转义、空表不出现 `nan%`、写文件的编码与 LF 换行、结论的并列与阈值判断、报告里**不出现**建议文案（那是网页 `getAdvice()` 的活） |
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
-| ⑤ 102 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关 |
+| ⑤ 130 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错 |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -505,7 +590,7 @@ py -3.14 analysis/report.py data/dormmate.csv -o 我的报告.md
 
 ```
 中文字体：Microsoft YaHei
-趋势图：C:\Users\xdj\Desktop\DormMate Final\report\trend.png（12 个点，119 KB）
+趋势图：C:\Users\xdj\Desktop\DormMate Final\nova-dormmate-final-2026\report\trend.png（12 个点，119 KB）
 ```
 
 | 决定 | 为什么 |
@@ -643,10 +728,10 @@ analysis.write_report(summary, sections=sections)
 
 ```bash
 cd C:\Users\xdj                                  # 跑到项目外面去
-py -3.14 "C:\Users\xdj\Desktop\DormMate Final\analysis\analysis.py" data/dormmate.csv
+py -3.14 "C:\Users\xdj\Desktop\DormMate Final\nova-dormmate-final-2026\analysis\analysis.py" data/dormmate.csv
 ```
 
-上面这条照样能找到 `C:\Users\xdj\Desktop\DormMate Final\data\dormmate.csv`。
+上面这条照样能找到 `C:\Users\xdj\Desktop\DormMate Final\nova-dormmate-final-2026\data\dormmate.csv`。
 按工作目录展开的话，这里会去找 `C:\Users\xdj\data\dormmate.csv` 然后报找不到。
 `-o` 指定的输出路径也一样按项目根解析。
 
@@ -786,6 +871,109 @@ if (!result.ok) speak(result.message);   // 「摄像头还没打开，先点『
   补的是**桩**不是生产代码 —— 真浏览器一定有这个方法。顺带加了 `fireWindow(type)`
   用来在测试里模拟「用户关掉了页面」。
 
+## Step 3-2：ASR 语音指令
+
+页面上多了一块「语音指令」面板：一个按钮 + 两块结果区（识别到的文字 / 执行结果）。
+
+**每次点击只识别一句。** `continuous = false`，拿到结果或出错都让它结束。不做连续听 ——
+连续模式下"一句话说完了"由引擎自己判断，教室里一吵就会把旁边的闲聊也识别进来。
+
+用的是浏览器自带的 `SpeechRecognition`（Chrome / Edge 上是 `webkitSpeechRecognition`），
+所以**要联网**：Chrome 是把录音传到服务器上识别的，断网直接报 `network`。
+
+| 说 | 走哪 |
+|---|---|
+| 含「朗读」 | `speakStatus()` |
+| 含「拍照」 | `takeSnapshot()` |
+| 都不含 | 页面上显示「未识别的指令：<原话>」 |
+
+**按「包含」判断，不是整句相等。** 识别引擎会把标点和语气词一起吐出来（"朗读一下。"），
+整句比对永远匹配不上。`VOICE_COMMANDS` 的数组顺序就是判断顺序，第一条命中的赢 ——
+说"朗读并且拍照"会走朗读。
+
+> ⚠ 是**字面子串**匹配，不是同义词理解：说「拍张照」**不**触发拍照（里面没有"拍照"
+> 这三个字），会显示未识别。这是这一步的约定行为（要求就是"包含拍照"），但演示时
+> 得照约定说「拍照」。测试里专门有一条钉住这个边界。
+
+### 为什么 `speakStatus()` 现在只 `console.log`
+
+Step 3-3 才做语音合成。现在它把"要念的内容"（各节点的温度/湿度和状态）打到控制台，
+**返回值仍然是 `{ok, message}`** —— 和 `takeSnapshot()` 同一个形状。这样路由层
+（`handleVoiceText`）不用分辨命令是谁，拿到结果直接显示就行；Step 3-3 把里面换成
+真正的朗读时，路由那一层一行都不用改。
+
+### 错误显示的是原始的 `event.error`
+
+不支持、麦克风被拒、`network`，都把**浏览器给的错误码原样写在页面上**，后面再跟一句
+人话解释：
+
+```
+语音识别出错（not-allowed）：麦克风权限被拒绝了。点地址栏左边的图标，把「麦克风」改成「允许」，然后重试。
+```
+
+错误码必须留着，不能用文案替掉：`VOICE_ERRORS` 这张表只是"加一句解释"，而浏览器
+各版本一直在加新的错误码 —— 表里没有的（比如 `weird-new-code`）也照样显示成
+`语音识别出错（weird-new-code）`，不会被吞掉。测试里专门有一条盯着这件事。
+
+### 几个决定
+
+| 决定 | 为什么 |
+|---|---|
+| 正在听的时候再点按钮直接忽略 | 连点两次会走到 `start()` 抛 `InvalidStateError`，比安静地忽略第二次点击难解释得多 |
+| 按钮文字变「正在听…」，外加一圈 `--focus` 环 | 得让用户知道"现在该说话了"。环用 `--focus` 不用状态色 —— 那四档状态色是留给环境 status 的，"正在听"不是一种环境状态，借来用会让人以为页面在报警 |
+| `interimResults = false` | 中间稿会边听边变、闪得厉害，而我们只关心最终那一句 |
+| `onresult` 里把 `results` 全拼起来 | 通常只有一条 final，但别假设只有一条 |
+| 两个结果区用 `is-placeholder` 类区分占位和真结果 | 由调用方明确传标志位，不去比较文本内容猜"这是不是占位文案"—— 那样迟早会被真结果撞上 |
+| 结果区写 `overflow-wrap: anywhere` | 识别结果偶尔是一长串没空格的英文/数字，不换行会把并排的另一块挤扁 |
+| `pagehide` 时 `abort()` 会话，并且**先摘掉 `onerror`** | 不掐掉的话麦克风一直开着；而主动 abort 也会触发 `onerror`（`error === 'aborted'`），那是我们自己干的，不该当错误显示给用户 |
+
+### 测试
+
+`tests/script.test.js` 里 28 条，靠一个假的 `SpeechRecognition` 构造函数：`new` 出来的
+实例记下 `lang` / `continuous`，`start()` 立刻回调 `onstart`（真浏览器也这样，所以
+"按钮变正在听"这条能同步验），测试再手动 `say(text)` / `fail(code)` 模拟识别结果和错误。
+
+覆盖到：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、正在听时重复点击
+被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、
+字面匹配的边界（「拍张照」不算）、`not-allowed` / `network` / `no-speech` 三种错误码都
+出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错。
+
+## 已知限制
+
+分三类：**设计如此**（当前步骤就有意不做）、**还没做**（后续步骤补）、
+**环境依赖**（不是 bug，但很容易被当成坏了）。
+
+### 设计如此
+
+| 限制 | 原因 |
+|---|---|
+| 刷新页面后「录入历史」清空 | 只存在内存里，**有意不落 localStorage**（本步骤的约定）。要留存就刷新前先点「导出 CSV」 |
+| 「最近消息」表只显示最新 20 行 | 表太长会拖慢渲染。内存里仍留 2000 条，超了从头丢；只覆盖 MQTT 收到的消息，和「录入历史」是两套数据 |
+| 刷新后要等下一次发布才出卡片 | 消息没有设 retained，新连上的页面拿不到历史值，得等模拟器下一个周期（默认 5 秒） |
+| 摄像头只保留最后一张快照 | 每次拍照覆盖上一张，不做连续采集，视频帧也不留在内存里 |
+| 语音指令是**字面包含**匹配 | 必须说出「拍照」这三个字，说「拍张照」「照相」都不算。识别引擎会带出标点和语气词所以不能整句相等，但也没做同义词表 |
+| 页面上显示的状态不重算 | MQTT 数据以**发布端发来的 `status` 字段为准**，前端只做校验不做判断 —— 避免两份规则各算各的。只有「手动录入」那份不经过发布端，才用 JS 规则算 |
+| 规则有两份实现，必须手工同步 | `status_rules.py`（Python）和 `shared/rules.js`（JS）各一份，没有自动同步机制。不同步的后果是报告顶部出现红色横幅（见排查表） |
+| MQTT 允许匿名连接 | `allow_anonymous true` 是课程演示配置，**切勿照搬到公网**。这也是 `open_firewall.bat` 故意不放行 1883 的原因 |
+
+### 还没做
+
+| 限制 | 卡在哪 |
+|---|---|
+| 语音只识别、不播报 | 语音合成是 Step 3-3。现在 `speakStatus()` 把要念的内容打到 Console 占位 |
+| 只有 `dorm-a` 一个节点 | `dorm-b` / `dorm-c` 从 M5 开始启用 |
+| 没有后端、没有数据库 | 纯静态前端 + 本机 Broker，数据不落库，页面关掉就没了 |
+| 前端测试不覆盖浏览器真实行为 | 测试是 Node + 一个最小 DOM shim 跑真实的 `script.js`，摄像头 / 麦克风 / Canvas 都是桩。**能证明逻辑对，不能替代真机验证** |
+
+### 环境依赖
+
+| 限制 | 说明 |
+|---|---|
+| 摄像头和语音识别**要求安全上下文** | 两者都只在 `https` 或 `localhost` 下可用。手机用 `http://<IP>:8000/web/` 打开时 `navigator.mediaDevices` 直接是 `undefined`，报错会变成 `Cannot read properties of undefined` |
+| Chrome 的语音识别**要求联网** | 它是把录音传到服务器上识别的，不是本地识别。断网、走代理或被墙都会报 `event.error === 'network'` |
+| Firefox 没有语音识别接口 | `window.SpeechRecognition` / `webkitSpeechRecognition` 都不存在，页面会明确提示换 Chrome / Edge |
+| `analysis.py` 需要 pandas / matplotlib | 没装时出不了图和报告，但统计部分仍能跑；测试里画图那几只会被 skip 掉（不算失败）。**且必须用 64 位的 `py -3.14`**，见上文 |
+
 ## 排查
 
 | 现象 | 原因 |
@@ -808,3 +996,34 @@ if (!result.ok) speak(result.message);   // 「摄像头还没打开，先点『
 | 点「打开摄像头」提示「被别的程序占用了」 | QQ / 腾讯会议 / 相机 之类正抢着摄像头，关掉它们再点 |
 | 「拍照」按钮是灰的 | 摄像头还没打开。先点「打开摄像头」，按钮才会亮 |
 | 摄像头指示灯一直亮着 | 点页面上的「关闭摄像头」；直接关标签页也会在 `pagehide` 时自动关 |
+| 点「语音指令」提示不支持 | 用的不是 Chrome / Edge（Firefox 没有这个接口），或者页面不是安全上下文 |
+| 语音识别报 `network` | Chrome 要把录音传到服务器上识别，断网、代理或墙拦截都会这样。换成能通的网络再试 |
+| 说「拍照」却提示"未识别的指令" | 指令是字面包含判断，必须说出「拍照」这三个字。「拍张照」「照相」都不算 |
+| 说「朗读」后只看到控制台输出 | 这是本步骤的预期行为，语音合成在 Step 3-3 |
+| 运行 `.bat` 报一串「不是内部或外部命令」 | 文件被存成了 UTF-8 或 LF 行尾。三个 `.bat` 都必须是 **GBK 编码 + CRLF 行尾，且不能写 `chcp 65001`**，原因见脚本开头的注释 |
+
+## 开源组件来源
+
+> 待填。表格先留空，逐项核实版本和许可证后再补。
+
+| 组件 | 版本 | 用途 | 许可证 | 来源 |
+|---|---|---|---|---|
+|  |  |  |  |  |
+|  |  |  |  |  |
+|  |  |  |  |  |
+|  |  |  |  |  |
+|  |  |  |  |  |
+|  |  |  |  |  |
+
+需要补进来的东西大致是这些，版本号的位置一并写在这里，省得再翻：
+
+| 要找的东西 | 版本写在哪儿 |
+|---|---|
+| mqtt.js（浏览器端，已本地化到 `web/vendor/mqtt.min.js`） | 打包进文件里了，是 **5.10.1**；文件末尾还带一段 bundled license 注释，写明其中 `@jspm/core` 的 buffer 垫片是 BSD-3-Clause |
+| `paho-mqtt` / `pandas` / `matplotlib` | `requirements.txt` 里写的是下限（`>=`），实际版本用 `py -3.14 -m pip show <包名>` 查 |
+| Mosquitto | `mosquitto -h` |
+| Python 解释器本身 | `py -3.14 -V` |
+
+字体不算组件：`style.css` 用的是 `system-ui` / `Microsoft YaHei` 等**系统自带字体**，
+没有随项目分发任何字体文件。`analysis.py` 画图时找的也是系统字体（脚本会打印
+「中文字体：」那一行说明用了哪个）。

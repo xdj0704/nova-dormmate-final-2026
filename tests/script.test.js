@@ -116,6 +116,53 @@ function installMediaDevices(mode) {
   });
 }
 
+/* ---------- 语音识别桩 ----------
+
+   window.SpeechRecognition 换成假的构造函数。new 出来的实例记下
+   lang / continuous，start() 会立刻回调 onstart（真浏览器也是这样），
+   测试再手动 say() / fail() 模拟"识别到了什么"和"出了什么错"。
+
+   supported=false 时两个前缀都不挂，等价于不支持的浏览器。 */
+let lastRecognition = null;
+
+function fakeRecognition() {
+  return {
+    lang: '', continuous: true, interimResults: true,
+    started: 0, aborted: 0,
+    onstart: null, onresult: null, onerror: null, onend: null,
+    start() { this.started += 1; if (this.onstart) this.onstart(); },
+    stop() {},
+    abort() { this.aborted += 1; if (this.onend) this.onend(); },
+    /* 模拟"识别出一句话"，然后会话结束 */
+    say(text) {
+      if (this.onresult) {
+        this.onresult({ resultIndex: 0, results: [[{ transcript: text }]] });
+      }
+      if (this.onend) this.onend();
+    },
+    /* 模拟"识别失败" */
+    fail(code) {
+      if (this.onerror) this.onerror({ error: code });
+      if (this.onend) this.onend();
+    },
+  };
+}
+
+function installSpeechRecognition(supported) {
+  lastRecognition = null;
+  const Ctor = supported
+    ? function SpeechRecognitionStub() {
+      lastRecognition = fakeRecognition();
+      return lastRecognition;   // 构造函数返回对象时，new 的结果就是它
+    }
+    : undefined;
+  for (const key of ['SpeechRecognition', 'webkitSpeechRecognition']) {
+    Object.defineProperty(global.window, key, {
+      value: Ctor, configurable: true, writable: true,
+    });
+  }
+}
+
 installMediaDevices('ok');
 /* window 上的事件也要能挂：script.js 在 pagehide 时关摄像头。
    记下来是为了测试能手动触发（见「离开页面会关摄像头」那条）。 */
@@ -592,6 +639,124 @@ const exportedNote = els['export-note'].textContent;
   check('离开页面时自动关摄像头',
     streamBeforeHide.stopped.length === 1 && video.srcObject === null,
     JSON.stringify(streamBeforeHide.stopped));
+
+  /* ---------- 11. 语音指令（ASR） ---------- */
+
+  const voiceBtn = els['voice-start'];
+  const voiceError = () => els['voice-error'].textContent;
+  const voiceAction = () => els['voice-action'].textContent;
+
+  check('页面有「语音指令」按钮', /id="voice-start"[^>]*>语音指令</.test(html));
+  check('页面有识别文字显示区', /id="voice-heard"/.test(html));
+  check('页面有执行结果显示区', /id="voice-action"/.test(html));
+  check('speakStatus 是顶层函数，指令表能直接引用它',
+    run('typeof speakStatus') === 'function', run('typeof speakStatus'));
+
+  /* ---- 浏览器不支持 ---- */
+
+  installSpeechRecognition(false);
+  voiceBtn.fire('click');
+  check('不支持时给出明确原因，而不是点了没反应',
+    voiceError().includes('SpeechRecognition'), voiceError());
+
+  /* ---- 正常走一遍 ---- */
+
+  installSpeechRecognition(true);
+  voiceBtn.fire('click');
+  const rec = lastRecognition;
+  check('确实 new 了 SpeechRecognition', !!rec);
+  check('lang 是 zh-CN', (rec && rec.lang) === 'zh-CN', rec && rec.lang);
+  check('只识别一句（continuous=false）',
+    rec && rec.continuous === false, rec && String(rec.continuous));
+  check('不要中间稿（interimResults=false）',
+    rec && rec.interimResults === false, rec && String(rec.interimResults));
+  check('按钮变成「正在听…」', voiceBtn.textContent === '正在听…', voiceBtn.textContent);
+
+  voiceBtn.fire('click');
+  check('正在听时重复点击被忽略（不会开出第二个会话）',
+    lastRecognition === rec, '又 new 了一个');
+
+  /* ---- 固定指令 ---- */
+
+  rec.say('朗读一下。');
+  check('识别到的文字显示在页面上',
+    els['voice-heard'].textContent === '朗读一下。', els['voice-heard'].textContent);
+  check('「朗读」走 speakStatus（显示的是它自己的返回值）',
+    voiceAction().includes('朗读'), voiceAction());
+  check('说完一句会话就结束，按钮恢复',
+    voiceBtn.textContent === '语音指令', voiceBtn.textContent);
+
+  /* 「拍照」得真的调到 takeSnapshot：先开摄像头，再喊拍照 */
+  installMediaDevices('ok');
+  await run('openCamera()');
+  voiceBtn.fire('click');
+  lastRecognition.say('帮我拍照吧');
+  check('「拍照」调到 takeSnapshot（页面上出现拍摄时间）',
+    voiceAction().includes('已拍照'), voiceAction());
+  check('识别文字也换成这一句',
+    els['voice-heard'].textContent === '帮我拍照吧', els['voice-heard'].textContent);
+
+  /* 摄像头没开时说「拍照」：走的是 takeSnapshot 自己的失败分支，
+     原因照样显示出来 —— 这正是它返回 {ok, message} 的用处。 */
+  run('closeCamera()');
+  voiceBtn.fire('click');
+  lastRecognition.say('拍照');
+  check('没开摄像头时说「拍照」会提示先开摄像头',
+    voiceAction().includes('先点「打开摄像头」'), voiceAction());
+
+  /* ---- 未识别 ---- */
+
+  voiceBtn.fire('click');
+  lastRecognition.say('今天天气不错');
+  check('不认识的指令把原话回显出来',
+    voiceAction() === '未识别的指令：今天天气不错', voiceAction());
+
+  /* 固定指令是字面子串匹配，不是同义词理解：「拍张照」里没有「拍照」
+     这三个字，就走不到 takeSnapshot。这是这一步的约定行为（要求就是
+     "包含拍照"），不是 bug —— 但演示时得照约定说「拍照」。 */
+  voiceBtn.fire('click');
+  lastRecognition.say('拍张照');
+  check('关键词按字面包含判断，同义词不算（"拍张照" ≠ "拍照"）',
+    voiceAction() === '未识别的指令：拍张照', voiceAction());
+
+  voiceBtn.fire('click');
+  lastRecognition.say('朗读并且拍照');
+  check('一句话里两个关键词都在时，按固定顺序取第一条（朗读）',
+    voiceAction().includes('朗读'), voiceAction());
+
+  /* ---- 错误：event.error 必须露在页面上 ---- */
+
+  voiceBtn.fire('click');
+  lastRecognition.fail('not-allowed');
+  check('麦克风被拒：页面上有具体的 event.error',
+    voiceError().includes('not-allowed'), voiceError());
+  check('麦克风被拒：同时给人话解释',
+    voiceError().includes('权限'), voiceError());
+
+  voiceBtn.fire('click');
+  lastRecognition.fail('network');
+  check('network 错误：页面上有具体的 event.error',
+    voiceError().includes('network'), voiceError());
+
+  voiceBtn.fire('click');
+  lastRecognition.fail('no-speech');
+  check('没听到声音：也有对应的提示',
+    voiceError().includes('no-speech'), voiceError());
+
+  check('表里没有的错误码也照样显示出来，不吞掉',
+    run('voiceErrorMessage("weird-new-code")') === '语音识别出错（weird-new-code）',
+    run('voiceErrorMessage("weird-new-code")'));
+
+  /* ---- 离开页面 ---- */
+
+  voiceBtn.fire('click');            // 顺便把上一条错误清掉
+  const listening = lastRecognition;
+  check('重新开始会把上一次的错误清掉', voiceError() === '', voiceError());
+  fireWindow('pagehide');
+  check('离开页面时掐掉还在听的会话（否则麦克风一直开着）',
+    listening.aborted === 1, String(listening.aborted));
+  check('自己主动中止不会被当成错误显示出来',
+    voiceError() === '', voiceError());
 
   /* ---------- 报告 ---------- */
 
