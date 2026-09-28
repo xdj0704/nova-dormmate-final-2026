@@ -1,0 +1,437 @@
+/* DormMate 多节点 Dashboard
+   颜色以角色（role）命名，深浅色只在这里切换，下面各组件只引用角色。
+   这套 token 和 web/style.css 是同一套，两个页面的卡片配色因此保持一致。 */
+
+:root {
+  color-scheme: light;
+
+  /* 版面与墨色 */
+  --page:           #f9f9f7;
+  --surface-1:      #fcfcfb;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --hairline:       #e1e0d9;
+  --border:         rgba(11, 11, 11, 0.10);
+  --focus:          #2a78d6;   /* 输入框聚焦环，纯 UI 用色，不代表任何状态 */
+
+  /* 状态色：固定四档，不随主题变化，永远配图标 + 文字，不靠颜色单独表意 */
+  --status-good:     #0ca30c;  /* 正常 */
+  --status-warning:  #fab219;  /* 偏冷 */
+  --status-serious:  #ec835a;  /* 偏湿 */
+  --status-critical: #d03b3b;  /* 偏热 */
+
+  /* 图表序列色。状态色是保留色，不能拿来当序列色，所以另起两个色相。
+     这两组值跑过 dataviz 的 validate_palette.js：OKLCH 亮度带、色度下限、
+     色觉模拟（protan/deutan）分离度、与 --surface-1 的对比度全部通过。
+     改之前先重跑校验，别凭眼睛挑。 */
+  --chart-temp:     #2a78d6;
+  --chart-humidity: #c9407f;
+  --chart-grid:     rgba(11, 11, 11, 0.08);   /* 网格要退到背景里 */
+
+  /* 字体不随深浅色变，只在 :root 定义一次 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --hairline:       #2c2c2a;
+    --border:         rgba(255, 255, 255, 0.10);
+    --focus:          #3987e5;
+
+    /* 深色不是把浅色翻转，是各模式各取一档，同样跑过校验 */
+    --chart-temp:     #4a8fe0;
+    --chart-humidity: #c05c8e;
+    --chart-grid:     rgba(255, 255, 255, 0.10);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.wrap {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 20px 64px;
+}
+
+code, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+code {
+  padding: 1px 5px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 650;
+}
+
+.sub {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.top-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  padding: 9px 16px;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.primary {
+  background: var(--text-primary);
+  color: var(--page);
+  font-weight: 600;
+}
+
+.primary:hover { opacity: 0.88; }
+
+.ghost {
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border-color: var(--hairline);
+}
+
+.ghost:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+/* ---------- 节点卡片 ---------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-bottom: 28px;
+}
+
+/* 卡片本身就是按钮：整张可点，键盘也能 Tab 到。所以要把按钮的默认样式清掉 */
+.card {
+  --c: var(--text-muted);   /* 未识别状态时的兜底 */
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  text-align: left;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-left: 4px solid var(--c);
+  border-radius: 12px;
+}
+
+.card:hover { border-color: var(--text-muted); }
+
+/* 当前正在查看的节点。描边刻意用中性墨色而不是 --c：--c 是状态色，
+   拿它描边会让「选中」和「这个节点在报警」变成同一件事，分不出来。
+   所以选中用中性描边 + 一个写着字的标签（不靠颜色单独表意）。 */
+.card.is-active {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--text-primary) inset;
+}
+
+.card.is-active .node-name::after {
+  content: "查看中";
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--text-primary);
+  color: var(--page);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  vertical-align: 2px;
+}
+
+.card.is-empty {
+  border-left-color: var(--hairline);
+  color: var(--text-muted);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.node-name {
+  font-size: 17px;
+  font-weight: 650;
+  font-family: var(--font-mono);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--c) 12%, transparent);
+  color: var(--c);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge svg { display: block; }
+
+.badge--wait {
+  --c: var(--text-muted);
+  background: var(--page);
+  font-weight: 500;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.tile-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.tile-value {
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.tile-unit {
+  margin-left: 2px;
+  font-size: 14px;
+  font-style: normal;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.card-foot,
+.card-wait {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* 状态四档。class 名和 web/style.css 一致 */
+.is-good     { --c: var(--status-good); }
+.is-warning  { --c: var(--status-warning); }
+.is-serious  { --c: var(--status-serious); }
+.is-critical { --c: var(--status-critical); }
+.is-unknown  { --c: var(--text-muted); }
+
+/* ---------- 面板 ---------- */
+
+.panel {
+  padding: 20px;
+  margin-bottom: 28px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+}
+
+.panel-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.panel-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+#detail-node {
+  font-family: var(--font-mono);
+  color: var(--focus);
+}
+
+.count,
+.note {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.chart-note:empty { display: none; }
+
+.chart-note.is-error {
+  padding: 10px 14px;
+  margin: 0 0 14px;
+  background: color-mix(in srgb, var(--status-critical) 8%, transparent);
+  border-left: 3px solid var(--status-critical);
+  border-radius: 8px;
+  color: var(--status-critical);
+}
+
+/* ---------- 图表 ---------- */
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+}
+
+.chart-box {
+  margin: 0;
+}
+
+.chart-box figcaption {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Chart.js 用 maintainAspectRatio:false 时，画布会撑满父元素，
+   所以父元素必须有个确定的高度，否则高度塌成 0。 */
+.chart-canvas {
+  position: relative;
+  height: 240px;
+}
+
+.charts.is-broken .chart-canvas {
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--hairline);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.charts.is-broken .chart-canvas::after { content: "图表未加载"; }
+
+/* ---------- 消息日志 ---------- */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th, td {
+  padding: 9px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
+}
+
+td:last-child { white-space: normal; }
+
+th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--page);
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+.log-empty {
+  padding: 22px 12px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.level {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.level--ok {
+  background: color-mix(in srgb, var(--status-good) 12%, transparent);
+  color: var(--status-good);
+}
+
+.level--warn {
+  background: color-mix(in srgb, var(--status-warning) 18%, transparent);
+  color: #8a5a00;
+}
+
+.level--error {
+  background: color-mix(in srgb, var(--status-critical) 12%, transparent);
+  color: var(--status-critical);
+}
+
+/* 有问题的行整行淡淡染一下，扫一眼就能找到 */
+.log-row--warn  { background: color-mix(in srgb, var(--status-warning) 6%, transparent); }
+.log-row--error { background: color-mix(in srgb, var(--status-critical) 6%, transparent); }
+
+@media (prefers-color-scheme: dark) {
+  .level--warn { color: var(--status-warning); }
+}
+
+/* ---------- 页脚 ---------- */
+
+.foot {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DormMate 多节点 Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div>
+      <h1>DormMate 多节点 Dashboard</h1>
+      <p class="sub">dorm-a · dorm-b · dorm-c 对比 · 本步用本地模拟数据，还没接 MQTT</p>
+    </div>
+    <div class="top-actions">
+      <button id="simulate" class="primary" type="button">模拟三节点数据</button>
+      <button id="clear" class="ghost" type="button">清空</button>
+    </div>
+  </header>
+
+  <section id="cards" class="cards"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>趋势 · <span id="detail-node">—</span></h2>
+      <span id="detail-meta" class="note"></span>
+    </div>
+
+    <p id="chart-note" class="note chart-note"></p>
+
+    <!-- 温湿度分成两张图，不用双 Y 轴：两者的单位和量级都不同，
+         叠在一张图上要么把温度压成一条直线，要么让两条线的交叉点
+         变成毫无意义的视觉暗示。两张图共用同一组时间刻度，趋势照样能横向比。 -->
+    <div class="charts">
+      <figure class="chart-box">
+        <figcaption>温度 ℃</figcaption>
+        <div class="chart-canvas"><canvas id="chart-temp"></canvas></div>
+      </figure>
+      <figure class="chart-box">
+        <figcaption>湿度 %</figcaption>
+        <div class="chart-canvas"><canvas id="chart-humidity"></canvas></div>
+      </figure>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>消息日志 <span id="log-count" class="count"></span></h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>级别</th>
+            <th>Topic</th>
+            <th>内容</th>
+          </tr>
+        </thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="foot">
+    状态判定规则（按顺序，命中即停）：<code>&lt;18</code> 偏冷 →
+    <code>≥30</code> 偏热 → <code>湿度 ≥75</code> 偏湿 → 正常。
+    收到报文里的 <code>status</code> 只作参考，一律用规则复核，不一致时以规则为准。
+  </footer>
+
+</div>
+
+<!-- Chart.js：先用 CDN。
+     源特意选了 npmmirror（阿里维护的 npm 镜像）而不是 jsDelivr —— 实测本机
+     连 jsDelivr 是 0.2 秒就失败的连不上，npmmirror/unpkg/BootCDN/staticfile 都通。
+     现场没网就把下面这行换成 <script src="lib/chart.umd.min.js"></script>，
+     那个文件已经在 dashboard/lib/ 里放好了，其余不用动。 -->
+<script src="https://registry.npmmirror.com/chart.js/4.5.1/files/dist/chart.umd.min.js"></script>
+<script src="../shared/rules.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>
