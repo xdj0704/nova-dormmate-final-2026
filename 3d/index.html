@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DormMate 3D · Step 6-1 最小场景</title>
+<title>DormMate 3D · Step 6-2 简化宿舍</title>
 <style>
   html, body { height: 100%; }
 
@@ -34,20 +34,42 @@
     border-radius: 5px;
   }
 
-  /* 3D 容器。两条不能省的：
+  /* 3D 容器。三条不能省的：
      - 必须有确定的高度。高度是 0 的话 clientHeight 就是 0，相机算不出宽高比。
        这里给的是 60vh（视口高度的六成），加 min-height 兜住矮窗口。
      - overflow: hidden。three 的 setSize 设的是 canvas 的 CSS 尺寸，
-       和容器差一个像素时就会顶出滚动条，整个页面跟着抖。 */
+       和容器差一个像素时就会顶出滚动条，整个页面跟着抖。
+     - position: relative。setLabel 那层覆盖层是绝对定位的，得有个定位祖先；
+       少了它，覆盖层会跑到 <body> 上去，飘到页面左上角。 */
   #scene {
     position: relative;
     overflow: hidden;
-    margin: 0 24px 24px;
+    margin: 0 24px 12px;
     height: 60vh;
     min-height: 320px;
     border: 1px solid #e1e0d9;
     border-radius: 14px;
     background: #ececea;   /* 画布还没铺满时先兜个底，避免闪一下白 */
+  }
+
+  /* setLabel 写字的覆盖层。由 scene.js 建出来挂进 #scene，这里只负责样式：
+     - absolute + 左上角：盖在画布上面
+     - pointer-events: none：**关键**。不写的话这层会吃鼠标事件，
+       将来想给 3D 加拖拽/点击就点不穿，而且现在它盖住的那块也没法选中。
+     - 底色半透明：字压在深色模型上也要看得清 */
+  .scene-label {
+    position: absolute;
+    top: 14px;
+    left: 14px;
+    pointer-events: none;
+    padding: 7px 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #0b0b0b;
+    background: rgba(252, 252, 251, 0.86);
+    border: 1px solid #e1e0d9;
+    border-radius: 8px;
+    backdrop-filter: blur(3px);
   }
 
   /* WebGL 起不来时由 scene.js 写进来（见那边的 try/catch） */
@@ -58,18 +80,69 @@
     line-height: 1.8;
     color: #d03b3b;
   }
+
+  /* ---- 测试按钮 ---- */
+
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 0 24px 24px;
+  }
+
+  .controls .hint {
+    font-size: 13px;
+    color: #898781;
+    margin-right: 4px;
+  }
+
+  .controls button {
+    font: inherit;
+    font-size: 14px;
+    padding: 7px 16px;
+    color: #0b0b0b;
+    background: #fcfcfb;
+    border: 1px solid #e1e0d9;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .controls button:hover { background: #f2f1ec; }
+
+  .controls button:focus-visible {
+    outline: 2px solid #2a78d6;
+    outline-offset: 2px;
+  }
+
+  /* 当前选中的那个：加粗 + 蓝边。不靠颜色单独表意，按钮上本来就有文字。 */
+  .controls button.is-active {
+    font-weight: 650;
+    border-color: #2a78d6;
+    box-shadow: inset 0 0 0 1px #2a78d6;
+  }
 </style>
 </head>
 <body>
 
   <header>
     <h1>DormMate 3D</h1>
-    <p class="sub">Step 6-1：最小场景 —— 地板 + 立方体，先不接数据</p>
+    <p class="sub">Step 6-2：简化宿舍 —— 地板 / 墙 / 床 / 窗户 / 风扇，点按钮看四种状态</p>
   </header>
 
-  <!-- index.html 只管两件事：把容器摆好，然后调 createDorm3D 把场景塞进去。
-       相机怎么摆、灯放哪儿、方块转多快，全在 scene.js 里，这个文件一概不管。 -->
+  <!-- index.html 只管三件事：把容器摆好、调 createDorm3D、把按钮接上。
+       宿舍长什么样、每种状态改什么，全在 scene.js 里，这个文件一概不管。 -->
   <div id="scene"></div>
+
+  <div class="controls">
+    <span class="hint">试一下：</span>
+    <!-- data-status 里写的必须是统一规则那四个字，一个字都不能差 ——
+         差一个字 updateScene 就认不出来，只能退回「正常」并在控制台警告。 -->
+    <button type="button" data-status="正常">正常</button>
+    <button type="button" data-status="偏冷">偏冷</button>
+    <button type="button" data-status="偏热">偏热</button>
+    <button type="button" data-status="偏湿">偏湿</button>
+  </div>
 
   <!-- three.js 0.160.0：先用 CDN。
 
@@ -109,7 +182,38 @@
   <script type="module">
     import { createDorm3D } from './scene.js';
 
-    createDorm3D('scene');
+    // M5 起是多节点，所以这里写明是哪个宿舍；M1~M4 只有一个宿舍时不写也行。
+    const NODE_ID = 'dorm-a';
+
+    const dorm = createDorm3D('scene');
+
+    const buttons = Array.prototype.slice.call(
+      document.querySelectorAll('.controls button')
+    );
+
+    /**
+     * 应用一个状态：改场景 + 改覆盖层文字 + 标出当前按钮。
+     * 这三件事分属三个对象（scene / label / DOM），所以放在页面这边组合，
+     * scene.js 里的 updateScene 只管场景那部分。
+     */
+    function apply(status) {
+      const applied = dorm.updateScene(status);
+      dorm.setLabel('当前宿舍：' + NODE_ID + '｜状态：' + applied);
+
+      buttons.forEach(function (btn) {
+        btn.classList.toggle('is-active', btn.dataset.status === applied);
+      });
+    }
+
+    buttons.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        apply(btn.dataset.status);
+      });
+    });
+
+    // 页面一打开就摆成「正常」，并且让「正常」那个按钮是高亮的 ——
+    // 否则初始状态和按钮高亮对不上，看的人会以为是坏的。
+    apply('正常');
   </script>
 
 </body>

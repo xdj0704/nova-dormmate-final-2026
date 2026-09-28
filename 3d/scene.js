@@ -1,14 +1,14 @@
 /**
- * Step 6-1：最小 Three.js 场景
+ * Step 6-2：简化宿舍 + updateScene(status)
  *
- * 这个文件只干一件事：给一个 DOM 容器，在里面搭出一个会转的立方体。
- * 还没有宿舍模型、没有数据、不连 MQTT —— 先把「three 在这个项目里跑得起来」
- * 立住，6-2 之后往这个骨架上挂东西。
+ * 6-1 里只有一块地板和一个方块，是拿来验「three 在这个项目里跑得起来」的。
+ * 这一步把宿舍搭出来（地板 / 墙 / 床 / 窗户 / 风扇），再让四种状态各自
+ * 改变场景的样子，好和两个看板、小程序对上同一套 status。
  *
  * ── 三个核心对象 ────────────────────────────────────────────────
  * Three.js 的每个场景都必须有这三个，缺一个都画不出东西：
  *
- *   scene    场景。一个「世界」，所有要画的东西（地板、立方体、灯光）都挂在
+ *   scene    场景。一个「世界」，所有要画的东西（地板、床、灯光）都挂在
  *            它下面。它自己不可见、也不能直接显示，本质是个名册/容器。
  *            灯光也是挂在 scene 上的 —— 光不是「照亮屏幕」，是照亮这个世界的
  *            一部分，所以它必须在这个名册里，否则不参与计算。
@@ -30,16 +30,78 @@
 
 import * as THREE from 'three';
 
-/* 立方体每秒转多少弧度。写成「每秒」而不是「每帧」，原因见下面动画循环里的注释。 */
-const CUBE_SPIN = 0.6;
+/* ================= 对外常量 ================= */
 
 /**
- * 在 container 里建一个最小 Three.js 场景。
+ * 四种状态。字符串必须和 Python 侧 status_rules.py、JS 侧 shared/rules.js、
+ * 小程序 utils/rules.js 算出的一模一样 —— 这里直接写死，不要从别处拼，
+ * 拼错一个字 updateScene 就会走「不认识」的分支。
+ */
+export const STATUS = {
+  NORMAL: '正常',
+  COLD: '偏冷',
+  HOT: '偏热',
+  WET: '偏湿',
+};
+
+/** 风扇转速，弧度/秒。约 1.1 圈/秒。 */
+export const FAN_SPIN = 7;
+
+/**
+ * 窗户开到最大时铰链转过的角度（弧度）。
+ * 负号是有意的：窗户从铰链沿 +X 伸出去，绕 Y 转负角才会朝 +Z（屋里）开；
+ * 转正角会朝墙外面甩出去，穿墙而过。
+ */
+export const WINDOW_OPEN_ANGLE = -Math.PI / 2.5;
+
+/* ================= 尺寸 ================= */
+
+const ROOM = 10;      // 房间边长（X 和 Z 都是它）
+const WALL_H = 4;     // 墙高
+const GROUND = 400;   // 室外大地面。见下面「为什么还要一块大地面」
+
+/**
+ * 状态 → 场景外观。四种状态各自的每一项都写全，不做「只写差异、其余继承默认」
+ * 那种省略 —— 一眼能看出四种状态分别改了什么，是这张表的全部意义。
+ *
+ * 地板和窗户用色说明：
+ *   偏热的地板取的是项目的 --status-critical（#d03b3b）和地板底色混出来的，
+ *   偏湿的窗户蓝是玻璃/水的直觉色，不是 --status-serious（那个是砖橙色）。
+ *   窗户变蓝 + 打开读作「开窗通风」，是场景动作，不是在拿颜色表示状态；
+ *   真正表示状态的是覆盖层里那行文字（setLabel）。
+ */
+const LOOK = {
+  [STATUS.NORMAL]: {
+    floor: 0xb9b8b2, window: 0xcdd8de, open: false, fan: false,
+    sun: 0xffffff, ambient: 0xffffff, bg: 0xececea,
+  },
+  [STATUS.COLD]: {
+    floor: 0xb9b8b2, window: 0xcdd8de, open: false, fan: false,
+    sun: 0xbdd4ff, ambient: 0xc6dbff, bg: 0xe4ebf3,   // 两盏灯一起偏蓝，整体就冷下来了
+  },
+  [STATUS.HOT]: {
+    floor: 0xc86765, window: 0xcdd8de, open: false, fan: true,
+    sun: 0xffffff, ambient: 0xffffff, bg: 0xececea,
+  },
+  [STATUS.WET]: {
+    floor: 0xb9b8b2, window: 0x4fa8e0, open: true, fan: false,
+    sun: 0xffffff, ambient: 0xffffff, bg: 0xececea,
+  },
+};
+
+/**
+ * 在 container 里搭一个简化宿舍，并返回控制它的几个方法。
  *
  * @param {HTMLElement|string} container 容器元素本身，或它的 id
  * @returns {{scene: THREE.Scene, camera: THREE.PerspectiveCamera,
- *            renderer: THREE.WebGLRenderer, cube: THREE.Mesh,
- *            floor: THREE.Mesh, dispose: function(): void}}
+ *            renderer: THREE.WebGLRenderer, floor: THREE.Mesh,
+ *            ground: THREE.Mesh, bed: THREE.Group,
+ *            windowPane: THREE.Mesh, windowPivot: THREE.Group,
+ *            fan: THREE.Group, fanMount: THREE.Group,
+ *            updateScene: function(string): string,
+ *            setFanOn: function(boolean): boolean,
+ *            setLabel: function(string): string,
+ *            dispose: function(): void}}
  * @throws {Error} 找不到容器、或这台设备没有可用的 WebGL
  */
 export function createDorm3D(container) {
@@ -48,7 +110,7 @@ export function createDorm3D(container) {
     throw new Error('createDorm3D：找不到容器 ' + container);
   }
 
-  /* ---------- renderer：渲染器 ---------- */
+  /* ================= renderer：渲染器 ================= */
 
   // 渲染器要最先建，因为它是最可能失败的那一步：设备/浏览器没有 WebGL 时
   // 构造函数直接抛异常。放在最后建的话，前面已经挂了一堆对象却永远用不上。
@@ -65,39 +127,53 @@ export function createDorm3D(container) {
   }
 
   // 高 DPI 屏上 devicePixelRatio 可能是 3 甚至更高，按原样渲染等于要画 9 倍的
-  // 像素，笔记本核显上会明显掉帧。封顶 2 是观感和性能的常见折中：
-  // 再往上肉眼几乎看不出差别，开销却继续翻倍。
+  // 像素，笔记本核显上会明显掉帧。封顶 2 是观感和性能的常见折中。
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-  // 抗锯齿关不掉地会有明显锯齿；它是构造参数，建完再改要重建 renderer。
 
   // three 造出来的 <canvas> 是行内元素（inline），行内元素底部会留出约 4px 的
   // 基线空隙。容器有自己的背景色时，就会在画布下面露出一条缝。
   renderer.domElement.style.display = 'block';
   host.appendChild(renderer.domElement);
 
-  // 阴影默认是关的，得显式打开。这一步只是允许投影，
-  // 「谁投、谁接」还要在光源和物体上分别标（见下面 castShadow / receiveShadow）。
   renderer.shadowMap.enabled = true;
 
-  /* ---------- scene：场景（世界） ---------- */
+  /* ================= 覆盖层：setLabel ================= */
+
+  // 用一层 HTML（绝对定位盖在 canvas 上）而不是把文字画进 3D 里。
+  // 理由：中文在 canvas 上要自己处理字体和分辨率，而 HTML 这边浏览器全包了，
+  // 还自带换行、缩放、无障碍朗读。代价是要给它 pointer-events: none，
+  // 否则这层会吃掉鼠标事件，3D 那边将来想加拖拽就拖不动了。
+  const labelEl = document.createElement('div');
+  labelEl.className = 'scene-label';
+  host.appendChild(labelEl);
+
+  /**
+   * 设置覆盖层上的文字。
+   * @param {string} text 传 null / undefined 就是清空
+   * @returns {string} 实际写上去的文字（方便调用方确认）
+   */
+  function setLabel(text) {
+    labelEl.textContent = (text === undefined || text === null) ? '' : String(text);
+    return labelEl.textContent;
+  }
+
+  /* ================= scene：场景（世界） ================= */
 
   const scene = new THREE.Scene();
-  // 不给背景色的话是纯黑，地板和它的暗部会糊在一起看不出边界。
-  scene.background = new THREE.Color(0xececea);
+  // 不给背景色的话是纯黑，墙和地板的暗部会糊在一起看不出边界。
+  scene.background = new THREE.Color(LOOK[STATUS.NORMAL].bg);
 
-  /* ---------- 灯光 ---------- */
+  /* ================= 灯光 ================= */
 
   // 环境光：没有方向、没有位置，均匀照亮所有物体。它不产生任何明暗，
   // 作用只是把背光面从死黑里拉起来。只留它的话画面会像贴纸一样平。
-  const ambient = new THREE.AmbientLight(0xffffff, 1.8);
+  const ambient = new THREE.AmbientLight(LOOK[STATUS.NORMAL].ambient, 1.8);
 
   // 平行光：有方向、没有位置（position 只用来定方向，把它想成太阳）。
   // 明暗和阴影都是它给的 —— 这才是让画面看起来「立体」的那盏灯。
   //
-  // 位置 (-6, 12, 9) 是相对相机 (5, 4.5, 7.5) 特意挑的：见下面「为什么灯不能
-  // 和相机同侧」那段。
-  const dirLight = new THREE.DirectionalLight(0xffffff, 3);
+  // 位置 (-6, 12, 9) 是相对相机 (12, 8.5, 14) 特意挑的，见下面那段注释。
+  const dirLight = new THREE.DirectionalLight(LOOK[STATUS.NORMAL].sun, 3);
   dirLight.position.set(-6, 12, 9);
 
   dirLight.castShadow = true;
@@ -105,7 +181,7 @@ export function createDorm3D(container) {
   // 阴影相机是一台正交相机，必须手动告诉它「管多大范围」。默认范围很小（±5），
   // 超出去的部分不会投下阴影 —— 表现为「远处的物体影子凭空消失」。
   // 开太大则同样的 1024×1024 要摊到更大面积上，影子发糊。
-  // 所以这里只圈住「会落下阴影的那一小片」，而不是整块地板。
+  // 房间是 10×10、墙高 4，±12 的方盒罩得住还有富余。
   dirLight.shadow.camera.left = -12;
   dirLight.shadow.camera.right = 12;
   dirLight.shadow.camera.top = 12;
@@ -117,56 +193,190 @@ export function createDorm3D(container) {
   // ±5，不报错、不警告，只是阴影边缘莫名其妙地断掉。
   dirLight.shadow.camera.updateProjectionMatrix();
 
-  /* 为什么灯不能和相机同侧 —— 这一步踩过的坑：
+  /* 为什么灯不能和相机同侧 —— 6-1 踩过的坑：
      最初灯放在 (6, 10, 7)，相机在 (6, 5, 9)，两者几乎同一侧。结果阴影落在
      立方体背离光源的那一面，也就是**立方体的正后方**，从相机看过去正好被
      立方体自己挡得严严实实 —— 屏幕上一片干净，看不出任何阴影，很容易误判成
      「阴影没配好」而去乱改 shadowMap，其实阴影一直在正常渲染。
-     同一个原因还有个副作用：两个可见面都朝光，亮度接近，立方体看着是平的。
-     把灯挪到相机的斜对角，两个问题一起解决：影子转到侧面看得见，
-     立方体也变成一亮一暗两个面，「立体」感才出来。
+     同一个原因还有个副作用：两个可见面都朝光，亮度接近，物体看着是平的。
+     现在房间开在 +X / +Z 两侧、相机在 (12, 8.5, 14)，灯就放在对角的
+     (-6, 12, 9)：床和风扇的影子才朝镜头这边落，看得见。
      经验规则：主光偏离相机视线 40°~70°，别和相机同一侧。 */
 
   scene.add(ambient, dirLight);
 
-  /* ---------- 地板 ---------- */
+  /* ================= 地面 ================= */
 
-  // 400×400 不是随手写的大数：相机是贴着地面看的，地板小了这个方形就收不了边，
-  // 远处的角会在地平线附近顶出一个看得见的"山脊"（因为正方形的角比边远，
-  // 投影出来更高）。开到几百之后整条边都压进地平线，看不出是块有限的地板。
-  // 一块 400×400 的平面只有两个三角形，开大不花性能，只是别指望它接阴影 ——
-  // 阴影范围另由上面的 shadow.camera 管，两者无关。
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(400, 400),
-    // MeshStandardMaterial 是「受光」材质：它按照到它身上的光来决定明暗。
-    // 想让它有明暗就必须有灯。roughness/metalness 调的是表面质感：
-    // 粗糙度高 = 哑光，金属度高 = 反光。
-    new THREE.MeshStandardMaterial({ color: 0xb9b8b2, roughness: 0.95, metalness: 0 })
+  // 为什么是两块地面，而不是一块：
+  //   大地面（400×400）负责「接到天边」，让房间不像是浮在虚空里；
+  //   房间地板（10×10）才是「偏热时变红」的那块，范围必须和房间一样大，
+  //   否则整个视野（包括屋外）一起变红，就不像「这间宿舍偏热」了。
+  // 房间地板比大地面高 0.02，避免两个共面的面互相闪烁（z-fighting）。
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(GROUND, GROUND),
+    new THREE.MeshStandardMaterial({ color: 0xa9a8a2, roughness: 0.95, metalness: 0 })
   );
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.02;
+  ground.receiveShadow = true;
+  ground.name = 'ground';
+  scene.add(ground);
+
+  // 地板材质单独留一个引用：updateScene 要改它的颜色。
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: LOOK[STATUS.NORMAL].floor, roughness: 0.9, metalness: 0,
+  });
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM, ROOM), floorMat);
   // PlaneGeometry 默认躺在 XY 平面上（正面朝 +Z），把它想成一面立着的墙。
   // 绕 X 轴转 -90° 才放平、正面朝上（+Y）。忘了转的话，从默认视角看过去
   // 它是一条线（正好侧对着你），会被误判成「地板没画出来」。
   floor.rotation.x = -Math.PI / 2;
-  floor.receiveShadow = true;   // 接住立方体的影子
+  floor.receiveShadow = true;    // 接住床和风扇的影子
+  floor.castShadow = false;      // 地面自己投自己只会出一身麻点
   floor.name = 'floor';
   scene.add(floor);
 
-  /* ---------- 立方体 ---------- */
+  /* ================= 墙 ================= */
 
-  const cube = new THREE.Mesh(
-    new THREE.BoxGeometry(2, 2, 2),
-    // 颜色取自项目的设计 token（--focus / --chart-temp 同一个蓝），
-    // 让 3D 页面和两个看板看起来是一套东西。
-    new THREE.MeshStandardMaterial({ color: 0x2a78d6, roughness: 0.35, metalness: 0.1 })
+  // 只做两面（-X 和 -Z），留下 +X / +Z 开着 —— 相机就在那个角上，
+  // 四面全围上就只能看见一堵墙的外墙皮，看不到屋里。
+  //
+  // 用 PlaneGeometry + DoubleSide，不用有厚度的 BoxGeometry：半透明物体每多一层
+  // 面就多叠一次透明度，盒子的正反面会让墙色变浑，单个平面正好一层。
+  const wallMat = new THREE.MeshStandardMaterial({
+    color: 0xdfe0da,
+    roughness: 0.95,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.3,          // 半透明：能看见屋里，墙又还在
+    side: THREE.DoubleSide, // 从背面看也要画（相机绕到屋后就靠它）
+  });
+
+  const wallBack = new THREE.Mesh(new THREE.PlaneGeometry(ROOM, WALL_H), wallMat);
+  wallBack.position.set(0, WALL_H / 2, -ROOM / 2);
+  wallBack.name = 'wall-back';
+  scene.add(wallBack);
+
+  const wallLeft = new THREE.Mesh(new THREE.PlaneGeometry(ROOM, WALL_H), wallMat);
+  wallLeft.position.set(-ROOM / 2, WALL_H / 2, 0);
+  // 平面默认正面朝 +Z。绕 Y 转 +90° 后正面朝 +X，也就是朝屋里。
+  wallLeft.rotation.y = Math.PI / 2;
+  wallLeft.name = 'wall-left';
+  scene.add(wallLeft);
+
+  // 两面墙都不投也不收阴影：半透明的面接住影子会变成一块块深浅不一的补丁，
+  // 看起来像渲染坏了；投的话又会在地上留下一堵实心墙的影子，和半透明自相矛盾。
+  // 反正屋里的影子有地板接着，够了。
+
+  /* ================= 床 ================= */
+
+  // 床是个 Group：床架 + 床垫各自摆好，再由 Group 整体挪到墙角。
+  // 不这么做的话，每加一个零件都要把「床的位置」重算一遍加进去，
+  // 想挪一下床就得改两处 —— Group 就是把「零件之间的关系」和「整体在哪」分开。
+  const bed = new THREE.Group();
+  bed.name = 'bed';
+
+  const bedFrame = new THREE.Mesh(
+    new THREE.BoxGeometry(2.4, 0.45, 3.4),
+    new THREE.MeshStandardMaterial({ color: 0x8a6a4f, roughness: 0.75, metalness: 0 })
   );
-  // 几何体的原点在它自己的中心，所以方块默认有一半埋在地板下面。
-  // 抬到 y = 1（半个边长）正好坐在上面。
-  cube.position.y = 1;
-  cube.castShadow = true;
-  cube.name = 'cube';
-  scene.add(cube);
+  // 几何体的原点在它自己的中心，所以给了高度就得抬到「半个高」才坐在地上。
+  bedFrame.position.y = 0.45 / 2;
+  bedFrame.castShadow = true;
+  bedFrame.receiveShadow = true;
 
-  /* ---------- camera：相机 ---------- */
+  const mattress = new THREE.Mesh(
+    new THREE.BoxGeometry(2.3, 0.26, 3.3),
+    new THREE.MeshStandardMaterial({ color: 0xeceae2, roughness: 0.9, metalness: 0 })
+  );
+  mattress.position.y = 0.45 + 0.26 / 2;   // 正好摞在床架上面
+  mattress.castShadow = true;
+  mattress.receiveShadow = true;
+
+  bed.add(bedFrame, mattress);
+  // 靠左墙、床头朝后墙。屋里开着扇在 +Z 那侧，不会打架。
+  bed.position.set(-3.6, 0, -3);
+  scene.add(bed);
+
+  /* ================= 窗户 ================= */
+
+  // 开窗不是「把窗户转个角度」那么简单：直接转 windowPane 的话，它绕自己的
+  // 中心转，看起来像块板子在原地打转，不像开窗。真实窗户是绕**一条边**转的。
+  // 做法是加一个 location 在铰链上的空 Group（windowPivot），把窗户挂到它的
+  // 一侧（position.x = 半个宽），再转这个 Group —— 转轴自然就落在左边缘上。
+  // 这是 three/GUI 里最常见的招：想绕非中心点旋转，就给它一个父节点当轴。
+  const windowPivot = new THREE.Group();
+  windowPivot.name = 'window-pivot';
+  // 铰链在后墙上，窗洞左边。z 比墙面（-5）往屋里挪一点，免得和墙共面闪烁。
+  windowPivot.position.set(0.3, 2.3, -ROOM / 2 + 0.1);
+
+  const windowMat = new THREE.MeshStandardMaterial({
+    color: LOOK[STATUS.NORMAL].window, roughness: 0.25, metalness: 0.1,
+  });
+  const windowPane = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.6, 0.1), windowMat);
+  windowPane.position.x = 2.6 / 2;   // 挂在铰链的 +X 侧
+  windowPane.castShadow = true;
+  windowPane.name = 'window-pane';
+  windowPivot.add(windowPane);
+  scene.add(windowPivot);
+
+  /* ================= 风扇 ================= */
+
+  // 风扇分两层，不能合成一层：
+  //   fanMount —— 管「摆在哪儿、朝哪边」，还挂着把风扇连到墙上的支架；
+  //   fan      —— 只管自己转。
+  // 合成一层的话，转起来连支架一起转，看着像整台风扇在墙上打滚。
+  // fan 里就是题目要的那个 Group：一个中心 + 3 片扇叶。
+  const fanMount = new THREE.Group();
+  fanMount.name = 'fan-mount';
+  // 挂在左墙上。绕 Y 转 +90° 后，风扇的局部 +Z 指向世界 +X，也就是朝屋里吹。
+  fanMount.position.set(-4.6, 2.6, 2.4);
+  fanMount.rotation.y = Math.PI / 2;
+
+  const bracket = new THREE.Mesh(
+    new THREE.BoxGeometry(0.16, 0.16, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0x6f7379, roughness: 0.6, metalness: 0.3 })
+  );
+  // 局部 -Z 指向墙（世界 -X），所以支架往 -Z 伸，一头扎进墙里一头接住轮毂。
+  bracket.position.z = -0.28;
+  bracket.castShadow = true;
+  fanMount.add(bracket);
+
+  const fan = new THREE.Group();
+  fan.name = 'fan';
+
+  // 中心（轮毂）。圆柱默认轴向是 Y，而扇叶摊在 XY 平面上（转轴是 Z），
+  // 所以绕 X 转 90° 把它的轴也扳到 Z 上。不扳的话中心是个立着的圆筒，
+  // 从正面看是一根竖条，不像风扇的中心。
+  const hub = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.17, 0.17, 0.24, 16),
+    new THREE.MeshStandardMaterial({ color: 0x6f7379, roughness: 0.5, metalness: 0.4 })
+  );
+  hub.rotation.x = Math.PI / 2;
+  hub.castShadow = true;
+  hub.name = 'fan-hub';
+  fan.add(hub);
+
+  // 3 片扇叶，绕中心互成 120°。
+  // 位置用 cos/sin 撒在半径 0.66 的圆上，同时把叶片自己也绕 Z 转同样的角度 ——
+  // 少了后面那一步，三片叶子的朝向全是水平的，看起来像三根平行棍子而不是风车。
+  const bladeMat = new THREE.MeshStandardMaterial({
+    color: 0xa8aeb4, roughness: 0.55, metalness: 0.2,
+  });
+  for (let i = 0; i < 3; i++) {
+    const angle = (i * Math.PI * 2) / 3;
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(1, 0.34, 0.06), bladeMat);
+    blade.position.set(Math.cos(angle) * 0.66, Math.sin(angle) * 0.66, 0);
+    blade.rotation.z = angle;
+    blade.castShadow = true;
+    blade.name = 'fan-blade-' + i;
+    fan.add(blade);
+  }
+
+  fanMount.add(fan);
+  scene.add(fanMount);
+
+  /* ================= camera：相机 ================= */
 
   // 容器被隐藏时（display:none、或者还没布局完）clientWidth/Height 是 0，
   // 拿 0 去除会得到 Infinity/NaN，相机矩阵整个变成 NaN —— 表现是「画面全黑
@@ -178,20 +388,19 @@ export function createDorm3D(container) {
   // PerspectiveCamera 的四个参数：视锥的竖直张角（度）、宽高比、
   // 近裁剪面、远裁剪面。比近裁剪面更近、或比远裁剪面更远的物体不参与渲染。
   //
-  // far 要能罩住那块 400×400 地板的远角（离相机约 290），否则会在远处切出
-  // 一道弧形的洞 —— 表现为「地板缺了一块」，而且看不出和相机参数有关。
+  // far 要能罩住那块 400×400 大地面的远角，否则会在远处切出一道弧形的洞 ——
+  // 表现为「地面缺了一块」，而且看不出和相机参数有关。
   // 但 near 也不能太小：深度缓冲的精度取决于 far/near 的比值，近处给 0.1
   // 而远处要 1000，比值一万，近处的面就开始打架（z-fighting）。
-  // 这个场景最近的东西离相机也有 5 个单位，near 取 0.5 绰绰有余，比值降到 1200。
+  // 这个场景最近的东西离相机也有十几米，near 取 0.5 绰绰有余，比值降到 1200。
   const camera = new THREE.PerspectiveCamera(50, size().w / size().h, 0.5, 600);
-  // 站在方块的斜前方、比它高一点，稍微俯视 —— 完全平视的话地板会退化成一条线，
-  // 看不出是个平面。
-  camera.position.set(5, 4.5, 7.5);
-  // 看向方块的腰部而不是原点 (0,0,0)：原点在地板平面上，
-  // 盯着那儿会把地板占满整个画面，方块反而被顶到边上去。
-  camera.lookAt(0, 1, 0);
+  // 站在房间开着的那一角（+X / +Z）斜上方看进去，能同时看到两面墙、床、
+  // 窗户和风扇。再高一点会变成俯视图，看不出墙的高度。
+  camera.position.set(12, 8.5, 14);
+  // 看向房间中心偏上：盯地板会把地面占满画面，屋顶那侧反而空一大块。
+  camera.lookAt(0, 1.8, 0);
 
-  /* ---------- 尺寸自适应 ---------- */
+  /* ================= 尺寸自适应 ================= */
 
   function onResize() {
     const { w, h } = size();
@@ -211,7 +420,64 @@ export function createDorm3D(container) {
   onResize();
   window.addEventListener('resize', onResize);
 
-  /* ---------- 动画循环 ---------- */
+  /* ================= 状态 ================= */
+
+  // 风扇转不转，只由这个标志位决定；动画循环每帧读它一次。
+  // 分开存而不是直接看 fan.rotation 有没有在变 —— 「要不要转」和「已经转到哪了」
+  // 是两件事，停的时候角度要留在原地，不能归零。
+  let fanOn = false;
+
+  /**
+   * 手动开关风扇。updateScene 内部走的也是它，所以后调用的那次为准。
+   * @param {boolean} on 真值就转（别传 'false' 这种字符串，非空字符串是真值）
+   * @returns {boolean} 归一化之后的开关状态
+   */
+  function setFanOn(on) {
+    fanOn = !!on;
+    return fanOn;
+  }
+
+  /**
+   * 按状态改变场景外观。
+   *
+   * 四种状态各自改什么，全在上面那张 LOOK 表里，这里只负责照着贴上去。
+   * 不在这里写 if/else 判断 —— 表能一眼看全四种状态，if 要一行行读。
+   *
+   * @param {string} status '正常' / '偏冷' / '偏热' / '偏湿'
+   * @returns {string} 实际生效的状态；传了不认识的值会返回 '正常'
+   */
+  function updateScene(status) {
+    let look = Object.prototype.hasOwnProperty.call(LOOK, status) ? LOOK[status] : null;
+    let applied = status;
+
+    if (!look) {
+      // 不抛异常：这个方法的入参迟早会来自 MQTT 报文，链路上什么都可能传进来。
+      // 显示层不该因为一个坏值整页崩掉 —— 和 dashboard 那边「脏数据拦下来、
+      // 记一条警告、其余照常」是同一个思路。
+      applied = STATUS.NORMAL;
+      look = LOOK[applied];
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[scene] 不认识的 status：' + status + '，按「' + applied + '」显示');
+      }
+    }
+
+    floorMat.color.set(look.floor);
+    windowMat.color.set(look.window);
+    dirLight.color.set(look.sun);
+    ambient.color.set(look.ambient);
+    scene.background.set(look.bg);
+
+    // 开窗直接给角度，不做缓动。按钮点下去要立刻看到变化，
+    // 而且立刻到位也让「打开了吗」这件事一眼可验、好写测试。
+    // 想让开合柔和一点的话，在动画循环里让 rotation.y 朝这个目标值逼近即可。
+    windowPivot.rotation.y = look.open ? WINDOW_OPEN_ANGLE : 0;
+
+    setFanOn(look.fan);
+
+    return applied;
+  }
+
+  /* ================= 动画循环 ================= */
 
   const clock = new THREE.Clock();
 
@@ -220,16 +486,25 @@ export function createDorm3D(container) {
   // 而且将来接 WebXR 时不用改这段代码。
   renderer.setAnimationLoop(function () {
     // Clock 给的是「距上一帧过了多少秒」。用它乘速度，转动快慢就与帧率无关；
-    // 写成 cube.rotation.y += 0.01（每帧固定量）的话，120Hz 屏幕上会转得比
+    // 写成 fan.rotation.z += 0.1（每帧固定量）的话，120Hz 屏幕上会转得比
     // 60Hz 快一倍 —— 换个显示器演示，观感就变了。
     const dt = clock.getDelta();
-    cube.rotation.y += dt * CUBE_SPIN;
+
+    // 每帧都读一次标志位，而不是在 setFanOn 里启动/停掉一套定时器：
+    // 状态只有一个来源，不会出现「关了但还在转」这种两处状态打架的情况。
+    if (fanOn) {
+      fan.rotation.z += dt * FAN_SPIN;
+    }
 
     // 这一行才是真正「画一帧」。没有它，前面所有搭建都只是数据结构，屏幕上什么都不会有。
     renderer.render(scene, camera);
   });
 
-  /* ---------- 清理 ---------- */
+  // 建好就先按「正常」摆一次，而不是靠各个材质构造函数里那点初值。
+  // 否则以后改了 LOOK 表却忘了改构造函数，页面刚打开的样子会和点一下「正常」不一样。
+  updateScene(STATUS.NORMAL);
+
+  /* ================= 清理 ================= */
 
   /**
    * 拆掉这个场景。
@@ -243,6 +518,7 @@ export function createDorm3D(container) {
     // three 的几何体/材质/贴图**不会**因为「从 scene 里 remove 掉」而被回收 ——
     // 它们占的是 GPU 上的显存，JS 的垃圾回收管不着，必须逐个 dispose()。
     // 这是 three 里最经典的显存泄漏来源。
+    // traverse 是**递归**的，所以床、窗户、风扇这些嵌在 Group 里的零件也会被走到。
     scene.traverse(function (obj) {
       if (obj.geometry) obj.geometry.dispose();
       if (obj.material) obj.material.dispose();
@@ -252,7 +528,15 @@ export function createDorm3D(container) {
     if (renderer.domElement.parentNode === host) {
       host.removeChild(renderer.domElement);
     }
+    // 覆盖层是我们自己加进容器的，也得自己摘掉
+    if (labelEl.parentNode === host) {
+      host.removeChild(labelEl);
+    }
   }
 
-  return { scene, camera, renderer, cube, floor, dispose };
+  return {
+    scene, camera, renderer,
+    floor, ground, bed, windowPane, windowPivot, fan, fanMount,
+    updateScene, setFanOn, setLabel, dispose,
+  };
 }
