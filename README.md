@@ -57,13 +57,30 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── test_analysis.py     # analysis 读取、统计、趋势图与报告的测试（134 条，需要 pandas / matplotlib）
 │   ├── test_report.py       # 报告渲染的测试（30 条，需要 pandas）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
+│   ├── miniapp-rules.test.js # 小程序 rules.js ↔ shared/rules.js 交叉比对（48 条）
+│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图（127 条，假 DOM + 假 mqtt）
 │   └── script.test.js       # 前端回归测试（130 条，纯 Node 无依赖）
 ├── mosquitto/dormmate.conf  # Mosquitto 配置：1883(TCP) + 9001(WebSocket)
-├── web/                     # 前端看板（纯静态，无需构建）
+├── web/                     # M1~M3 单节点看板（纯静态，无需构建）
 │   ├── index.html
 │   ├── style.css
 │   ├── script.js            # 订阅渲染 + 手动录入 + 录入历史 + 导出 CSV + 现场快照 + 语音指令
 │   └── vendor/mqtt.min.js   # 本地化的 mqtt.js，不依赖 CDN
+├── dashboard/               # M5 多节点看板：dorm-a/b/c 横向对比（纯静态）
+│   ├── index.html
+│   ├── style.css
+│   ├── dashboard.js         # 订阅 dormmate/+/env、校验报文、复核 status、三节点卡片 + 趋势图 + 日志
+│   └── lib/
+│       ├── mqtt.min.js      # 本地引用：它挂了就一条数据都收不到，所以不走 CDN
+│       └── chart.umd.min.js # 备用：Chart.js 默认走 CDN，断网时改成引用这个
+├── miniapp/                 # M4 微信小程序（用微信开发者工具打开这个目录）
+│   ├── app.js / app.json / app.wxss / sitemap.json
+│   ├── pages/index/         # 输入温湿度 → 按统一规则显示状态与建议
+│   ├── pages/logs/          # 开发者工具自带的日志页
+│   ├── components/navigation-bar/
+│   ├── utils/rules.js       # 规则（小程序侧实现，CommonJS 的 module.exports）
+│   ├── utils/util.js
+│   └── project.config.json  # 注意：里面没有 miniprogramRoot，所以打包根就是 miniapp/
 ├── fixbom.py                # 把源码里误写的字面 BOM 换回可见转义
 ├── start_broker.bat         # 一键启动 Mosquitto
 ├── start_web.bat            # 一键启动静态服务器并打开浏览器
@@ -340,12 +357,14 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 ```bash
 py -3.14 -m unittest discover -s tests -t . -v   # ①②③ Python 侧，共 186 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
+node tests/miniapp-rules.test.js                  # ⑥ 两份规则实现交叉比对，48 条
+node tests/dashboard.test.js                      # ⑦ 多节点看板，127 条
 node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ```
 
 `unittest discover` 会把 `tests/` 下三个 `test_*.py` 一起收进来
 （22 + 134 + 30 = 186 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib。
-`node` 那两条不需要任何依赖，也不用起服务器。
+`node` 那四条不需要任何依赖，也不用起服务器。
 
 画图那几只测试在开头 `skipUnless(HAS_MPL)`：没装 matplotlib 时会**跳过**
 （输出里是 `s` 不是 `.`）而不是报一堆错 —— 读 CSV、统计、复核这几步没它也
@@ -358,6 +377,8 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 | ③ 30 条 | 报告的段落齐全、占比、表格里的竖线/换行转义、空表不出现 `nan%`、写文件的编码与 LF 换行、结论的并列与阈值判断、报告里**不出现**建议文案（那是网页 `getAdvice()` 的活） |
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
 | ⑤ 130 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错 |
+| ⑥ 48 条 | `miniapp/utils/rules.js` 与 `shared/rules.js` 的交叉比对：两份实现分别放进各自的 vm 跑，在 8211 组温湿度（温度 -20~60 步长 0.5 × 湿度 0~100 步长 2）上逐对比 `judgeStatus` 与 `getAdvice`，结果必须完全一致；另有一条守卫确认这个网格真的覆盖到了四种状态，否则「全都一样」可能只是压根没测到 |
+| ⑦ 127 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示 |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -367,7 +388,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ② 和 ⑤ 各踩过一次**「检查匹配到自己的注释」**的坑（注释里写了 `export`、
 `toLocaleString`，检查就报失败），所以两处都是先把注释剥掉再查语法。
 
-**改 `status_rules.py` 要跑 ①（②③ 顺带一起跑）；改 `shared/rules.js` 要跑 ④（并确认 ⑤ 还绿）。**
+**改 `status_rules.py` 要跑 ①（②③ 顺带一起跑）；改 `shared/rules.js` 要跑 ④，改 `miniapp/utils/rules.js` 要跑 ⑥（两次改完都再确认 ⑤ 还绿）。**
 
 ## simulator.py 常用参数
 
@@ -936,6 +957,132 @@ Step 3-3 才做语音合成。现在它把"要念的内容"（各节点的温度
 被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、
 字面匹配的边界（「拍张照」不算）、`not-allowed` / `network` / `no-speech` 三种错误码都
 出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错。
+
+## Step 5-3 / 5-4：多节点 Dashboard
+
+`dashboard/` 是和 `web/` 并列的第二个前端，专门看 dorm-a / dorm-b / dorm-c 三个节点：
+
+| | `web/` | `dashboard/` |
+|---|---|---|
+| 面向 | M1~M3，单个宿舍的完整功能 | M5，三个节点的横向对比 |
+| 内容 | 卡片 + 手动录入 + 录入历史 + 导出 CSV + 现场快照 + 语音指令 | 三张节点卡 + 两张趋势图 + 消息日志 |
+| 数据 | 订阅 `dormmate/<nodeId>/env`，一次一个节点 | 订阅 `dormmate/+/env`，`+` 一次收齐三个 |
+
+打开方式和 `web/` 一样走 8000 端口的静态服务器（`start_web.bat` 或手动起）：
+
+```
+http://localhost:8000/dashboard/
+```
+
+### 订阅与连接
+
+Topic 用通配符 `dormmate/+/env`，一条订阅覆盖三个节点 —— 加第四个节点不用改订阅，
+只要有人往 `dormmate/dorm-d/env` 发，页面就会自己多出一张卡。真正的节点白名单在
+`dashboard.js` 的 `NODE_IDS`，加节点改那一处。
+
+Broker 地址不是写死的 `localhost`，而是跟着页面地址走：
+
+```js
+function brokerUrl(hostname) { return 'ws://' + (hostname || 'localhost') + ':9001'; }
+```
+
+手机用 `http://10.102.196.160:8000/dashboard/` 打开时会连 `ws://10.102.196.160:9001`。
+写死 `localhost` 的话，手机浏览器里的 localhost 指的是手机自己，连不回来。
+（`web/script.js` 里也有一份同样的写法，故意各留各的：两个页面互不依赖，为一行代码
+共用一个 `shared/` 文件反而要多发一次请求。改的时候两边一起改。）
+
+### 连接状态显示的是 7 种，不是 3 种
+
+顶栏那个圆点配文字的小胶囊，状态由 mqtt.js 的 5 个事件映射而来：
+
+| 事件 | 文案 | 点色 |
+|---|---|---|
+| 初始 | 连接中… | 黄 |
+| `connect` | 已连接 | 绿 |
+| `reconnect` | 重连中… | 黄 |
+| `close` | 已断开 | 红 |
+| `offline` | 已离线 | 红 |
+| `error` | 连接失败 | 红 |
+| 手动断开 | 未连接 | 红 |
+
+比「连接中 / 已连接 / 已断开」三态细：`reconnect` 和 `error` 都落不到「已断开」上，
+混在一起就分不清「正在重试」和「彻底连不上」。
+
+每个回调开头都有一句 `if (!current()) return;`（`current()` 就是 `client === c`）。
+这不是多余的 —— 手动断开时旧连接的回调还会补触发一次，不挡掉就会把刚建立的新连接
+的状态覆盖成旧的。
+
+`disconnect()` 里先 `client = null` 再 `c.end(true)`：`end()` 会触发 `close`，那时
+`client` 已经是 null，回调里的 `current()` 认出「这是被主动断的那根」直接返回，不会
+过一会儿又把状态跳回「已断开」。`end(true)` 的 `true` 是停止自动重连。
+
+### mqtt.js 用本地文件，Chart.js 用 CDN —— 这是故意的
+
+同样两个库，引用方式不一样：
+
+| 库 | 引用方式 | 挂了会怎样 |
+|---|---|---|
+| mqtt.js | `<script src="lib/mqtt.min.js">` | **一条数据都收不到**，整个看板是空的 |
+| Chart.js | npmmirror CDN | 只是少两张趋势图，卡片和日志照常用 |
+
+风险不对等，所以对待方式也不一样。现场没网时把 Chart.js 那行换成
+`lib/chart.umd.min.js`（文件已经在 `dashboard/lib/` 里放好了），整个页面就完全不依赖
+外网。两个文件都是现成的，不必再下一次：
+
+| 文件 | 版本 | 字节数 | sha256 |
+|---|---|---|---|
+| `dashboard/lib/mqtt.min.js` | 5.10.1 | 329535 | `b088a7f9045df4e478dbc378f41125066e43d9c602755ee4c5cda0f3e9380ba0` |
+| `dashboard/lib/chart.umd.min.js` | 4.5.1 | 208522 | `48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a` |
+
+CDN 源特意选 **npmmirror** 而不是 jsDelivr —— 实测本机连 jsDelivr 是 0.2 秒直接失败
+的连不上。Chart.js 要下 `dist/chart.umd.min.js`，`dist/chart.js` 是 ESM 版，用
+`<script src>` 引它 `Chart` 会是 undefined。
+（文末「开源组件来源」那张许可证表还是空的，别看成已经填好了。）
+
+### 收到的 `status` 一律复核
+
+`handleMessage` 不信任报文里的 `status`，一律调 `judgeStatus()` 重算，不一致就以规则
+为准，并在日志里标成「警告」写清差在哪。这和 Python 侧 `analysis/rules.py` 复核 CSV
+是同一个思路 —— 数据在链路上可能被别的东西写坏，显示出去之前再算一遍。
+
+发现异常**不丢报文**：topic 里的节点名和报文里的 `nodeId` 对不上时只警告，节点身份以
+报文自己声明的为准（统一 JSON 里 `nodeId` 是必填字段）。真正会丢弃的只有解析失败、
+字段缺失、类型不对、数值是 NaN/Infinity、节点名不在 `NODE_IDS` 里这几种。
+一条报文只写一行日志，多个问题合并进那一行 —— 否则日志区就不再是「每条消息一行」，
+对不上数了。
+
+### Console 会打印每条原始报文
+
+```
+[DormMate] 收到 MQTT 原始消息 dormmate/dorm-a/env {"nodeId":"dorm-a",...}
+```
+
+打印点在 `client.on('message')` 这个边界上，**不在 `handleMessage` 里** —— 那边是真实
+MQTT 和「模拟三节点数据」按钮共用的，模拟数据混进来冒充实收报文会把排错方向带偏。
+
+排错时先看 Console：「压根没收到消息」和「收到了但被 `handleMessage` 拦下了」是两回事，
+而页面上的日志区只记后者，前者完全不显示。
+
+### 关掉模拟器后卡片还有数，这不是 bug
+
+`config.py` 里 `RETAIN = True`（注释写着「保留最后一条，后开的看板能立刻看到数值」），
+所以模拟器停了之后再打开页面，仍会立刻收到 Broker 补发的最后一条。这是有意的：演示时
+不用先干等。要区分「实时数据」和「补发的旧数据」，看卡片上的时间戳。
+
+### 测试
+
+`tests/dashboard.test.js`，127 条，纯 Node 无依赖。它造了一套假 DOM 和假 `mqtt`
+（`connect()` 返回的对象记下注册的 handler 和订阅的 topic），把 `dashboard.js` 真跑起来，
+再手动触发 `connect` / `message` 这些回调。
+
+覆盖到：三个节点的数据互不串线（三份 `history` 是不是各归各的）、图表跟着切换节点重绘、
+脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致
+时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、
+以及 mqtt.js 没加载时的降级提示。
+
+`tests/miniapp-rules.test.js` 那 48 条是另一回事：它把 `miniapp/utils/rules.js` 和
+`shared/rules.js` 放进两个独立的 vm 各跑一遍，在 8211 组温湿度上逐对比对，防止两份实现
+悄悄跑偏。参考「⚠ 规则有两份实现，必须同步」。
 
 ## 已知限制
 
