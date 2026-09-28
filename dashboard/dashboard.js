@@ -1,9 +1,12 @@
 // dashboard.js
-// Step 5-3：三节点 Dashboard。本步只用本地模拟数据，还没有接 MQTT。
+// Step 5-3 / 5-4：三节点 Dashboard。订阅 MQTT 显示真实数据，
+// 「模拟三节点数据」按钮则在没接 Broker 时也能把界面跑起来。
 //
-// handleMessage(topic, payloadText) 是唯一的消息入口。现在由「模拟三节点数据」
-// 按钮调用；下一步接上 MQTT 之后，由 client.on('message') 调用它，
-// 校验、复核、更新、刷新这一整条链路两端共用，不用改这个文件里别的地方。
+// handleMessage(topic, payloadText) 是唯一的消息入口，两个来源都走它：
+//   client.on('message')  -> 真实 MQTT
+//   simulate()            -> 本地模拟
+// 校验、复核 status、落库、刷新这一整条链路两端共用，所以模拟数据看到的行为
+// 和真实数据完全一致 —— 反过来说，改 handleMessage 就等于同时改了两边。
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -113,6 +116,9 @@ const el = {
   chartNote: document.getElementById('chart-note'),
   simulate: document.getElementById('simulate'),
   clear: document.getElementById('clear'),
+  conn: document.getElementById('conn'),
+  connText: document.getElementById('conn-text'),
+  toggle: document.getElementById('toggle'),
 };
 
 /* ---------- 消息日志 ---------- */
@@ -547,10 +553,122 @@ function clearAll() {
   renderLog();
 }
 
+/* ---------- MQTT ---------- */
+
+/* Broker 地址跟着页面的访问地址走：本机打开就是 ws://localhost:9001，
+   手机用 http://10.102.196.160:8000/dashboard/ 打开就是
+   ws://10.102.196.160:9001。写死 localhost 的话，手机浏览器里的 localhost
+   指的是手机自己，连不回来。
+   （和 web/script.js 里那份是同一套写法，故意各留一份：两个页面互不依赖，
+   为三行代码共用一个 shared/ 文件反而要多发一次请求。改的时候两边一起改。） */
+function brokerUrl(hostname) {
+  return 'ws://' + (hostname || 'localhost') + ':9001';
+}
+
+const BROKER_URL = brokerUrl(location.hostname);
+const TOPIC = 'dormmate/+/env';
+
+/* 当前那根连接。null 表示没连上，或已被主动断开。 */
+let client = null;
+
+function setConn(kind, text) {
+  el.conn.className = 'conn conn--' + kind;
+  el.connText.textContent = text;
+}
+
+function updateToggle() {
+  el.toggle.textContent = client ? '断开' : '连接';
+}
+
+/**
+ * 断开并停止自动重连。
+ *
+ * 先把 client 置空再 end()：end() 会触发 close 回调，那时 client 已经是 null，
+ * 回调里的 current() 认出「这是被主动断开的那根」而直接返回，不会过一会儿又把
+ * 状态覆盖回「已断开」。不这么做的话，点「断开」会闪一下「未连接」再跳回「已断开」。
+ */
+function disconnect() {
+  const c = client;
+  client = null;
+  if (c) c.end(true);   // true = 强制断开，不再自动重连
+  setConn('off', '未连接');
+  updateToggle();
+}
+
+function connect() {
+  if (typeof mqtt === 'undefined') {
+    setConn('off', '未加载 mqtt.js');
+    logLine('error', TOPIC, '缺少 web/vendor/mqtt.min.js，请重新下载后刷新');
+    return;
+  }
+  if (client) return;   // 已经连着了，别叠第二根
+
+  setConn('pending', '连接中…');
+
+  const c = mqtt.connect(BROKER_URL, {
+    clientId: 'dormmate-dash-' + Math.random().toString(16).slice(2, 8),
+    clean: true,
+    reconnectPeriod: 2000,
+    connectTimeout: 5000,
+    keepalive: 30,
+  });
+  client = c;
+
+  /* 每个回调开头都先确认自己还是当前那根连接。断开或换过连接之后，旧连接的回调
+     还可能补触发一次，不挡掉就会把新连接的状态覆盖成旧的。 */
+  function current() { return client === c; }
+
+  c.on('connect', function () {
+    if (!current()) return;
+    setConn('on', '已连接');
+    updateToggle();
+    c.subscribe(TOPIC, { qos: 1 }, function (err) {
+      if (err) {
+        console.error('[DormMate] 订阅失败：', err);
+        setConn('off', '订阅失败');
+      }
+    });
+  });
+
+  c.on('reconnect', function () {
+    if (!current()) return;
+    setConn('pending', '重连中…');
+  });
+
+  c.on('close', function () {
+    if (!current()) return;
+    setConn('off', '已断开');
+  });
+
+  c.on('offline', function () {
+    if (!current()) return;
+    setConn('off', '已离线');
+  });
+
+  c.on('error', function (err) {
+    if (!current()) return;
+    console.error('[DormMate] 连接错误：', err);
+    setConn('off', '连接失败');
+  });
+
+  /* 唯一的接入口。mqtt.js 给的是二进制，转成字符串交给 handleMessage ——
+     校验、复核 status、落库、刷新全在那边，这里不做第二遍。 */
+  c.on('message', function (topic, payload) {
+    handleMessage(topic, payload.toString());
+  });
+
+  updateToggle();
+}
+
 /* ---------- 启动 ---------- */
 
 el.simulate.addEventListener('click', simulate);
 el.clear.addEventListener('click', clearAll);
+
+el.toggle.addEventListener('click', function () {
+  if (client) disconnect();
+  else connect();
+});
 
 /* 卡片是每次重绘的，所以点击用事件委托挂在容器上，不给每张卡单独绑 */
 el.cards.addEventListener('click', function (e) {
@@ -565,3 +683,7 @@ renderCards();
 renderDetailHead();
 renderCharts();
 renderLog();
+
+/* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，
+   现场没网的时候正好用来演示界面。 */
+connect();

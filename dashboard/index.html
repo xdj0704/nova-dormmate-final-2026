@@ -12,9 +12,13 @@
   <header class="top">
     <div>
       <h1>DormMate 多节点 Dashboard</h1>
-      <p class="sub">dorm-a · dorm-b · dorm-c 对比 · 本步用本地模拟数据，还没接 MQTT</p>
+      <p class="sub">dorm-a · dorm-b · dorm-c 三节点对比 · 订阅 <code>dormmate/+/env</code></p>
     </div>
     <div class="top-actions">
+      <span id="conn" class="conn conn--pending">
+        <span class="conn-dot"></span><span id="conn-text">未连接</span>
+      </span>
+      <button id="toggle" class="ghost" type="button">连接</button>
       <button id="simulate" class="primary" type="button">模拟三节点数据</button>
       <button id="clear" class="ghost" type="button">清空</button>
     </div>
@@ -78,6 +82,9 @@
      现场没网就把下面这行换成 <script src="lib/chart.umd.min.js"></script>，
      那个文件已经在 dashboard/lib/ 里放好了，其余不用动。 -->
 <script src="https://registry.npmmirror.com/chart.js/4.5.1/files/dist/chart.umd.min.js"></script>
+<!-- mqtt.js 直接用 web/vendor 里已经下载好的那一份，不再存一份。
+     它必须在 dashboard.js 之前加载：dashboard.js 打开页面就会调 connect()。 -->
+<script src="../web/vendor/mqtt.min.js"></script>
 <script src="../shared/rules.js"></script>
 <script src="dashboard.js"></script>
 </body>

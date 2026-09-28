@@ -36,7 +36,8 @@ function makeEl(id) {
 
 const els = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'simulate', 'clear', 'chart-temp', 'chart-humidity'].forEach((id) => { els[id] = makeEl(id); });
+  'simulate', 'clear', 'chart-temp', 'chart-humidity',
+  'conn', 'conn-text', 'toggle'].forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
 
@@ -71,9 +72,29 @@ class ChartStub {
   update() { this.updates += 1; }
 }
 
+/* ---------- mqtt.js 打桩 ---------- */
+/* 不打桩的话 connect() 会走进「未加载 mqtt.js」那条分支，MQTT 这段等于没测。
+   这里把 connect/subscribe/on 都记下来，测试就能主动触发握手、主动投递消息。 */
+const mqttStub = {
+  clients: [],
+  connect(url, opts) {
+    const handlers = {};
+    const c = {
+      url, opts, handlers, subscribed: [], ended: false,
+      on(ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); return c; },
+      subscribe(topic, o, cb) { c.subscribed.push(topic); if (cb) cb(null); return c; },
+      end() { c.ended = true; return c; },
+    };
+    mqttStub.clients.push(c);
+    return c;
+  },
+};
+
 const context = {
   document: documentStub,
   Chart: ChartStub,
+  mqtt: mqttStub,
+  location: { hostname: 'localhost' },
   getComputedStyle: () => ({ getPropertyValue: (n) => PALETTE[n] || '' }),
   window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
   console,
@@ -97,12 +118,14 @@ globalThis.__clearAll = clearAll;
 globalThis.__selectNode = selectNode;
 globalThis.__current = function () { return currentNodeId; };
 globalThis.__topicNode = topicNode;
+globalThis.__connect = connect;
+globalThis.__disconnect = disconnect;
 `;
 vm.runInContext(src, context, { filename: path.join(ROOT, 'dashboard', 'dashboard.js') });
 
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
-  __topicNode: topicNode } = context;
+  __topicNode: topicNode, __connect: connect, __disconnect: disconnect } = context;
 
 /* ---------- 断言 ---------- */
 let pass = 0, fail = 0;
@@ -265,6 +288,109 @@ check('三个节点都空了', ['dorm-a', 'dorm-b', 'dorm-c'].map((id) => nodes[
 check('latest 也清了', ['dorm-a', 'dorm-b', 'dorm-c'].map((id) => nodes[id].latest), [null, null, null]);
 check('日志清空', messages.length, 0);
 check('清空后没炸', true, true);
+
+/* ============ K. MQTT 接线 ============ */
+console.log('\n=== K. MQTT 接线 ===');
+check('打开页面就连了 Broker', mqttStub.clients.length, 1);
+const mc = mqttStub.clients[0];
+check('连的地址由页面 hostname 拼出来', mc.url, 'ws://localhost:9001');
+check('还没握手成功时不订阅', mc.subscribed, []);
+check('刚打开时状态是「连接中…」', els['conn-text'].textContent, '连接中…');
+
+/* 模拟 Broker 握手成功 */
+mc.handlers.connect.forEach((fn) => fn());
+check('连上后订阅 dormmate/+/env', mc.subscribed, ['dormmate/+/env']);
+check('状态变成「已连接」', els['conn-text'].textContent, '已连接');
+check('指示灯切到绿色那档', els.conn.className, 'conn conn--on');
+
+/* 真投一条 MQTT 消息进来 —— 这一步的核心：消息要一路走到 handleMessage */
+clearAll();
+mc.handlers.message.forEach((fn) => fn('dormmate/dorm-b/env', JSON.stringify({
+  nodeId: 'dorm-b', temperature: 31, humidity: 60, status: '偏热', time: '2026-09-22 20:30:00',
+})));
+check('MQTT 消息落到了 dorm-b', nodes['dorm-b'].history.length, 1);
+check('就是那条 31℃', nodes['dorm-b'].latest.temperature, 31);
+check('dorm-a 没被牵连', nodes['dorm-a'].history.length, 0);
+check('dorm-c 没被牵连', nodes['dorm-c'].history.length, 0);
+check('日志级别 ok', top().level, 'ok');
+
+/* 走 MQTT 进来的脏数据，被同一条链路拦下 */
+mc.handlers.message.forEach((fn) => fn('dormmate/dorm-b/env', '{坏掉的 json'));
+check('MQTT 来的脏 JSON 被拦下', top().level, 'error');
+check('拦下后没写进历史', nodes['dorm-b'].history.length, 1);
+
+/* 断开 */
+disconnect();
+check('断开时强制 end，不再自动重连', mc.ended, true);
+check('状态回到「未连接」', els['conn-text'].textContent, '未连接');
+/* 旧连接的 close 回调补触发一次，不该把状态覆盖回去 */
+mc.handlers.close.forEach((fn) => fn());
+check('旧连接的 close 回调不覆盖当前状态', els['conn-text'].textContent, '未连接');
+
+connect();
+check('能重新连一根', mqttStub.clients.length, 2);
+const mc2 = mqttStub.clients[1];
+check('重连后状态是「连接中…」', els['conn-text'].textContent, '连接中…');
+connect();
+check('已经连着时再点「连接」不会叠第二根', mqttStub.clients.length, 2);
+mc2.handlers.connect.forEach((fn) => fn());
+check('第二根也订阅同样的 topic', mc2.subscribed, ['dormmate/+/env']);
+check('第二根连上后状态是「已连接」', els['conn-text'].textContent, '已连接');
+
+mc2.handlers.reconnect.forEach((fn) => fn());
+check('掉线重连时显示「重连中…」', els['conn-text'].textContent, '重连中…');
+mc2.handlers.connect.forEach((fn) => fn());
+check('重连成功后回到「已连接」', els['conn-text'].textContent, '已连接');
+
+/* 出错分支：console.error 是故意调的，这里临时静音，免得刷屏 */
+const realError = console.error;
+console.error = () => {};
+mc2.handlers.error.forEach((fn) => fn(new Error('boom')));
+console.error = realError;
+check('连接出错显示「连接失败」', els['conn-text'].textContent, '连接失败');
+
+/* ============ L. 没加载 mqtt.js（现场没网的情况）============ */
+console.log('\n=== L. 没加载 mqtt.js ===');
+const els2 = {};
+['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
+  'simulate', 'clear', 'chart-temp', 'chart-humidity',
+  'conn', 'conn-text', 'toggle'].forEach((id) => { els2[id] = makeEl(id); });
+
+const doc2 = {
+  documentElement: makeEl('html'),
+  getElementById: (id) => els2[id] || makeEl(id),
+  querySelector: () => makeEl('x'),
+  querySelectorAll: () => [],
+  addEventListener() {},
+};
+
+const ctx2 = {
+  document: doc2,
+  Chart: ChartStub,
+  location: { hostname: 'localhost' },
+  /* 故意不给 mqtt —— 模拟 vendor/mqtt.min.js 没下载到 */
+  getComputedStyle: () => ({ getPropertyValue: () => '' }),
+  window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
+  console, JSON, Math, Date, Number, Object, Array, String, Set, isNaN, parseInt,
+};
+ctx2.globalThis = ctx2;
+ctx2.window.document = doc2;
+
+let src2 = fs.readFileSync(path.join(ROOT, 'dashboard', 'dashboard.js'), 'utf8');
+src2 += ';globalThis.__simulate = simulate;\n';
+
+vm.createContext(ctx2);
+vm.runInContext(fs.readFileSync(path.join(ROOT, 'shared', 'rules.js'), 'utf8'), ctx2);
+vm.runInContext(src2, ctx2, { filename: path.join(ROOT, 'dashboard', 'dashboard.js') });
+
+check('没有 mqtt 也不抛异常，页面照常起来', typeof ctx2.judgeStatus, 'function');
+check('状态显示「未加载 mqtt.js」', els2['conn-text'].textContent, '未加载 mqtt.js');
+check('日志写明了缺哪个文件', els2['log-body'].innerHTML.includes('mqtt.min.js'), true);
+/* 关键的降级行为：连不上 Broker 也得能演示界面 */
+ctx2.__simulate();
+check('没有 Broker 时「模拟三节点数据」照样能用', els2['cards'].innerHTML.includes('dorm-a'), true);
+check('三张卡都出来了', ['dorm-a', 'dorm-b', 'dorm-c'].every(
+  (id) => els2['cards'].innerHTML.includes(id)), true);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);
