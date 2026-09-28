@@ -34,6 +34,7 @@ DormMate Final 是一个**宿舍环境监测助手**。它把宿舍的温湿度�
 ```
 nova-dormmate-final-2026/    # 仓库根
 ├── README.md                # 本文档
+├── .gitattributes           # 钉住第三方文件的换行，README 里的 sha256 才对得上
 ├── requirements.txt         # Python 依赖：paho-mqtt + pandas + matplotlib
 ├── status_rules.py          # 规则（Python 侧唯一实现，发布端算 status 用）
 ├── config.py                # Broker / 端口 / Topic / 节点 等统一配置
@@ -1040,6 +1041,8 @@ function brokerUrl(hostname) { return 'ws://' + (hostname || 'localhost') + ':90
 | `dashboard/lib/mqtt.min.js` | 5.10.1 | 329535 | `b088a7f9045df4e478dbc378f41125066e43d9c602755ee4c5cda0f3e9380ba0` |
 | `dashboard/lib/chart.umd.min.js` | 4.5.1 | 208522 | `48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a` |
 
+（这几份的字节数和 hash 在 clone 之后同样成立，原因见 Step 6-1 那节的说明。）
+
 CDN 源特意选 **npmmirror** 而不是 jsDelivr —— 实测本机连 jsDelivr 是 0.2 秒直接失败
 的连不上。Chart.js 要下 `dist/chart.umd.min.js`，`dist/chart.js` 是 ESM 版，用
 `<script src>` 引它 `Chart` 会是 undefined。
@@ -1130,6 +1133,11 @@ ES Module，`<script type="module">` 受 CORS 约束，file:// 下的模块会�
 | 文件 | 版本 | 字节数 | sha256 |
 |---|---|---|---|
 | `3d/lib/three.module.js` | 0.160.0 | 1272972 | `76dea8151bc9352aef3528b4262e249b2604f62543828328db978d060d61a495` |
+
+上面这两个数是照**下载下来的文件**算的，`clone` 下来核对也一样 —— 根目录的
+`.gitattributes` 把 `3d/lib/` 钉成了 `text eol=lf`。不钉的话，`core.autocrlf=true`
+的机器 clone 出来会被换成 CRLF（1272972 变成 1326016 字节），照表核对的人只会以为
+自己下错了文件。
 
 这个文件是**自包含**的：内部不再 import 任何东西，所以整张映射表只要有 "three"
 一条就够。换成更新的版本时要留意 —— 新版把核心拆去了 `three.core.js`，
