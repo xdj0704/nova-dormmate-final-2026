@@ -25,7 +25,6 @@ DormMate Final 是一个**宿舍环境监测助手**。它把宿舍的温湿度�
 | 语音指令（ASR） | ✅ 已完成（Step 3-2） | 说「朗读」播报当前状态、说「拍照」拍下现场画面，识别到的文字和执行结果显示在页面上 |
 | 语音播报（TTS） | ⏳ **待完成**（Step 3-3） | `speakStatus()` 目前只把要念的内容打到 Console，还没有真正念出来 |
 | 多节点 | ⏳ **待完成**（M5） | `dorm-b` / `dorm-c` 尚未启用，眼下只有 `dorm-a` 在发数据 |
-| Dashboard / 3D 看板 | ⏳ **待完成** | `shared/rules.js` 是按"看板 / Dashboard / 3D 共用一份规则"设计的，后两者还没开始 |
 
 每个模块的具体做法、测试条数和踩过的坑，记在下面各自的 Step 小节里。
 不清楚某处为什么这么写时，先看那一节的「几个决定」表格。
@@ -40,7 +39,7 @@ nova-dormmate-final-2026/    # 仓库根
 ├── config.py                # Broker / 端口 / Topic / 节点 等统一配置
 ├── simulator.py             # M1 数据源：生成并发布环境数据
 ├── shared/
-│   └── rules.js             # 规则（JS 侧唯一实现，看板/Dashboard/3D 共用）
+│   └── rules.js             # 规则（JS 侧唯一实现，前端页面共用一份）
 ├── analysis/                # Step 2-2/2-3/2-4/2-5：分析层（是个包，所以有 __init__.py）
 │   ├── __init__.py
 │   ├── rules.py             # judge_status() —— 转发 status_rules，不重抄规则
@@ -490,8 +489,8 @@ node tests/rules.test.js                         # JS 侧 31 条
 判成「偏湿」，两边都不报错，只是数据对不上。测试里用 `assertIs` 直接比函数对象，
 一旦谁把它改成第二份实现就会红。
 
-JS 侧只有 `shared/rules.js` 这一份。看板页面、后续的 Dashboard 和 3D 场景都从
-它取函数（`<script src="../shared/rules.js">`，或者从 `web/` 出发的相对路径），
+JS 侧只有 `shared/rules.js` 这一份。页面从它取函数
+（`<script src="../shared/rules.js">`，或者从 `web/` 出发的相对路径），
 不要再往别的文件里抄第二份。
 
 ## Step 2-2 / 2-3 / 2-4 / 2-5：Python 读取、复核、统计、趋势图与报告
