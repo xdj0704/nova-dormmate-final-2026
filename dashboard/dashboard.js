@@ -28,7 +28,7 @@ import { createDorm3D } from '../3d/scene.js';
 /* 优先关注的算法。只有两个函数被这里用到，其余（parseTime / fmtDuration /
    abnormalDuration）是给测试单独钉的，页面不直接调。
    nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个。 */
-import { pickPriority, nextAbnormal } from './logic.js';
+import { pickPriority, nextAbnormal, beginHandling, nextHandling } from './logic.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -41,10 +41,21 @@ const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
 /* abnormalStart / abnormalCount 是 Step 7-1 加的：当前这段**连续异常**
    从哪条消息开始、已经有几条。怎么变由 logic.js 的 nextAbnormal 决定，
    这里只负责存。0 / null = 不在异常中。
-   「优先关注」比的就是这两个字段 —— 见 renderPriority。 */
+   「优先关注」比的就是这两个字段 —— 见 renderPriority。
+
+   handling / action / actionTime / dataAfterAction 是 Step 7-2 加的：
+   这个节点被「处理」过没有、做了什么、什么时候做的、做完之后收到了什么。
+   怎么变由 logic.js 的 beginHandling（按按钮）和 nextHandling（来新消息）
+   决定，这里同样只负责存。
+     handling  '无' | '处理中' | '已恢复'
+   这一份就是**唯一**的处理状态：卡片上那句「处理中｜风扇已开启」、
+   详情区那行字、3D 里风扇转不转，全都读这几个字段，谁都不另存一份。 */
 const nodes = {};
 NODE_IDS.forEach(function (id) {
-  nodes[id] = { latest: null, history: [], abnormalStart: null, abnormalCount: 0 };
+  nodes[id] = {
+    latest: null, history: [], abnormalStart: null, abnormalCount: 0,
+    handling: '无', action: null, actionTime: null, dataAfterAction: null,
+  };
 });
 
 /* 每个节点最多留多少条历史。不设上限的话挂机久了数组会一直涨，图上也会挤成
@@ -139,6 +150,8 @@ const el = {
   logCount: document.getElementById('log-count'),
   detailNode: document.getElementById('detail-node'),
   detailMeta: document.getElementById('detail-meta'),
+  actionFan: document.getElementById('action-fan'),
+  actionState: document.getElementById('action-state'),
   chartNote: document.getElementById('chart-note'),
   scene3d: document.getElementById('scene3d'),
   priority: document.getElementById('priority'),
@@ -204,6 +217,11 @@ function cardHTML(nodeId) {
   const p = node.latest;
   const view = viewFor(p.status);
 
+  /* 处理动作那一行。没按过按钮就整行不出现 ——
+     那时候卡片和 7-1 长得一模一样，不多一行空占位。 */
+  const handling = node.handling === '无' ? ''
+    : '<span class="card-action">' + esc(node.handling + '｜' + node.action) + '</span>';
+
   return '<button class="card ' + view.cls + (active ? ' is-active' : '') + '"'
     + ' type="button" data-node="' + esc(nodeId) + '" aria-pressed="' + active + '">'
     + head
@@ -215,6 +233,7 @@ function cardHTML(nodeId) {
     + '<span class="tile"><span class="tile-label">湿度</span>'
     + '<span class="tile-value">' + fmt(p.humidity) + '<i class="tile-unit">%</i></span></span>'
     + '</span>'
+    + handling
     + '<span class="card-foot">更新于 ' + esc(p.time) + '</span>'
     + '</button>';
 }
@@ -231,6 +250,41 @@ function renderDetailHead() {
   el.detailMeta.textContent = node.latest
     ? '最新一条 ' + node.latest.time + ' · 这个节点已收到 ' + node.history.length + ' 条'
     : '还没有收到这个节点的数据';
+}
+
+/**
+ * 详情区那行处理状态的文字。
+ *
+ * 说的是**当前这个节点**的事，所以整个跟着 currentNodeId 走。
+ * 处理过就把三个字段原样摆出来：做了什么、记在哪条数据上、之后收到了什么。
+ * 这几个值全从节点上读，没有第二份副本可以跟它不一致。
+ */
+function actionText(node) {
+  if (node.handling !== '无') {
+    const head = node.handling + '｜' + node.action + '（记在 ' + node.actionTime + ' 这条数据上）';
+    const d = node.dataAfterAction;
+    if (!d) return head + ' · 还没收到动作之后的数据';
+    return head + ' · 之后收到 ' + d.time + '：'
+      + fmt(d.temperature) + '℃ / ' + fmt(d.humidity) + '% ' + d.status;
+  }
+  if (!node.latest) return '还没有收到这个节点的数据';
+  if (node.latest.status === '正常') return '当前状态正常，不需要处理';
+  /* 有异常、还没按过按钮：按钮就在旁边，不必再多说一句 */
+  return '';
+}
+
+/**
+ * 重画那个「开启风扇 / 通风」按钮和它旁边那行字。
+ *
+ * 按钮只在「有数据、且不是正常」时可点：
+ *   - 一条数据都没有 -> 连 actionTime 都没地方取，点不了；
+ *   - 状态正常      -> 没有要处理的事，按规格书禁用。
+ * 「已恢复」的节点状态就是正常的，所以那时候按钮同样是灰的 —— 这两条一致。
+ */
+function renderAction() {
+  const node = nodes[currentNodeId];
+  el.actionFan.disabled = !(node.latest && node.latest.status !== '正常');
+  el.actionState.textContent = actionText(node);
 }
 
 /* ---------- 优先关注 ---------- */
@@ -322,12 +376,24 @@ function renderScene() {
   if (!node.latest) {
     dorm3d.updateScene('正常');
     dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：还没有收到数据');
-    return;
+  } else {
+    const applied = dorm3d.updateScene(node.latest.status);
+    dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：' + applied
+      + '｜' + fmt(node.latest.temperature) + '℃ / ' + fmt(node.latest.humidity) + '%');
   }
 
-  const applied = dorm3d.updateScene(node.latest.status);
-  dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：' + applied
-    + '｜' + fmt(node.latest.temperature) + '℃ / ' + fmt(node.latest.humidity) + '%');
+  /* 风扇。两个来源，都是这个节点自己的字段：
+       1) 状态要它转 —— scene.js 的 LOOK 表里「偏热」本来就是 fan: true，
+          updateScene 内部已经调过一次 setFanOn 了；
+       2) 有人按过那个按钮 —— handling 不是「无」就转，不管现在什么状态。
+     按钮的效果是**叠在状态之上**的，不是取代它：偏湿的宿舍按一下会转起来，
+     而本来就偏热的宿舍不会因为「没人按过按钮」被这里按停。
+     （「已恢复」之后照样转 —— 动作开了就一直开着，只有「清空」才停。）
+     转不转只由 handling 这一个字段说了算，不另外存一份开关。
+
+     位置必须在 updateScene **之后**：scene.js 里写着「后调用的那次为准」，
+     放在前面会被 updateScene 自己那次盖掉。 */
+  if (node.handling !== '无') dorm3d.setFanOn(true);
 }
 
 /* ---------- 图表 ---------- */
@@ -490,6 +556,9 @@ function selectNode(nodeId) {
   currentNodeId = nodeId;
   renderCards();
   renderDetailHead();
+  /* 按钮和那行字说的是「当前这个节点」的事，切了就得重画 ——
+     按钮的禁用状态、处理进度都是跟着节点走的。 */
+  renderAction();
   renderScene();
   renderCharts();
   /* 「优先关注」栏本身不重算（异常状态一点没变），但要重画 ——
@@ -622,6 +691,16 @@ function handleMessage(topic, payloadText) {
   node.abnormalStart = abnormal.abnormalStart;
   node.abnormalCount = abnormal.abnormalCount;
 
+  /* 6) 处理动作走到哪一步了。按过按钮之后，动作之后收到的**最新那条**说了算：
+     正常了就是「已恢复」，还异常就留在「处理中」。
+     record.status 同样是复核之后的结果，所以报文谎称正常也骗不过去。
+     nextHandling 返回 null 表示不用改（没按过按钮 / 这条比动作还早）。 */
+  const moved = nextHandling(node, record);
+  if (moved) {
+    node.handling = moved.handling;
+    node.dataAfterAction = moved.dataAfterAction;
+  }
+
   const summary = record.nodeId + ' ' + fmt(record.temperature) + '℃ '
     + fmt(record.humidity) + '% ' + expected;
 
@@ -633,6 +712,9 @@ function handleMessage(topic, payloadText) {
 
   renderCards();
   renderDetailHead();
+  /* 处理状态变了，详情区那行字和 3D 里的风扇都得跟着走 ——
+     两者读的都是上面刚写完的 node.handling。 */
+  renderAction();
   renderCharts();
 
   /* 3D 只在「收到的这条正好是当前正在看的那个节点」时才重画。
@@ -698,10 +780,19 @@ function clearAll() {
        顶部还挂着「dorm-b 已连续偏热 12 分钟」—— 那是上一次的账。 */
     nodes[id].abnormalStart = null;
     nodes[id].abnormalCount = 0;
+    /* 处理动作也一起清。留着的话，清空之后明明什么都没了，
+       卡片上还写着「已恢复｜风扇已开启」—— 那是上一次的账。
+       风扇会跟着回到不转：renderScene 读的就是这个字段，它一变「无」，
+       下面那次 setFanOn 就不会再调了。 */
+    nodes[id].handling = '无';
+    nodes[id].action = null;
+    nodes[id].actionTime = null;
+    nodes[id].dataAfterAction = null;
   });
   messages.length = 0;
   renderCards();
   renderDetailHead();
+  renderAction();
   renderScene();
   renderCharts();
   renderPriority();
@@ -849,11 +940,32 @@ el.priority.addEventListener('click', function (e) {
   if (focus && focus.dataset.node) selectNode(focus.dataset.node);
 });
 
+/* 「开启风扇 / 通风」。作用在**当前正在看的那个节点**上。
+   写完这四个字段之后，卡片、详情区那行字、3D 里的风扇都是下一次
+   render 时从同一份节点数据里读出来的 —— 这里不额外记任何东西。 */
+el.actionFan.addEventListener('click', function () {
+  const node = nodes[currentNodeId];
+  const started = beginHandling(node);
+  /* 按钮这时是禁用的，正常点不到；键盘或脚本直接触发时兜一下，
+     别把一个 null 拆开写进节点。 */
+  if (!started) return;
+
+  node.handling = started.handling;
+  node.action = started.action;
+  node.actionTime = started.actionTime;
+  node.dataAfterAction = started.dataAfterAction;
+
+  renderCards();
+  renderAction();
+  renderScene();
+});
+
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 if (darkQuery.addEventListener) darkQuery.addEventListener('change', applyChartTheme);
 
 renderCards();
 renderDetailHead();
+renderAction();
 renderScene();
 renderCharts();
 renderPriority();

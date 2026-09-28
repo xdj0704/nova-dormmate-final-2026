@@ -372,12 +372,50 @@ button.focus:hover { border-color: var(--text-muted); }
   color: var(--text-muted);
 }
 
+/* 卡片上的处理状态（「处理中｜风扇已开启」）。
+   刻意**不用**状态色：状态色是保留给环境状态的（那枚 badge 已经用掉了），
+   再拿它标处理进度，同一个卡片上就有两种东西在抢同一个颜色信号。
+   这里用中性墨色 + 一个左边的小竖线，够醒目又不冒充状态。 */
+.card-action {
+  padding-left: 9px;
+  border-left: 2px solid var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
 /* 状态四档。class 名和 web/style.css 一致 */
 .is-good     { --c: var(--status-good); }
 .is-warning  { --c: var(--status-warning); }
 .is-serious  { --c: var(--status-serious); }
 .is-critical { --c: var(--status-critical); }
 .is-unknown  { --c: var(--text-muted); }
+
+/* ---------- 处理动作 ---------- */
+
+/* 按钮 + 旁边那行字。和 .panel-head 一样会换行：字号不变、窄屏时文字
+   掉到按钮下面，而不是把那行字挤成竖着的一列。 */
+.action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-bottom: 16px;
+}
+
+/* 按不动的时候说明白为什么。只降不透明度的话，浅色底上还是像能点，
+   所以连光标一起换掉 —— 光标的形状是「这个能不能按」最直接的信号。 */
+.action-bar button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.action-state {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
 
 /* ---------- 面板 ---------- */
 

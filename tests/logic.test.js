@@ -1,5 +1,6 @@
 // tests/logic.test.js
-// 校验 dashboard/logic.js —— 「优先关注」的算法（Step 7-1）。
+// 校验 dashboard/logic.js —— 「优先关注」的算法（Step 7-1）
+// 和「处理动作」的状态机（Step 7-2）。
 //
 // 这个文件是整个测试套件里唯一**不用起 vm 上下文打桩**的一个：
 // logic.js 是纯函数，不碰 DOM、不读全局变量、不调 Date.now()，
@@ -39,8 +40,14 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这五个（多一个少一个都要在这里说清楚）',
-  EXPORTS.join(','), 'parseTime,fmtDuration,abnormalDuration,nextAbnormal,pickPriority');
+check('★ 导出清单正好是这七个（多一个少一个都要在这里说清楚）',
+  EXPORTS.join(','),
+  'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,pickPriority');
+/* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
+   只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
+   自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
+check('★ ACTION_FAN 不导出（那串字只该从 logic.js 里出来一份）',
+  EXPORTS.includes('ACTION_FAN'), false);
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
@@ -72,10 +79,12 @@ context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
-const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, pickPriority } = context;
+const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
+  nextHandling, pickPriority } = context;
 
-check('五个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal, pickPriority]
-  .map((f) => typeof f), ['function', 'function', 'function', 'function', 'function']);
+check('七个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
+  beginHandling, nextHandling, pickPriority].map((f) => typeof f),
+['function', 'function', 'function', 'function', 'function', 'function', 'function']);
 
 /* ---------- 小工具 ---------- */
 
@@ -320,6 +329,141 @@ const echo = pickPriority(three(
   node('2026-09-22 20:00:00', null, 0, '正常')));
 check('★ latest.status 原样写进原因（复核规则的只有 shared/rules.js 一份）',
   echo.reason.includes('已连续偏湿'), true);
+
+/* ---------- G. 处理动作（Step 7-2）---------- */
+
+console.log('\n=== G. beginHandling / nextHandling（处理动作的状态机）===');
+
+/* 拼一个「可处理」的节点：只要 latest 有 time 就能按下那个按钮。
+   故意多带几个字段，好验「不改传进来的东西」。 */
+function hNode(latestTime, handling, actionTime) {
+  return {
+    latest: { time: latestTime, status: '偏热', temperature: 31, humidity: 60 },
+    handling: handling === undefined ? '无' : handling,
+    action: null,
+    actionTime: actionTime === undefined ? null : actionTime,
+    dataAfterAction: null,
+    history: [],
+  };
+}
+/* 一条复核之后的记录 */
+function rec(status, time) {
+  return { nodeId: 'dorm-a', temperature: 25, humidity: 60, status, time };
+}
+
+/* --- beginHandling：按下按钮那一刻 --- */
+
+check('beginHandling(null) -> null，不抛异常', beginHandling(null), null);
+check('beginHandling({}) -> null（没有 latest）', beginHandling({}), null);
+check('latest 是 null -> null（一条数据都没收到过，actionTime 没地方取）',
+  beginHandling({ latest: null }), null);
+
+const started = beginHandling(hNode('2026-09-22 20:05:00'));
+check('★ 按下之后 handling 是「处理中」', started.handling, '处理中');
+check('★ action 就是「风扇已开启」这一串（卡片上原样显示的就是它）',
+  started.action, '风扇已开启');
+check('★ actionTime 取的是**最新那条消息的 time**',
+  started.actionTime, '2026-09-22 20:05:00');
+check('刚按下时还没有「动作之后的数据」', started.dataAfterAction, null);
+check('返回的正好是这四个字段', Object.keys(started).sort(),
+  ['action', 'actionTime', 'dataAfterAction', 'handling']);
+
+/* actionTime 只认 latest.time：latest 里别的字段、以及 history 里的旧消息，
+   都不该被拿去当动作时间 */
+const multi = hNode('2026-09-22 20:05:00');
+multi.history = [{ time: '2026-09-22 19:00:00', status: '偏热' }];
+check('★ actionTime 不是 history 里更早的那条（只认 latest）',
+  beginHandling(multi).actionTime, '2026-09-22 20:05:00');
+
+/* 纯函数：不改传进来的节点，也不复用同一个对象 */
+const untouched = hNode('2026-09-22 20:05:00');
+const before = JSON.stringify(untouched);
+const r1 = beginHandling(untouched);
+const r2 = beginHandling(untouched);
+check('★ 不改传进来的节点（纯函数）', JSON.stringify(untouched), before);
+check('★ 每次返回新对象（不是同一个引用被反复改写）', r1 === r2, false);
+
+/* --- nextHandling：动作之后又来了一条 --- */
+
+const inProgress = () => hNode('2026-09-22 20:05:00', '处理中', '2026-09-22 20:05:00');
+
+check('nextHandling(null, record) -> null', nextHandling(null, rec('正常', '2026-09-22 20:09:00')), null);
+check('nextHandling(node, null) -> null',
+  nextHandling(inProgress(), null), null);
+check('★ 没按过按钮（handling 是「无」）-> null，处理状态不受影响',
+  nextHandling(hNode('2026-09-22 20:05:00'), rec('正常', '2026-09-22 20:09:00')), null);
+check('handling 是个没见过的值 -> null（不认识的状态不去动它）',
+  nextHandling(hNode('2026-09-22 20:05:00', '修好了', '2026-09-22 20:05:00'),
+    rec('正常', '2026-09-22 20:09:00')), null);
+
+/* 严格晚于 actionTime 才算「动作之后」*/
+check('★ 和 actionTime 同一时刻的那条**不算**（动作就记在这条数据上，'
+  + '让它立刻把自己判成「已恢复」是错的）',
+  nextHandling(inProgress(), rec('正常', '2026-09-22 20:05:00')), null);
+check('★ 比 actionTime 还早的（重发旧数据 / 乱序到达）-> null',
+  nextHandling(inProgress(), rec('正常', '2026-09-22 20:00:00')), null);
+check('actionTime 脏了（解析不出来）-> null，不当成 0 硬算',
+  nextHandling(hNode('2026-09-22 20:05:00', '处理中', '不是时间'),
+    rec('正常', '2026-09-22 20:09:00')), null);
+check('actionTime 是 null -> null',
+  nextHandling(hNode('2026-09-22 20:05:00', '处理中', null),
+    rec('正常', '2026-09-22 20:09:00')), null);
+check('这条记录的 time 脏了 -> null',
+  nextHandling(inProgress(), rec('正常', '不是时间')), null);
+
+/* 动作之后的最新那条说了算 */
+const recovered = nextHandling(inProgress(), rec('正常', '2026-09-22 20:09:00'));
+check('★ 动作之后是「正常」-> 转「已恢复」', recovered.handling, '已恢复');
+check('★ dataAfterAction 记的就是这一条', recovered.dataAfterAction,
+  rec('正常', '2026-09-22 20:09:00'));
+check('只返回这两个字段（action / actionTime 不动，还是那一次动作的）',
+  Object.keys(recovered).sort(), ['dataAfterAction', 'handling']);
+
+check('★ 动作之后还是异常（偏热）-> 留在「处理中」',
+  nextHandling(inProgress(), rec('偏热', '2026-09-22 20:09:00')).handling, '处理中');
+check('★ 偏冷也算异常 -> 留在「处理中」',
+  nextHandling(inProgress(), rec('偏冷', '2026-09-22 20:09:00')).handling, '处理中');
+check('★ 偏湿也算异常 -> 留在「处理中」',
+  nextHandling(inProgress(), rec('偏湿', '2026-09-22 20:09:00')).handling, '处理中');
+check('留在「处理中」时 dataAfterAction 照样更新（最新的那条就是判断依据）',
+  nextHandling(inProgress(), rec('偏热', '2026-09-22 20:09:00')).dataAfterAction.time,
+  '2026-09-22 20:09:00');
+
+/* 纯函数 */
+const src2 = hNode('2026-09-22 20:05:00', '处理中', '2026-09-22 20:05:00');
+const before2 = JSON.stringify(src2);
+nextHandling(src2, rec('正常', '2026-09-22 20:09:00'));
+check('★ nextHandling 也不改传进来的节点', JSON.stringify(src2), before2);
+
+/* 只读 record.status，不自己复核 —— 判定规则只有 shared/rules.js 一份。
+   传进来一条「写着正常、但读数明显偏热」的记录，这里就该按「正常」处理：
+   复核是 dashboard 在调它之前做完的事。 */
+check('★ 只认 record.status，不自己重新判断（复核规则的只有 shared/rules.js 一份）',
+  nextHandling(inProgress(), { status: '正常', time: '2026-09-22 20:09:00' }).handling,
+  '已恢复');
+
+/* --- 来回走一遍：环境变好变坏都走同一条规则 --- */
+
+let state = beginHandling(hNode('2026-09-22 20:05:00')).handling;
+const trail = [state];
+[['偏热', '20:09:00'], ['正常', '20:12:00'], ['偏湿', '20:15:00'], ['正常', '20:18:00']]
+  .forEach(([status, hm]) => {
+    const node = { handling: state, actionTime: '2026-09-22 20:05:00' };
+    const moved = nextHandling(node, rec(status, '2026-09-22 ' + hm));
+    state = moved.handling;
+    trail.push(state);
+  });
+check('★ 处理中 -> 还异常(处理中) -> 正常(已恢复) -> 又异常(处理中) -> 正常(已恢复)',
+  trail, ['处理中', '处理中', '已恢复', '处理中', '已恢复']);
+
+/* 「已恢复」之后再变坏，也要退得回去 —— 不是只有「处理中」才接受新数据 */
+check('★ 已恢复的节点收到一条更晚的异常数据 -> 退回「处理中」',
+  nextHandling(hNode('2026-09-22 20:09:00', '已恢复', '2026-09-22 20:05:00'),
+    rec('偏热', '2026-09-22 20:12:00')).handling, '处理中');
+check('★ 已恢复的节点再收到一条更晚的正常数据 -> 仍是「已恢复」，'
+  + 'dataAfterAction 往后挪到最新那条',
+  nextHandling(hNode('2026-09-22 20:09:00', '已恢复', '2026-09-22 20:05:00'),
+    rec('正常', '2026-09-22 20:12:00')).dataAfterAction.time, '2026-09-22 20:12:00');
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

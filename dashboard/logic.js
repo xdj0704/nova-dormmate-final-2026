@@ -118,6 +118,77 @@ export function nextAbnormal(prev, status, time) {
   return { abnormalStart: prev.abnormalStart, abnormalCount: count + 1 };
 }
 
+/* ---------- Step 7-2：处理动作 ---------- */
+
+/**
+ * 按下那个按钮之后，节点上 action 字段记的名字。
+ *
+ * 单独拎成一个常量，是因为这串字会**原样出现在卡片上**（「处理中｜风扇已开启」），
+ * 测试断言的也是这一串。写死两处的话，改了这边忘了那边，
+ * 页面上就会显示一个谁也发现不了的错名字。
+ */
+const ACTION_FAN = '风扇已开启';
+
+/**
+ * 按下「开启风扇 / 通风」之后，这个节点的处理字段该变成什么。
+ *
+ * 纯函数：只读传进来的节点，返回新的那几个字段，不改任何东西。
+ * 返回 null = 这个节点现在处理不了 —— 它连一条数据都没收到过，
+ * actionTime 根本没地方取。界面上那个按钮这时本来就是禁用的，这里是兜底。
+ *
+ * actionTime 取**该节点最新那条消息的 time**，不用浏览器当前时间。
+ * 和 7-1 算时长同一个理由：现场三台机器的钟不一定对得上；而且这样
+ * 「动作发生在哪条数据之后」在日志和卡片上能一条条对上，不用猜。
+ *
+ * @param {{latest: {time: string}|null}} node
+ * @returns {{handling: string, action: string, actionTime: string,
+ *            dataAfterAction: null}|null}
+ */
+export function beginHandling(node) {
+  if (!node || !node.latest) return null;
+  return {
+    handling: '处理中',
+    action: ACTION_FAN,
+    actionTime: node.latest.time,
+    /* 还没有「动作之后的数据」，等它来 —— 见 nextHandling */
+    dataAfterAction: null,
+  };
+}
+
+/**
+ * 动作之后又来了一条消息，处理状态该怎么走。
+ *
+ * 规则只有一条：**看动作之后的最新那条**。
+ *   这条（复核之后的）正常 -> 「已恢复」
+ *   这条还是异常           -> 留在「处理中」
+ * 环境再变坏就自动退回「处理中」—— 同一条规则，不用另写一条判断。
+ *
+ * actionTime 那条**自己不算数**（要严格晚于它）：动作就是记在那条数据上的，
+ * 让它立刻把自己判成「已恢复」是错的。
+ *
+ * 返回 null = 什么都不用改：还没按过按钮、时间解析不出来、或者这条消息
+ * 比动作还早（乱序到达，或者重发了一条旧的）。这时候保持原样，
+ * 让一条迟到的旧数据改写「处理好了没有」是不对的。
+ *
+ * @param {{handling: string, actionTime: string|null}} node
+ * @param {{status: string, time: string}} record 复核**之后**的那条记录
+ * @returns {{handling: string, dataAfterAction: object}|null}
+ */
+export function nextHandling(node, record) {
+  if (!node || !record) return null;
+  if (node.handling !== '处理中' && node.handling !== '已恢复') return null;
+
+  const at = parseTime(node.actionTime);
+  const t = parseTime(record.time);
+  if (Number.isNaN(at) || Number.isNaN(t)) return null;
+  if (!(t > at)) return null;
+
+  return {
+    handling: record.status === '正常' ? '已恢复' : '处理中',
+    dataAfterAction: record,
+  };
+}
+
 /**
  * 拼一句人话，说清楚为什么是它。
  *

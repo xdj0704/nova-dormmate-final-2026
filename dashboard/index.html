@@ -40,6 +40,14 @@
       <span id="detail-meta" class="note"></span>
     </div>
 
+    <!-- 处理动作。作用在**当前正在看的那个节点**上，所以它跟着 #detail-node 走。
+         按钮的禁用状态和旁边那行字都由 dashboard.js 的 renderAction() 填：
+         没有数据、或者状态已经正常时按不动（没有要处理的事）。 -->
+    <div class="action-bar">
+      <button id="action-fan" class="primary" type="button">开启风扇 / 通风</button>
+      <span id="action-state" class="action-state"></span>
+    </div>
+
     <p id="chart-note" class="note chart-note"></p>
 
     <!-- 3D 视图。跟着当前选中的节点走：点卡片切节点、或当前这个节点收到

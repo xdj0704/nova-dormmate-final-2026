@@ -24,6 +24,10 @@ function makeEl(id) {
   const classes = new Set();
   return {
     id, textContent: '', innerHTML: '', dataset: {},
+    /* 真按钮上没写 disabled 属性时，读出来就是 false（不是 undefined）。
+       照抄这个默认值 —— 不然「刚打开时按钮是灰的」那条断言拿到的是 undefined，
+       真假都测不出来。 */
+    disabled: false,
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
@@ -41,7 +45,8 @@ function makeEl(id) {
 const els = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle'].forEach((id) => { els[id] = makeEl(id); });
+  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state']
+  .forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
 
@@ -100,14 +105,19 @@ const mqttStub = {
    打桩挂的是 createDorm3D（模块里 import 的那个名字），不是 3D 场景本身。 */
 const sceneCalls = [];
 function createDorm3DStub(hostId) {
-  const rec = { hostId, statuses: [], labels: [], disposed: 0 };
+  const rec = { hostId, statuses: [], labels: [], fans: [], ops: [], disposed: 0 };
   sceneCalls.push(rec);
   return {
     /* 真的那个也会返回「实际生效的状态」，所以桩照做 ——
        renderScene 拿它的返回值拼标签文字。 */
-    updateScene(status) { rec.statuses.push(status); return status; },
+    updateScene(status) { rec.statuses.push(status); rec.ops.push('updateScene'); return status; },
     setLabel(text) { rec.labels.push(text); return text; },
-    setFanOn() {},
+    /* setFanOn 要记下来（Step 7-2）：这一步的验收点之一是「点了按钮风扇得转」，
+       不记的话调没调、传的是 true 还是 false，全都测不出来。
+       ops 是按调用顺序记的**混在一起**的流水 ——
+       scene.js 里那句「后调用的那次为准」意味着 updateScene 和 setFanOn
+       的先后顺序本身就是一个必须钉住的约定，分开两个数组就看不出顺序了。 */
+    setFanOn(on) { rec.fans.push(on); rec.ops.push('setFanOn'); },
     dispose() { rec.disposed += 1; },
   };
 }
@@ -140,12 +150,13 @@ context.window.document = documentStub;
      ../3d/scene.js —— 换成打桩的 createDorm3D（3D 不是这一步要测的）
      ./logic.js     —— 换成**真文件**（见下面 runInContext 那段）
    这么分是因为「优先关注」的比较规则正是 Step 7-1 的全部内容，
+   处理动作的状态机（beginHandling / nextHandling）是 Step 7-2 的全部内容，
    打个桩等于把要测的东西测没了。
 
    注意这只是**跑起来**的方式。原文件里到底怎么写的那两行，
    由下面 M 段的两条静态断言盯着（正则 + 文件真的在）。 */
 const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
 const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
 const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
@@ -189,11 +200,20 @@ vm.runInContext(src, context, { filename: DASH_SRC });
    N 段拿它验「启动时就画好了」和「没数据时不谎称都正常」。 */
 const BAR_AT_LOAD = els.priority.innerHTML;
 
+/* 处理动作那一行刚加载完的样子，同样先存下来 ——
+   O 段一上来就 clearAll()，那之后再读到的就是「清空之后」画出来的，
+   而不是「启动时」画出来的了。少了这一份，把文件末尾那次 renderAction()
+   删掉也不会有人发现：按钮的 disabled 是 makeEl 给的默认值，看着照样是灰的。 */
+const ACTION_AT_LOAD = {
+  disabled: els['action-fan'].disabled,
+  text: els['action-state'].textContent,
+};
+
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
   __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
   __renderScene: renderScene, __renderPriority: renderPriority,
-  pickPriority } = context;
+  pickPriority, beginHandling, nextHandling } = context;
 
 /* ---------- 断言 ---------- */
 let pass = 0, fail = 0;
@@ -593,7 +613,7 @@ function clickFocus(nodeId) {
 
 check('★ dashboard.js 有两条 import（scene.js 的 3D 工厂 + logic.js 的算法）',
   importCount, 2);
-check('★ logic.js 那条拿的是 pickPriority / nextAbnormal',
+check('★ logic.js 那条拿的是 pickPriority / nextAbnormal / beginHandling / nextHandling',
   LOGIC_IMPORT.test(dashText), true);
 check('★ logic.js 那个文件真的在（./ 是相对 dashboard.js 自己算的，不是相对页面）',
   fs.existsSync(LOGIC_SRC), true);
@@ -756,7 +776,216 @@ check('★ 场景三：三个节点的异常计数都是 0', ids.map((id) => nod
 check('★ 场景三：pickPriority 返回 null', pickPriority(nodes), null);
 check('★ 场景三：栏里说三个都正常', focusHTML().includes('三个节点都正常'), true);
 
-/* 三组跑完，让后面的 L 段从一个干净的、当前节点确定的状态开始 */
+/* 三组跑完，让后面的 O 段从一个干净的、当前节点确定的状态开始 */
+clearAll();
+selectNode('dorm-a');
+
+/* ============ O. 处理动作（Step 7-2）============ */
+console.log('\n=== O. 处理动作 ===');
+
+/* 这一步的要求是「处理状态、Dashboard 显示、3D 表现读同一份节点数据」。
+   所以下面每一段都是同一个写法：先写进节点字段，再把三处显示分别看一眼 ——
+   卡片上那行、详情区那行字、3D 里风扇转不转。三处都从 nodes[id] 读，
+   这里就没有第二份可以跟它不一致的副本。 */
+const fanBtn = els['action-fan'];
+const fanState = els['action-state'];
+/* 走页面真正注册在 #action-fan 上的那个回调，不直接调内部函数 ——
+   回调要是挂错了元素（比如挂到 #clear 上），这里就该红。 */
+const clickFan = () => fanBtn._handlers.click.forEach((fn) => fn());
+const actionsOnCards = () => (els.cards.innerHTML.match(/card-action/g) || []).length;
+
+/* --- 接线本身 --- */
+
+check('index.html 里有 #action-fan 那个按钮', dashHtml.includes('id="action-fan"'), true);
+check('index.html 里有 #action-state 那行字', dashHtml.includes('id="action-state"'), true);
+check('按钮的文案就是「开启风扇 / 通风」', dashHtml.includes('开启风扇 / 通风'), true);
+check('★ 页面上跑的 beginHandling / nextHandling 就是 logic.js 里那两个（不是另写的桩）',
+  [typeof beginHandling, typeof nextHandling], ['function', 'function']);
+check('★ 启动那一刻就把这一行画好了（按钮是灰的、字是「还没有收到数据」）',
+  ACTION_AT_LOAD, { disabled: true, text: '还没有收到这个节点的数据' });
+
+/* --- 一条数据都没有：按不动 --- */
+
+clearAll();
+selectNode('dorm-a');
+check('★ 没收到过数据时按钮是灰的（连 actionTime 都没地方取）', fanBtn.disabled, true);
+check('★ 那行字如实说还没收到数据，不混成「正常不需要处理」',
+  fanState.textContent, '还没有收到这个节点的数据');
+check('没处理过的卡片上不出现处理状态那一行', actionsOnCards(), 0);
+
+/* --- 状态正常：照样按不动（规格书：节点状态正常时禁用）--- */
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+check('状态正常时按钮还是灰的', fanBtn.disabled, true);
+check('那行字说明为什么按不动', fanState.textContent, '当前状态正常，不需要处理');
+
+/* --- 异常了：可以按 --- */
+
+/* 这里特意拿**偏湿**当被测场景，不用偏热。
+   偏热在 scene.js 的 LOOK 表里本来就是 fan: true，updateScene 自己就会把风扇
+   打开 —— 那种情况下「先 updateScene 再 setFanOn」的顺序写反了也照样绿。
+   偏湿的 fan 是 false，只有「动作叠在状态之上」这一种写法才转得起来。 */
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 80, undefined, T('20:05:00')));
+check('节点偏湿了，按钮可点（不是正常状态）', fanBtn.disabled, false);
+check('确认这一段的场景确实是偏湿，否则上面那条测的不是这件事',
+  nodes['dorm-a'].latest.status, '偏湿');
+check('还没按的时候那行字是空的（没什么要说的）', fanState.textContent, '');
+
+/* --- 按一下 --- */
+
+const fansBefore = scene.fans.length;
+const opsBefore = scene.ops.length;
+clickFan();
+
+check('★ handling 变成「处理中」', nodes['dorm-a'].handling, '处理中');
+check('★ action 记的是「风扇已开启」', nodes['dorm-a'].action, '风扇已开启');
+check('★ actionTime 用**该节点最新那条消息的 time**，不是浏览器当前时间',
+  nodes['dorm-a'].actionTime, T('20:05:00'));
+check('刚按下时还没有「动作之后的数据」', nodes['dorm-a'].dataAfterAction, null);
+
+check('★ 卡片上出现「处理中｜风扇已开启」',
+  els.cards.innerHTML.includes('处理中｜风扇已开启'), true);
+check('★ 它在卡片上是个单独的元素，不是混进脚注里的一句话',
+  /<span class="card-action">处理中｜风扇已开启<\/span>/.test(els.cards.innerHTML), true);
+check('只有被处理的那个节点有这一行（另外两张卡没有）', actionsOnCards(), 1);
+
+check('★ 详情区那行字把「记在哪条数据上」说清楚',
+  fanState.textContent,
+  '处理中｜风扇已开启（记在 2026-09-22 20:05:00 这条数据上） · 还没收到动作之后的数据');
+
+check('★ 按下去调了 setFanOn(true)，风扇转起来', scene.fans.slice(fansBefore), [true]);
+check('★ 而且顺序是「先 updateScene 再 setFanOn」—— scene.js 里写着后调用的那次为准，'
+  + '反过来的话这次 setFanOn 会被 updateScene 自己那次盖掉（偏湿的 fan 是 false）',
+  scene.ops.slice(opsBefore), ['updateScene', 'setFanOn']);
+
+/* --- 来了一条比动作还早的：不许改写「处理好了没有」--- */
+
+/* 重发旧数据 / 乱序到达。它比 actionTime 还早，就不该参与判断 ——
+   这一条偏偏是「正常」，少了 t > at 那道闸就会立刻把状态改成「已恢复」，
+   而实际上动作之后一条数据都还没来。 */
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+check('★ 比动作还早的消息不改处理状态（还留在「处理中」）',
+  nodes['dorm-a'].handling, '处理中');
+check('★ 也不记成「动作之后的数据」', nodes['dorm-a'].dataAfterAction, null);
+check('卡片上还是「处理中」，没被那条旧数据改写',
+  els.cards.innerHTML.includes('处理中｜风扇已开启'), true);
+
+/* --- 动作之后来了正常的：已恢复 --- */
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:09:00')));
+check('★ 动作之后的这条是正常 -> 转「已恢复」', nodes['dorm-a'].handling, '已恢复');
+check('★ dataAfterAction 记的是这一条（不是随便哪一条）',
+  [nodes['dorm-a'].dataAfterAction.time, nodes['dorm-a'].dataAfterAction.status],
+  [T('20:09:00'), '正常']);
+check('★ 卡片跟着改口', els.cards.innerHTML.includes('已恢复｜风扇已开启'), true);
+check('★ 详情区把「之后收到了什么」写出来',
+  fanState.textContent,
+  '已恢复｜风扇已开启（记在 2026-09-22 20:05:00 这条数据上）'
+  + ' · 之后收到 2026-09-22 20:09:00：25℃ / 60% 正常');
+check('恢复之后状态就是正常，按钮回到灰的', fanBtn.disabled, true);
+check('★ 恢复之后风扇照样转（动作开了就一直开着，只有「清空」才停）',
+  scene.fans[scene.fans.length - 1], true);
+
+/* --- 环境又变坏：自动退回「处理中」--- */
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:12:00')));
+check('★ 又异常了 -> 退回「处理中」（同一条规则，没有另写一条判断）',
+  nodes['dorm-a'].handling, '处理中');
+check('★ dataAfterAction 跟着换成新的这条',
+  nodes['dorm-a'].dataAfterAction.time, T('20:12:00'));
+check('卡片上又写成「处理中」（不是停在「已恢复」）',
+  els.cards.innerHTML.includes('处理中｜风扇已开启'), true);
+check('actionTime 没被顶掉（动作还是那一次，记在 20:05 上）',
+  nodes['dorm-a'].actionTime, T('20:05:00'));
+
+/* --- 每个节点各管各的 --- */
+
+clearAll();
+selectNode('dorm-a');
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:00:00')));
+clickFan();
+check('★ 按的是当前正在看的 dorm-a', nodes['dorm-a'].handling, '处理中');
+check('★ dorm-b 一点没被牵连', [nodes['dorm-b'].handling, nodes['dorm-b'].actionTime], ['无', null]);
+check('★ dorm-c 同样没被牵连', [nodes['dorm-c'].handling, nodes['dorm-c'].actionTime], ['无', null]);
+check('三张卡里只有一张带处理状态', actionsOnCards(), 1);
+
+/* 切到 dorm-b：它自己没被处理过，详情区那行字和按钮都得按它自己的来 */
+selectNode('dorm-b');
+check('★ 切到 dorm-b，那行字说的是它自己的情况（没处理过）',
+  fanState.textContent, '');
+check('★ 按钮跟着当前节点走：dorm-b 偏湿，可点', fanBtn.disabled, false);
+const fansBeforeB = scene.fans.length;
+selectNode('dorm-b');
+check('★ 去看一个没处理过的节点，风扇不会被 dorm-a 的处理状态带着转',
+  scene.fans.length, fansBeforeB);
+check('★ 卡片上那一行只属于 dorm-a（切节点不会把它搬过来）', actionsOnCards(), 1);
+
+/* dorm-b 自己也按一下：两个节点各记各的，互不覆盖 */
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:04:00')));
+clickFan();
+check('★ dorm-b 记在自己的 actionTime 上（20:04，不是 dorm-a 的 20:00）',
+  [nodes['dorm-b'].handling, nodes['dorm-b'].actionTime], ['处理中', T('20:04:00')]);
+check('dorm-a 的没被动过', [nodes['dorm-a'].handling, nodes['dorm-a'].actionTime],
+  ['处理中', T('20:00:00')]);
+check('两张卡各带一行处理状态', actionsOnCards(), 2);
+
+/* 切回 dorm-a：它那份还在（不是只有最后按的那个才记得住） */
+selectNode('dorm-a');
+check('★ 切回 dorm-a，处理状态还在，说的是它自己的 20:00',
+  fanState.textContent.includes('记在 2026-09-22 20:00:00 这条数据上'), true);
+check('★ 切回 dorm-a，风扇转起来（它自己是处理中的那个）',
+  scene.fans[scene.fans.length - 1], true);
+
+/* --- 没按过按钮的节点：dashboard 一次都不许碰风扇 --- */
+
+/* scene.js 的 LOOK 表里偏热是 fan: true，updateScene 自己会把风扇打开。
+   dashboard 这边只该在「按过按钮」时补一句 setFanOn(true)，
+   绝不能反过来对没处理过的节点喊 setFanOn(false) —— 那等于把 Step 6-2 弄坏了：
+   一个偏热的宿舍，只要没人点过按钮，风扇反而不转了。
+   所以这条钉住的是「handling 是「无」时，dashboard 连碰都不碰风扇」，
+   转与不转完全交给 updateScene 按状态那一档去定。 */
+clearAll();
+selectNode('dorm-a');
+const fansIdle = scene.fans.length;
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+check('当前节点转成偏热（scene.js 里这一档本来就要转）',
+  nodes['dorm-a'].latest.status, '偏热');
+check('★ 没按过按钮的节点，dashboard 一次都没碰风扇（交给 updateScene 那一档）',
+  scene.fans.length, fansIdle);
+check('交出去的确实是「偏热」，风扇转不转由 scene.js 自己按这一档决定',
+  scene.statuses[scene.statuses.length - 1], '偏热');
+
+/* --- 偏热节点上按一下：锦上添花，不能把本来就转着的风扇按停 --- */
+
+clearAll();
+selectNode('dorm-c');
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 31, 60, undefined, T('20:00:00')));
+check('dorm-c 偏热（scene.js 的 LOOK 表里这一档本来就转）', nodes['dorm-c'].latest.status, '偏热');
+clickFan();
+check('★ 偏热的节点按一下照样记上处理动作', nodes['dorm-c'].handling, '处理中');
+check('★ setFanOn 传的是 true，不是 false —— 动作是叠在状态之上的，不取代它',
+  scene.fans[scene.fans.length - 1], true);
+
+/* --- 清空：四个字段一起回到「没处理过」--- */
+
+const fansBeforeClear = scene.fans.length;
+clearAll();
+check('★ 清空后三个节点的处理字段全归零',
+  ids.map((id) => [nodes[id].handling, nodes[id].action, nodes[id].actionTime,
+    nodes[id].dataAfterAction]),
+  [['无', null, null, null], ['无', null, null, null], ['无', null, null, null]]);
+check('★ 卡片上那行处理状态跟着消失', actionsOnCards(), 0);
+check('清空后 3D 收到的状态是「正常」（这一档的 LOOK 里 fan 是 false，'
+  + '风扇就此停下 —— dashboard 自己从不调 setFanOn(false)，停是 updateScene 干的）',
+  scene.statuses[scene.statuses.length - 1], '正常');
+check('★ 清空之后 dashboard 一次都没再喊「转」（上面那个「正常」才是停下来的原因）',
+  scene.fans.length, fansBeforeClear);
+check('清空后按钮回到灰的（又变成一条数据都没有）', fanBtn.disabled, true);
+check('清空后那行字也回到「还没有收到数据」',
+  fanState.textContent, '还没有收到这个节点的数据');
+
+/* 这一段跑完，把状态交回给 L 段期望的样子 */
 clearAll();
 selectNode('dorm-a');
 
@@ -765,7 +994,8 @@ console.log('\n=== L. 没加载 mqtt.js ===');
 const els2 = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle'].forEach((id) => { els2[id] = makeEl(id); });
+  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state']
+  .forEach((id) => { els2[id] = makeEl(id); });
 
 const doc2 = {
   documentElement: makeEl('html'),
