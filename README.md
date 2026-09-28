@@ -73,6 +73,10 @@ nova-dormmate-final-2026/    # 仓库根
 │   └── lib/
 │       ├── mqtt.min.js      # 本地引用：它挂了就一条数据都收不到，所以不走 CDN
 │       └── chart.umd.min.js # 备用：Chart.js 默认走 CDN，断网时改成引用这个
+├── 3d/                      # M6 三维场景（ES Module + importmap，必须走 http 服务器）
+│   ├── index.html           # 只建容器、映射 three、调 createDorm3D
+│   ├── scene.js             # createDorm3D(container)：场景 / 相机 / 渲染器 / 灯光 / 动画循环
+│   └── lib/three.module.js  # three 0.160.0 的 ESM 单文件，断网时把 importmap 指过来
 ├── miniapp/                 # M4 微信小程序（用微信开发者工具打开这个目录）
 │   ├── app.js / app.json / app.wxss / sitemap.json
 │   ├── pages/index/         # 输入温湿度 → 按统一规则显示状态与建议
@@ -357,6 +361,7 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 ```bash
 py -3.14 -m unittest discover -s tests -t . -v   # ①②③ Python 侧，共 186 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
+node tests/scene3d.test.js                        # ⑧ 3D 场景，89 条
 node tests/miniapp-rules.test.js                  # ⑥ 两份规则实现交叉比对，48 条
 node tests/dashboard.test.js                      # ⑦ 多节点看板，127 条
 node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
@@ -364,7 +369,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 
 `unittest discover` 会把 `tests/` 下三个 `test_*.py` 一起收进来
 （22 + 134 + 30 = 186 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib。
-`node` 那四条不需要任何依赖，也不用起服务器。
+`node` 那五条不需要任何依赖，也不用起服务器。
 
 画图那几只测试在开头 `skipUnless(HAS_MPL)`：没装 matplotlib 时会**跳过**
 （输出里是 `s` 不是 `.`）而不是报一堆错 —— 读 CSV、统计、复核这几步没它也
@@ -379,6 +384,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 | ⑤ 130 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错 |
 | ⑥ 48 条 | `miniapp/utils/rules.js` 与 `shared/rules.js` 的交叉比对：两份实现分别放进各自的 vm 跑，在 8211 组温湿度（温度 -20~60 步长 0.5 × 湿度 0~100 步长 2）上逐对比 `judgeStatus` 与 `getAdvice`，结果必须完全一致；另有一条守卫确认这个网格真的覆盖到了四种状态，否则「全都一样」可能只是压根没测到 |
 | ⑦ 127 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示 |
+| ⑧ 89 条 | `3d/scene.js` 配假 `three` 模块 + 假 DOM 实跑（模块里的裸名字 `three` 是不认 importmap 的，测试把那一行 import 改写成指向本地假模块的绝对 file:// URL）：容器查找与报错、renderer 的像素比封顶与尺寸、地板/立方体的几何与朝向、两盏灯、相机参数与 `lookAt`、动画循环随 dt 累加（**验证转动快慢与帧率无关**）、resize 自适应与 0×0 容器不产生 NaN、dispose 是否真的回收了几何体/材质/监听、index.html 的 importmap（合法 JSON、出现顺序、版本号）、以及 `lib/` 里那份的大小与自包含性。两条 ★（灯不能和相机同侧、改完阴影相机范围要重算投影矩阵）都用变异测试验过 |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -1083,6 +1089,115 @@ MQTT 和「模拟三节点数据」按钮共用的，模拟数据混进来冒充
 `tests/miniapp-rules.test.js` 那 48 条是另一回事：它把 `miniapp/utils/rules.js` 和
 `shared/rules.js` 放进两个独立的 vm 各跑一遍，在 8211 组温湿度上逐对比对，防止两份实现
 悄悄跑偏。参考「⚠ 规则有两份实现，必须同步」。
+
+## Step 6-1：最小 Three.js 场景
+
+`3d/` 是一个独立的最小页面：一块地板 + 一个会转的立方体。还没接数据，先把
+「three 在这个项目里跑得起来」立住，6-2 起往这个骨架上挂东西。
+
+```
+http://localhost:8000/3d/
+```
+
+**必须走 http 服务器，不能像别的页面那样用 file:// 直接打开。** 这个页面用的是
+ES Module，`<script type="module">` 受 CORS 约束，file:// 下的模块会被当成跨域
+直接拒绝 —— 控制台报一串 CORS 错，场景完全不出现。
+
+### 为什么用 importmap
+
+源码里写的是 `import * as THREE from 'three'` 这种**裸名字**，浏览器不知道去哪儿
+找。importmap 就是干这个的：把裸名字映射到真实 URL，于是 CDN 的长地址只出现一次，
+将来换成本地路径也只改一行。
+
+三个要注意的：
+
+- **importmap 的内容必须是合法 JSON**，所以里面一行注释都写不了（JSON 没有注释
+  语法），说明只能写在 `<script>` 外面。
+- **必须出现在第一个 module script 之前**，顺序反了浏览器直接不认。
+- 只有以 `./` 或 `../` 开头的映射值才按相对 URL 解析，基准是**页面所在目录** ——
+  所以本地路径写 `./lib/three.module.js`，不是 `./3d/lib/three.module.js`。
+
+### 改成本地 three（现场没网时）
+
+文件已经在 `3d/lib/` 里放好了，把 importmap 那一行换成下面这句，其余一个字都不用动：
+
+```json
+"three": "./lib/three.module.js"
+```
+
+这个改法实测可用（用无头 Edge 截图确认过场景正常渲染）。
+
+| 文件 | 版本 | 字节数 | sha256 |
+|---|---|---|---|
+| `3d/lib/three.module.js` | 0.160.0 | 1272972 | `76dea8151bc9352aef3528b4262e249b2604f62543828328db978d060d61a495` |
+
+这个文件是**自包含**的：内部不再 import 任何东西，所以整张映射表只要有 "three"
+一条就够。换成更新的版本时要留意 —— 新版把核心拆去了 `three.core.js`，
+只映射 "three" 会报找不到模块。
+
+要重新下载：
+
+```bash
+curl -o 3d/lib/three.module.js \
+  https://registry.npmmirror.com/three/0.160.0/files/build/three.module.js
+```
+
+npm 包里还有一份 `build/three.module.min.js`（670681 字节，压缩过）。功能完全一样，
+只是源码挤成一行、报错栈不好读，所以这里留的是未压缩那份。源选 npmmirror 而不是
+jsDelivr，理由和 Chart.js 那次一样（见上一节末尾）。
+
+### 这一步踩的两个坑
+
+两个都不报错，只是「看起来没生效」。事后都补了回归测试（下面测试一节里的 ★）。
+
+**① 灯和相机同侧，影子藏在物体背后。**
+
+最初灯放在 `(6, 10, 7)`、相机在 `(6, 5, 9)`，几乎同一侧。阴影落在立方体背离光源
+的那一面 —— 也就是**立方体的正后方**，从相机看过去被立方体自己挡得严严实实。
+屏幕上一片干净，一丝阴影都没有。
+
+当时去查了 `shadowMap` 配置、换了渲染后端、对比了 SwiftShader 和真实 GPU —— 全是
+白费，因为阴影一直在正常渲染。**把灯挪到相机的斜对角就全好了。**
+
+同一个原因还有个副作用：两个可见面都朝光、亮度接近，立方体看着是平的；挪完之后
+变成一亮一暗两个面，「立体」感才出来。
+
+> 经验规则：主光偏离相机视线 40°~70°，别和相机同一侧。
+
+**② 改完阴影相机的范围，必须自己重算投影矩阵。**
+
+```js
+dirLight.shadow.camera.left = -12;                  // 只改这些是没用的
+dirLight.shadow.camera.updateProjectionMatrix();    // 少这一行，上面全部静默失效
+```
+
+three 的 `LightShadow.updateMatrices()` 只读现成的 `projectionMatrix`，**不会**替你
+调这个方法。漏掉的表现是「改了没反应」：范围还是默认的 ±5，不报错、不警告。
+
+同类的还有两处：
+
+- 相机改完 `aspect` 也要 `camera.updateProjectionMatrix()`，否则画面照样是拉伸的。
+- `far` 要罩得住地板。地板 400×400 的远角离相机约 290，`far` 只给 200 会在远处切出
+  一道弧形的洞 —— 看起来像「地板缺了一块」，很难联想到是相机参数。但 `near` 也不能
+  太小：深度缓冲的精度取决于 `far/near` 的比值。
+
+### 测试
+
+`tests/scene3d.test.js`，89 条，纯 Node 零依赖。
+
+`scene.js` 是 ES Module，`import ... from 'three'` 是个裸名字，Node 不认 importmap；
+它还要 `document` / `window`。测试的解法是**把真实的源文件跑起来**：把那一行 import
+改写成指向本地假 `three` 模块的绝对 file:// URL，写成 `.mjs` 扔进临时目录再 import，
+同时往 `globalThis` 上挂一套假 DOM。不做语法改写、不装任何依赖。
+
+覆盖到：容器查找与报错、renderer 的像素比封顶与尺寸、地板/立方体的几何与朝向、
+两盏灯、相机参数与 `lookAt`、动画循环随 dt 累加（**验证转动快慢与帧率无关**）、
+resize 自适应与 0×0 容器不产生 NaN、dispose 是否真的回收了几何体/材质/监听，
+以及 index.html 的 importmap（合法 JSON、出现顺序、版本号）和 `lib/` 里那份的大小
+与自包含性。
+
+两条 ★ 是这个步骤踩出来的坑，都用**变异测试**验过：删掉 `updateProjectionMatrix()`
+或把灯挪回相机同侧，对应那一条会准确失败，其余保持全绿。
 
 ## 已知限制
 
