@@ -1,0 +1,69 @@
+<!--index.wxml-->
+<!-- back="{{false}}"：首页没有上一页可回，不传这个会顶着一个返回箭头 -->
+<navigation-bar title="DormMate" back="{{false}}" />
+
+<view class="page">
+  <view class="app-title">DormMate</view>
+  <view class="app-subtitle">宿舍环境助手</view>
+
+  <!-- 录入区 -->
+  <view class="card">
+    <view class="field">
+      <text class="label">温度（℃）</text>
+      <input
+        class="input"
+        type="digit"
+        placeholder="例如 31"
+        placeholder-class="ph"
+        value="{{tempInput}}"
+        bindinput="onTempInput"
+      />
+    </view>
+
+    <view class="field field--last">
+      <text class="label">湿度（%）</text>
+      <input
+        class="input"
+        type="digit"
+        placeholder="例如 78"
+        placeholder-class="ph"
+        value="{{humInput}}"
+        bindinput="onHumInput"
+      />
+    </view>
+
+    <button class="analyze" bindtap="onAnalyze">分析环境</button>
+  </view>
+
+  <!-- 错误提示区：error 非空才出现，同一行位置只显示一条 -->
+  <view class="error" wx:if="{{error}}">{{error}}</view>
+
+  <!-- 结果区：status 非空说明分析成功过，否则整块不渲染 -->
+  <view class="card result" wx:if="{{status}}">
+    <view class="row">
+      <text class="label">温度</text>
+      <view class="value">
+        <text class="num">{{temperature}}</text>
+        <text class="unit">℃</text>
+      </view>
+    </view>
+
+    <view class="row">
+      <text class="label">湿度</text>
+      <view class="value">
+        <text class="num">{{humidity}}</text>
+        <text class="unit">%</text>
+      </view>
+    </view>
+
+    <view class="row">
+      <text class="label">状态</text>
+      <view class="badge">{{status}}</view>
+    </view>
+
+    <view class="row row--last">
+      <text class="label">建议</text>
+      <text class="advice">{{advice}}</text>
+    </view>
+  </view>
+</view>

@@ -5,3 +5,8 @@ venv/
 .idea/
 .vscode/
 *.log
+
+# 微信开发者工具的本机私有配置（热重载、libVersion、编译开关等），
+# 每个人机器上都不一样，官方模板默认也是忽略它的。
+# project.config.json 要提交，这个不用。
+miniapp/project.private.config.json
