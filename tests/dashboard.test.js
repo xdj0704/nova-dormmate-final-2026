@@ -319,6 +319,35 @@ mc.handlers.message.forEach((fn) => fn('dormmate/dorm-b/env', '{坏掉的 json')
 check('MQTT 来的脏 JSON 被拦下', top().level, 'error');
 check('拦下后没写进历史', nodes['dorm-b'].history.length, 1);
 
+/* 原始报文要往 Console 打一行（排错用）。
+   把 console.log 临时换成收集器 —— 不换的话每跑一次测试都要刷一大片屏。
+   注意 ctx 里传的就是 Node 的 console 本身，所以要还原回去。 */
+const realLog = console.log;
+const logged = [];
+console.log = (...args) => { logged.push(args); };
+mc.handlers.message.forEach((fn) => fn('dormmate/dorm-c/env', JSON.stringify({
+  nodeId: 'dorm-c', temperature: 25, humidity: 80, status: '偏湿', time: '2026-09-22 20:30:00',
+})));
+console.log = realLog;
+
+check('每条原始报文打一行 Console', logged.length, 1);
+check('打印的是 topic', logged[0][1], 'dormmate/dorm-c/env');
+check('打印的是原始报文原文，不是解析后的对象',
+  logged[0][2], '{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:30:00"}');
+
+/* 被拦下的报文更要打印 —— 排错时最需要的就是这一条 */
+console.log = (...args) => { logged.push(args); };
+mc.handlers.message.forEach((fn) => fn('dormmate/dorm-c/env', '{又一条坏 json'));
+console.log = realLog;
+check('被拦下的报文同样打印了', logged.length, 2);
+check('打印内容就是那段坏文本', logged[1][2], '{又一条坏 json');
+
+/* 反过来的要求：模拟按钮的数据不该混进「实收报文」里冒充真消息 */
+console.log = (...args) => { logged.push(args); };
+simulate();
+console.log = realLog;
+check('模拟数据不冒充「实收报文」（Console 里不出现）', logged.length, 2);
+
 /* 断开 */
 disconnect();
 check('断开时强制 end，不再自动重连', mc.ended, true);
@@ -385,7 +414,8 @@ vm.runInContext(src2, ctx2, { filename: path.join(ROOT, 'dashboard', 'dashboard.
 
 check('没有 mqtt 也不抛异常，页面照常起来', typeof ctx2.judgeStatus, 'function');
 check('状态显示「未加载 mqtt.js」', els2['conn-text'].textContent, '未加载 mqtt.js');
-check('日志写明了缺哪个文件', els2['log-body'].innerHTML.includes('mqtt.min.js'), true);
+check('日志写明了缺哪个文件（是 lib/ 那份，不是 web/vendor）',
+  els2['log-body'].innerHTML.includes('dashboard/lib/mqtt.min.js'), true);
 /* 关键的降级行为：连不上 Broker 也得能演示界面 */
 ctx2.__simulate();
 check('没有 Broker 时「模拟三节点数据」照样能用', els2['cards'].innerHTML.includes('dorm-a'), true);

@@ -598,7 +598,7 @@ function disconnect() {
 function connect() {
   if (typeof mqtt === 'undefined') {
     setConn('off', '未加载 mqtt.js');
-    logLine('error', TOPIC, '缺少 web/vendor/mqtt.min.js，请重新下载后刷新');
+    logLine('error', TOPIC, '缺少 dashboard/lib/mqtt.min.js，请重新下载后刷新');
     return;
   }
   if (client) return;   // 已经连着了，别叠第二根
@@ -654,7 +654,16 @@ function connect() {
   /* 唯一的接入口。mqtt.js 给的是二进制，转成字符串交给 handleMessage ——
      校验、复核 status、落库、刷新全在那边，这里不做第二遍。 */
   c.on('message', function (topic, payload) {
-    handleMessage(topic, payload.toString());
+    const text = payload.toString();
+
+    /* 每条原始报文都往 Console 打一行。排错时先看这里 ——
+       「压根没收到消息」和「收到了但被 handleMessage 拦下了」是两回事，
+       排查方向完全不同，而页面上的日志区只记后者，前者完全不显示。
+       打印放在这个边界上、而不是放进 handleMessage：那边是所有来源共用的，
+       模拟按钮的数据不该混进来冒充实收报文。 */
+    console.log('[DormMate] 收到 MQTT 原始消息', topic, text);
+
+    handleMessage(topic, text);
   });
 
   updateToggle();

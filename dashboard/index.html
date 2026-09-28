@@ -76,15 +76,26 @@
 
 </div>
 
-<!-- Chart.js：先用 CDN。
-     源特意选了 npmmirror（阿里维护的 npm 镜像）而不是 jsDelivr —— 实测本机
-     连 jsDelivr 是 0.2 秒就失败的连不上，npmmirror/unpkg/BootCDN/staticfile 都通。
+<!-- 三个库的顺序不能换：mqtt 和 rules 都要在 dashboard.js 之前加载完，
+     dashboard.js 打开页面就会调 connect() 和 judgeStatus()。 -->
+
+<!-- mqtt.js 5.10.1：用本地的，不走 CDN。
+     和下面的 Chart.js 不一样，这个是故意的 —— mqtt.js 加载不上就没有数据，
+     整个看板是空的；Chart.js 加载不上只是少了趋势图，卡片和日志照常用。
+     风险不一样大，所以对待方式也不一样。文件已经是现成的，不必再下一次。
+     真要改成 CDN，把下面这行换成：
+       <script src="https://registry.npmmirror.com/mqtt/5.10.1/files/dist/mqtt.min.js"></script>
+     源用 npmmirror（阿里维护的 npm 镜像），别用 jsDelivr —— 实测本机连不上。 -->
+<script src="lib/mqtt.min.js"></script>
+
+<!-- Chart.js 4.5.1：先用 CDN。
+     源特意选了 npmmirror 而不是 jsDelivr —— 实测本机连 jsDelivr 是 0.2 秒就失败的
+     连不上，npmmirror/unpkg/BootCDN/staticfile 都通。
      现场没网就把下面这行换成 <script src="lib/chart.umd.min.js"></script>，
-     那个文件已经在 dashboard/lib/ 里放好了，其余不用动。 -->
+     那个文件已经在 dashboard/lib/ 里放好了，其余不用动。
+     （把这一行也换成 lib/ 之后，整个页面就完全不依赖外网了。） -->
 <script src="https://registry.npmmirror.com/chart.js/4.5.1/files/dist/chart.umd.min.js"></script>
-<!-- mqtt.js 直接用 web/vendor 里已经下载好的那一份，不再存一份。
-     它必须在 dashboard.js 之前加载：dashboard.js 打开页面就会调 connect()。 -->
-<script src="../web/vendor/mqtt.min.js"></script>
+
 <script src="../shared/rules.js"></script>
 <script src="dashboard.js"></script>
 </body>
