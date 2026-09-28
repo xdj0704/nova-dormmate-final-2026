@@ -1,12 +1,25 @@
 // dashboard.js
 // Step 5-3 / 5-4：三节点 Dashboard。订阅 MQTT 显示真实数据，
 // 「模拟三节点数据」按钮则在没接 Broker 时也能把界面跑起来。
+// Step 6-3：详情区嵌一个 3D 视图，跟着当前选中的节点走。
 //
 // handleMessage(topic, payloadText) 是唯一的消息入口，两个来源都走它：
 //   client.on('message')  -> 真实 MQTT
 //   simulate()            -> 本地模拟
 // 校验、复核 status、落库、刷新这一整条链路两端共用，所以模拟数据看到的行为
 // 和真实数据完全一致 —— 反过来说，改 handleMessage 就等于同时改了两边。
+//
+// 这个文件是 **ES 模块**（index.html 里写的是 type="module"），因为它 import 了
+// ../3d/scene.js。三件事跟着变了，改的时候别漏：
+//   1) 页面必须走 http 服务器打开，file:// 下模块会被 CORS 拒掉
+//   2) index.html 里要有 importmap，且排在模块脚本之前（scene.js 用的是裸名字 'three'）
+//   3) mqtt / Chart / judgeStatus 仍然走全局变量，它们不是 import 进来的
+
+/* 3D 场景。拿的是 createDorm3D 这个工厂，不是场景本身 ——
+   这个页面只建一个，但工厂的返回值里带着 updateScene / setLabel / dispose，
+   后续要加第二个视角（比如三节点并排）时不用改这里。
+   路径相对**本文件**算：本文件在 dashboard/ 下，所以是 ../3d/scene.js。 */
+import { createDorm3D } from '../3d/scene.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -114,6 +127,7 @@ const el = {
   detailNode: document.getElementById('detail-node'),
   detailMeta: document.getElementById('detail-meta'),
   chartNote: document.getElementById('chart-note'),
+  scene3d: document.getElementById('scene3d'),
   simulate: document.getElementById('simulate'),
   clear: document.getElementById('clear'),
   conn: document.getElementById('conn'),
@@ -203,6 +217,55 @@ function renderDetailHead() {
   el.detailMeta.textContent = node.latest
     ? '最新一条 ' + node.latest.time + ' · 这个节点已收到 ' + node.history.length + ' 条'
     : '还没有收到这个节点的数据';
+}
+
+/* ---------- 3D 视图 ---------- */
+
+/* 建不出来就是 null（这台设备没有 WebGL、或者 three 没加载上）。
+   scene.js 会把原因写进容器里给看的人看，这里只负责别让后面崩掉：
+   renderScene 头一行就是「没有就什么都不做」，页面其余部分照常用。 */
+const dorm3d = initScene3D();
+
+function initScene3D() {
+  try {
+    return createDorm3D('scene3d');
+  } catch (err) {
+    console.error('[DormMate] 3D 视图初始化失败，页面其余部分不受影响：', err);
+    return null;
+  }
+}
+
+/**
+ * 把当前选中节点的状态画到 3D 视图上。
+ *
+ * 每次都从 nodes[currentNodeId].latest 重新算，不看上一次画的是什么 ——
+ * 幂等，所以切节点时直接调，不用先判断「变了没有」。
+ *
+ * 调用它的三个地方各有各的时机，都在外面把关：
+ *   selectNode   —— 选中项变了
+ *   handleMessage—— 且只在收到的那条属于当前选中的节点时（见那边的注释）
+ *   clearAll / 启动 —— 无条件画一遍
+ *
+ * status 直接用 latest.status 就行，那是 handleMessage 里 judgeStatus 复核过的。
+ * 这里不再复核一遍：复核逻辑只留一份，两处各写一遍迟早会不一致。
+ */
+function renderScene() {
+  if (!dorm3d) return;
+
+  const node = nodes[currentNodeId];
+
+  /* 还没收到数据的节点。scene.js 认不出「没有状态」这件事（它只认那四个字），
+     所以退回「正常」的外观，再在覆盖层上如实写明还没收到 ——
+     空白或者半成品的样子，看的人分不清是「还没收到」还是「页面坏了」。 */
+  if (!node.latest) {
+    dorm3d.updateScene('正常');
+    dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：还没有收到数据');
+    return;
+  }
+
+  const applied = dorm3d.updateScene(node.latest.status);
+  dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：' + applied
+    + '｜' + fmt(node.latest.temperature) + '℃ / ' + fmt(node.latest.humidity) + '%');
 }
 
 /* ---------- 图表 ---------- */
@@ -365,6 +428,7 @@ function selectNode(nodeId) {
   currentNodeId = nodeId;
   renderCards();
   renderDetailHead();
+  renderScene();
   renderCharts();
 }
 
@@ -498,6 +562,15 @@ function handleMessage(topic, payloadText) {
   renderCards();
   renderDetailHead();
   renderCharts();
+
+  /* 3D 只在「收到的这条正好是当前正在看的那个节点」时才重画。
+     三个宿舍的数据混在同一个通配符 topic 里进来，不加这一句的话，
+     dorm-b 的数据会顺手把画面刷成 dorm-b 的样子 —— 那一刻屏幕上写着
+     dorm-a，看着却是 dorm-b，而且没有任何地方会报错。
+
+     卡片和图表是「三个节点一起显示」，所以它们每次都刷；
+     3D 是「只显示当前选中的那个」，所以它要挑。 */
+  if (record.nodeId === currentNodeId) renderScene();
   return true;
 }
 
@@ -549,6 +622,7 @@ function clearAll() {
   messages.length = 0;
   renderCards();
   renderDetailHead();
+  renderScene();
   renderCharts();
   renderLog();
 }
@@ -690,6 +764,7 @@ if (darkQuery.addEventListener) darkQuery.addEventListener('change', applyChartT
 
 renderCards();
 renderDetailHead();
+renderScene();
 renderCharts();
 renderLog();
 

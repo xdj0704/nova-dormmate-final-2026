@@ -59,7 +59,9 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── test_report.py       # 报告渲染的测试（30 条，需要 pandas）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
 │   ├── miniapp-rules.test.js # 小程序 rules.js ↔ shared/rules.js 交叉比对（48 条）
-│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图（127 条，假 DOM + 假 mqtt）
+│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图 / 3D 接线（162 条，假 DOM + 假 mqtt）
+│   ├── scene3d.test.js      # 3d/scene.js 与 3d/index.html 的结构（198 条，假 three 模块 + 假 DOM）
+│   ├── scene3d-page.test.js # 3d/index.html 里那段模块脚本：MQTT 驱动 3D（65 条）
 │   └── script.test.js       # 前端回归测试（130 条，纯 Node 无依赖）
 ├── mosquitto/dormmate.conf  # Mosquitto 配置：1883(TCP) + 9001(WebSocket)
 ├── web/                     # M1~M3 单节点看板（纯静态，无需构建）
@@ -68,14 +70,14 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── script.js            # 订阅渲染 + 手动录入 + 录入历史 + 导出 CSV + 现场快照 + 语音指令
 │   └── vendor/mqtt.min.js   # 本地化的 mqtt.js，不依赖 CDN
 ├── dashboard/               # M5 多节点看板：dorm-a/b/c 横向对比（纯静态）
-│   ├── index.html
+│   ├── index.html           # 建容器 + 一张 three 的 importmap（scene.js 里的裸名 three 靠它解析）
 │   ├── style.css
-│   ├── dashboard.js         # 订阅 dormmate/+/env、校验报文、复核 status、三节点卡片 + 趋势图 + 日志
+│   ├── dashboard.js         # ES 模块：订阅 dormmate/+/env、校验报文、复核 status、卡片 + 趋势图 + 日志 + 3D 视图
 │   └── lib/
 │       ├── mqtt.min.js      # 本地引用：它挂了就一条数据都收不到，所以不走 CDN
 │       └── chart.umd.min.js # 备用：Chart.js 默认走 CDN，断网时改成引用这个
 ├── 3d/                      # M6 三维场景（ES Module + importmap，必须走 http 服务器）
-│   ├── index.html           # 只建容器、映射 three、调 createDorm3D，再加 4 个状态测试按钮
+│   ├── index.html           # 容器 + importmap + 节点选择（dorm-a/b/c）+ 订阅 MQTT 筛给当前节点，另留 4 个手动预览按钮
 │   ├── scene.js             # createDorm3D(container)：宿舍 + updateScene(status) / setFanOn / setLabel
 │   └── lib/three.module.js  # three 0.160.0 的 ESM 单文件，断网时把 importmap 指过来
 ├── miniapp/                 # M4 微信小程序（用微信开发者工具打开这个目录）
@@ -363,14 +365,15 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 py -3.14 -m unittest discover -s tests -t . -v   # ①②③ Python 侧，共 186 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
 node tests/scene3d.test.js                        # ⑧ 3D 场景，198 条
+node tests/scene3d-page.test.js                   # ⑨ 3D 页面的 MQTT 接线，65 条
 node tests/miniapp-rules.test.js                  # ⑥ 两份规则实现交叉比对，48 条
-node tests/dashboard.test.js                      # ⑦ 多节点看板，127 条
+node tests/dashboard.test.js                      # ⑦ 多节点看板，162 条
 node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ```
 
 `unittest discover` 会把 `tests/` 下三个 `test_*.py` 一起收进来
 （22 + 134 + 30 = 186 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib。
-`node` 那五条不需要任何依赖，也不用起服务器。
+`node` 那六条不需要任何依赖，也不用起服务器。
 
 画图那几只测试在开头 `skipUnless(HAS_MPL)`：没装 matplotlib 时会**跳过**
 （输出里是 `s` 不是 `.`）而不是报一堆错 —— 读 CSV、统计、复核这几步没它也
@@ -384,8 +387,9 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
 | ⑤ 130 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错 |
 | ⑥ 48 条 | `miniapp/utils/rules.js` 与 `shared/rules.js` 的交叉比对：两份实现分别放进各自的 vm 跑，在 8211 组温湿度（温度 -20~60 步长 0.5 × 湿度 0~100 步长 2）上逐对比 `judgeStatus` 与 `getAdvice`，结果必须完全一致；另有一条守卫确认这个网格真的覆盖到了四种状态，否则「全都一样」可能只是压根没测到 |
-| ⑦ 127 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示 |
+| ⑦ 162 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示；Step 6-3 的 3D 接线：**收到别的节点的消息时 3D 一次都不许被调**、切节点立刻改画、收到的 status 是复核之后才交给 3D 的、`renderScene` 的幂等与「3D 建不起来时直接跳过」 |
 | ⑧ 198 条 | `3d/scene.js` 配假 `three` 模块 + 假 DOM 实跑（模块里的裸名字 `three` 是不认 importmap 的，测试把那一行 import 改写成指向本地假模块的绝对 file:// URL）：容器查找与报错、renderer 的像素比封顶与尺寸、宿舍每部分的几何 / 朝向 / 摞放关系（床垫正好压在床架上、3 片扇叶互成 120°、窗扇挂在铰链的一侧、支架不在会转的那个 Group 里）、两盏灯与阴影相机、相机参数与 `lookAt`、`updateScene` 四种状态各自改了什么以及切回来有没有残留、不认识的 status 退回「正常」并在控制台警告、`setFanOn` 的归一化与「关掉不归零」、`setLabel` 的覆盖层、动画循环随 dt 累加（**验证转动快慢与帧率无关**）、resize 自适应与 0×0 容器不产生 NaN、dispose 是否真的回收了几何体 / 材质 / 监听（**包括嵌在 Group 里的零件**）、index.html 的 importmap（合法 JSON、出现顺序比的是**标签**位置、版本号）与 4 个按钮的接线、覆盖层那两条关键 CSS、以及 `lib/` 里那份的大小与自包含性。22 个变异（含「灯不能和相机同侧」「改完阴影相机范围要重算投影矩阵」「假模块的 traverse 退回只走一层」）逐个塞回源码验证过，全部被抓住 |
+| ⑨ 65 条 | `3d/index.html` 里那段 `<script type="module">`：**从 HTML 里抠出来**，摘掉 import 换成打桩的 `createDorm3D`，配上假 `mqtt` 和假的按钮桩实跑。盯的就是 Step 6-3 那条规则 —— **画面跟的是「当前选中的宿舍」，不是「最后一个发消息的宿舍」**：给 dorm-b 发消息时 3D 一次都不许被调、切过去才画、而且画的是它最新那条；没收到数据的节点退回「正常」的外观并在覆盖层上如实说明；报文里写错的 `status` 一律以规则算出的为准；脏数据四条（非 JSON / 缺字段 / 类型不对 / 未知节点）一条都不许改到画面；`shared/rules.js` 必须是普通 script 且排在模块之前；6-2 留下的 4 个手动预览按钮仍然可用，且会被下一次真数据顶掉 |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -1335,6 +1339,145 @@ windowPivot.rotation.y = WINDOW_OPEN_ANGLE; // 转父节点 = 绕边开
 位置**而不是找 `importmap` 这个词 —— 注释里也出现过这个词，拿 `indexOf` 找词的话，
 两条注释谁前谁后就决定了断言真假。
 
+## Step 6-3：MQTT 驱动 3D + 嵌入 Dashboard
+
+6-2 那个场景只做到「给一个 status，它跟着变」。这一步把 status 接上真实数据源：
+`3d/index.html` 自己订阅 MQTT，看板则把同一个场景嵌进详情区。
+
+两边的规矩是同一条：**订阅 `dormmate/+/env`，但只有「当前选中的那个宿舍」的消息
+才交给 `updateScene`**。收到的 `status` 也一律用 `judgeStatus` 复核，报文里写什么都不算数。
+
+### 为什么要按节点筛：三个宿舍挤在一个 topic 里
+
+`dormmate/+/env` 这个通配符把三个宿舍的数据混在一条流里送过来。
+不筛的话，dorm-b 的报文一到，画面就变成 dorm-b 的样子，
+而覆盖层上还写着 dorm-a —— 屏幕上看着挺正常，只有盯着那行小字才发现对不上。
+
+筛的动作放在**消息入口的最后一步**，两个页面各一处：
+
+```js
+// 3d/index.html
+if (data.nodeId === currentNodeId) render();
+
+// dashboard/dashboard.js（handleMessage 里）
+if (record.nodeId === currentNodeId) renderScene();
+```
+
+### 卡片和图表每次都刷，3D 要挑
+
+同一批数据，看板里的处理方式并不一样：
+
+| | 显示范围 | 刷新时机 |
+|---|---|---|
+| 卡片、图表、日志 | 三个节点一起显示 | 每来一条消息都刷 |
+| 3D 视图 | 只显示当前选中的那个 | **只有当前节点收到消息时才刷** |
+
+区别不在性能，在语义：卡片是「三个宿舍的横向对比」，任何一条新数据都改变了它要表达的东西；
+3D 是「我现在盯着的这个宿舍」，别的宿舍的数据进来，它**应该**纹丝不动。
+不加这个判断，屏幕上不会报错，但那个「我盯着的」就不成立了。
+
+### 切到还没收到数据的节点
+
+`scene.js` 只认 `正常 / 偏冷 / 偏热 / 偏湿` 四个字，没有「不知道」这一档。
+所以这两个页面都得自己决定画什么：
+
+- 场景退回**「正常」的外观** —— 空白或者半成品的样子，看的人分不清是「还没收到」
+  还是「页面坏了」，兜个正常态至少是「一间正常的宿舍」。
+- 覆盖层上如实写 **「（还没有收到数据）」** —— 外观可以兜底，话不能乱说。
+
+看板另有一层：切节点时立刻从 `nodes[currentNodeId].latest` 重画，
+所以切到一个**已经有数据**的节点会马上显示它最新那条的样子，不必等新报文。
+这一点和只留一份「当前状态」的做法差别很大：后者在切过去的瞬间画的还是上一个宿舍。
+
+### `3d/index.html` 上多了什么
+
+- **宿舍选择按钮**（dorm-a / dorm-b / dorm-c）—— 和状态按钮分成两组，
+  `data-node` 和 `data-status` 各管各的。
+- **一行连接状态**，写的是实际连的地址（`已连接 · ws://localhost:9001`）。
+  连错机器时这一行是第一个能看出问题的地方。
+- 6-2 的 **4 个手动预览按钮保留**：现场没网、Broker 没起来时全靠它演示。
+  手动点出来的状态会在覆盖层末尾加一句「（手动预览）」，收到真数据就自动撤掉 ——
+  按钮是不经过 Broker 的，得让人分得清屏幕上这个是演示还是实况。
+- mqtt.js **直接引 `../dashboard/lib/mqtt.min.js`**，不再拷一份到 `3d/`。
+  两个页面本来就在同一个 http 服务器上，同一个文件引两次浏览器只下一次；
+  多存一份的代价是升级时要记得改两个地方。
+- `shared/rules.js` **必须是普通 `<script>`**。它是个 IIFE，把 `judgeStatus` 挂在
+  `globalThis` 上，没有 `export` —— 在模块里 `import` 它拿到的是 `undefined`，
+  一调就炸。所以它排在 `<script type="module">` 之前。
+
+### 看板变成 ES 模块，跟着变了三件事
+
+`dashboard.js` 现在有一行 `import { createDorm3D } from '../3d/scene.js'`，
+所以 `index.html` 里必须写成 `<script type="module" src="dashboard.js">`。
+**但不是把三个 `<script>` 一律改成模块**，要分开看：
+
+1. **`file://` 直接打开不行了。** 模块走 CORS，必须用 http 服务器
+   （`http://localhost:8000/dashboard/`），和 `3d/` 那个页面一样。
+2. **`dashboard/` 也要有一张 importmap。** importmap 是**文档级**的，认的是「哪个页面」，
+   不是「哪个模块」。`scene.js` 里写的是 `import ... from 'three'`，那个裸名字最终是在
+   **`dashboard/index.html`** 这张表里查的 —— 少了它，报错出现在 `scene.js` 里，
+   看着像是 `3d/` 那边坏了。映射的是裸名字，所以和目录无关，两张表一个字都不用改。
+3. **mqtt.js / Chart.js / `shared/rules.js` 仍是普通 script**，而且都排在模块脚本之前。
+   mqtt 和 Chart 是 UMD 包，本来就没有 `export`；`rules.js` 同理。这三个名字在
+   `dashboard.js` 里是以**全局变量**的形式用的，模块里 `import` 它们只会拿到 `undefined`。
+
+另外，import 的路径是相对**模块自己**算的：`dashboard.js` 在 `dashboard/` 下，
+所以写 `../3d/scene.js`。这一点和 importmap 里的相对路径（相对**页面**）不是一套规则，
+两个都容易记混。
+
+### 3D 视图的画幅
+
+嵌进看板时，容器是 `height: 380px` 加一个 `max-width: 760px`。
+`max-width` 是为画幅比例：相机在 `scene.js` 里是定死的（位置 + 竖直张角 50°），
+容器越扁，房间在画面里占的比例越小 —— 铺满整个面板（约 1000×380）时，
+房间只占中间一小块，四周全是空地面。760/380 ≈ 2:1，和 `3d/index.html` 那个 `60vh`
+的画幅基本一致，同一个相机在两边看到的构图就一样了。
+
+### 这一步的验证方式
+
+除了跑测试，还做了两件事：
+
+**一、变异测试。** 24 个变异逐个塞回源码，全部被抓住。挑几个有代表性的：
+
+- 去掉 `if (data.nodeId === currentNodeId)`，谁的消息都画
+- `status` 直接用报文里的，不用 `judgeStatus` 复核
+- 切节点时不看该节点的数据，一律画「正常」
+- 手动预览的标记不撤销
+- `renderScene` 不挡 `dorm3d` 是 `null`（没有 WebGL 时会炸在这一行）
+- importmap 排在模块脚本**之后**、mqtt.js 改成 `type="module"`
+- 容器 id 和代码里传的对不上
+
+**二、真浏览器 + 真 Broker。** 用 headless Edge 打开页面，
+`--dump-dom` 读回来的覆盖层文字是**真的收到 MQTT 之后**渲染出来的：
+
+```
+<div class="scene-label">当前宿舍：dorm-a｜状态：偏冷｜16℃ / 60%</div>
+<span id="conn-text">已连接 · ws://localhost:9001</span>
+```
+
+同一时刻消息日志里有三条，三个宿舍各一条（dorm-a 偏冷 / dorm-b 偏湿 / dorm-c 正常），
+而 3D 那句标签停在 dorm-a 上 —— 这一条就是「按节点筛」在真实环境里的证据。
+再用一个临时探针页在 5 秒后点一下 dorm-b 的卡片，标签就换成了
+`当前宿舍：dorm-b｜状态：偏湿｜25℃ / 80%`，读数也确实换成了 dorm-b 自己的那份。
+
+### 这一步对测试桩的改动
+
+**`dashboard.js` 变成 ES 模块之后，原来的 vm 跑不动了** ——
+`vm.runInContext` 只能喂普通脚本，直接喂会抛
+`Cannot use import statement outside a module`。处理办法和 `scene3d.test.js` 改写
+`three` 那个标识符是一个思路：把 import 那一行摘掉，改用上下文里同名的打桩函数顶上。
+
+摘之前先数一遍，**必须正好一条**，多一条就报出来 —— 将来谁再加一条 import，
+要么被一起悄悄摘掉（测了个假的），要么在这里炸一下。原文件里那行到底怎么写，
+另有两条静态断言盯着（正则 + 目标文件真的在）。
+
+`3d/index.html` 那边更进一步：那段脚本是**从 HTML 里抠出来跑的**，
+不是另抄一份等价代码，所以「页面上真正在跑的东西」和「测的东西」不可能对不上。
+按钮也不是手写一份 `['dorm-a','dorm-b','dorm-c']`，而是用正则从 HTML 里读
+`data-node` / `data-status` —— HTML 里少写一个按钮，测试就会红。
+
+
+
 ## 已知限制
 
 分三类：**设计如此**（当前步骤就有意不做）、**还没做**（后续步骤补）、
@@ -1352,6 +1495,7 @@ windowPivot.rotation.y = WINDOW_OPEN_ANGLE; // 转父节点 = 绕边开
 | 页面上显示的状态不重算 | MQTT 数据以**发布端发来的 `status` 字段为准**，前端只做校验不做判断 —— 避免两份规则各算各的。只有「手动录入」那份不经过发布端，才用 JS 规则算 |
 | 规则有两份实现，必须手工同步 | `status_rules.py`（Python）和 `shared/rules.js`（JS）各一份，没有自动同步机制。不同步的后果是报告顶部出现红色横幅（见排查表） |
 | MQTT 允许匿名连接 | `allow_anonymous true` 是课程演示配置，**切勿照搬到公网**。这也是 `open_firewall.bat` 故意不放行 1883 的原因 |
+| 3D 视图不跟着深色模式变 | `scene.js` 里的背景色和灯光色是写死的（那是宿舍该有的颜色，不是 UI 主题），所以看板切到深色时 3D 那块仍是浅色的。要跟就得把 `LOOK` 表再拆一套深色值 |
 | 3D 场景的状态切换是瞬间到位的 | 开窗角度和风扇转速都不做缓动。按钮点下去要立刻看到变化，而且立刻到位让「打开了吗」「转了吗」一眼可验、也好写测试。想要柔和一点就在动画循环里让 `rotation.y` 朝目标值逼近 |
 
 ### 还没做
@@ -1362,7 +1506,7 @@ windowPivot.rotation.y = WINDOW_OPEN_ANGLE; // 转父节点 = 绕边开
 | 只有 `dorm-a` 一个节点 | `dorm-b` / `dorm-c` 从 M5 开始启用 |
 | 没有后端、没有数据库 | 纯静态前端 + 本机 Broker，数据不落库，页面关掉就没了 |
 | 前端测试不覆盖浏览器真实行为 | 测试是 Node + 一个最小 DOM shim 跑真实的 `script.js`，摄像头 / 麦克风 / Canvas 都是桩。**能证明逻辑对，不能替代真机验证** |
-| 3D 场景还没接数据 | Step 6-2 只做到「给一个 status，场景跟着变」。什么时候、从哪儿拿这个 status（MQTT 订阅还是手动输入）是后面的事 |
+| 3D 视图的动画循环一直在跑 | 场景是用 `setAnimationLoop` 逐帧重绘的，风扇不转的时候也在重绘。看板本来就是常驻页面，这点开销可以接受；真要省就在风扇停下时 `setAnimationLoop(null)` |
 
 ### 环境依赖
 

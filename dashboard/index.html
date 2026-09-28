@@ -34,6 +34,15 @@
 
     <p id="chart-note" class="note chart-note"></p>
 
+    <!-- 3D 视图。跟着当前选中的节点走：点卡片切节点、或当前这个节点收到
+         新消息时，dashboard.js 会调 updateScene + setLabel。
+         容器的高度写在 style.css 里，必须是确定值 ——
+         读不到 clientHeight 的话相机就算不出宽高比。 -->
+    <figure class="scene-box">
+      <figcaption>宿舍实景（跟着当前选中的节点走）</figcaption>
+      <div id="scene3d"></div>
+    </figure>
+
     <!-- 温湿度分成两张图，不用双 Y 轴：两者的单位和量级都不同，
          叠在一张图上要么把温度压成一条直线，要么让两条线的交叉点
          变成毫无意义的视觉暗示。两张图共用同一组时间刻度，趋势照样能横向比。 -->
@@ -77,7 +86,12 @@
 </div>
 
 <!-- 三个库的顺序不能换：mqtt 和 rules 都要在 dashboard.js 之前加载完，
-     dashboard.js 打开页面就会调 connect() 和 judgeStatus()。 -->
+     dashboard.js 打开页面就会调 connect() 和 judgeStatus()。
+     Step 6-3 起它们还必须是**普通 script** —— dashboard.js 已经是 ES 模块了，
+     但 mqtt / Chart / judgeStatus 这三个仍然走全局变量：
+     mqtt.min.js 和 chart.umd.min.js 是 UMD 包，本来就没有 export；
+     shared/rules.js 同理（一个 IIFE，往 globalThis 上挂函数）。
+     在模块里 import 它们是 import 一个没有 export 的文件，拿到的是 undefined。 -->
 
 <!-- mqtt.js 5.10.1：用本地的，不走 CDN。
      和下面的 Chart.js 不一样，这个是故意的 —— mqtt.js 加载不上就没有数据，
@@ -97,6 +111,41 @@
 <script src="https://registry.npmmirror.com/chart.js/4.5.1/files/dist/chart.umd.min.js"></script>
 
 <script src="../shared/rules.js"></script>
-<script src="dashboard.js"></script>
+
+<!-- three.js 0.160.0 的 importmap，和 3d/index.html 里那张是同一张。
+
+     为什么 dashboard 也要有一份：importmap 是**文档级**的，认的是「哪个页面」，
+     不是「哪个模块」。dashboard.js import 了 ../3d/scene.js，而 scene.js 里写着
+     import ... from 'three' —— 那个裸名字最终是在**这个页面**的映射表里查的。
+     少了这张表，报错是「Failed to resolve module specifier "three"」，
+     而且是在 scene.js 里报，看着像是 3d/ 那边坏了。
+
+     映射的是裸名字，所以和页面所在目录没关系：dashboard/ 和 3d/ 共用同一张表，
+     一个字都不用改。
+
+     importmap 的内容必须是合法 JSON，所以里面一行注释都写不了。
+
+     ── 改成完全本地（现场没网时）──
+     把下面那行换成 "three": "../3d/lib/three.module.js"，
+     文件已经在 3d/lib/ 里放好了，其余不用动。
+     这里必须写 '../3d/lib/…'，不能写 './lib/…' —— 相对路径是相对
+     **这个页面所在的 dashboard/** 算的，而本地那份 three 放在 3d/ 里。 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://registry.npmmirror.com/three/0.160.0/files/build/three.module.js"
+  }
+}
+</script>
+
+<!-- dashboard.js 是 type="module"（Step 6-3 起），而且是上面这张表之后的第一条
+     模块脚本 —— importmap 必须排在它前面，排在后面浏览器不认。
+
+     换成模块的代价和 3d/ 那个页面一样：模块走 CORS，file:// 直接打开会被拒，
+     必须走 http 服务器：
+         http://localhost:8000/dashboard/
+     好处是模块默认 defer，脚本执行时 DOM 一定已经就绪，不必再依赖
+     「<script> 写在 </body> 前面」这件事。 -->
+<script type="module" src="dashboard.js"></script>
 </body>
 </html>

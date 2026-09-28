@@ -352,6 +352,69 @@ button:focus-visible {
   color: var(--status-critical);
 }
 
+/* ---------- 3D 视图 ---------- */
+
+.scene-box { margin: 0 0 20px; }
+
+.scene-box figcaption {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* 三条和 3d/index.html 里 #scene 那份一样，理由也一样：
+   高度必须是确定的（读不到 clientHeight 就算不出宽高比）、
+   overflow: hidden（setSize 和容器差一像素就会顶出滚动条）、
+   position: relative（下面 .scene-label 靠它定位）。
+   高度用固定值而不是 vh：它嵌在面板里，跟着视口高矮变的话，
+   图表会被挤得忽上忽下。
+
+   max-width 是为了画幅比例：相机是 scene.js 里定死的（位置 + 竖直张角 50°），
+   容器越扁，房间在画面里占的比例越小 —— 铺满整个面板（约 1000×380）时
+   房间只占中间一小块，四周全是空地面。760/380 ≈ 2:1，
+   和 3d/index.html 那个 60vh 的画幅基本一致，同一个相机在两边看到的构图就一样。 */
+#scene3d {
+  position: relative;
+  overflow: hidden;
+  height: 380px;
+  max-width: 760px;
+  background: #ececea;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+}
+
+/* setLabel 写字的覆盖层，由 3d/scene.js 建出来挂进 #scene3d。
+   和 3d/index.html 里那份是同一套样式，这里各留一份：两个页面互不依赖。
+
+   这里用主题变量而不是写死的色值 —— 看板有深色模式，覆盖层得跟着变；
+   3d/ 那个页面没有深色模式，所以那边是写死的。
+
+   pointer-events: none 是关键：不写的话这层会吃掉鼠标事件。 */
+.scene-label {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  pointer-events: none;
+  padding: 6px 11px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--surface-1) 86%, transparent);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  backdrop-filter: blur(3px);
+}
+
+/* 这台设备没有 WebGL 时，scene.js 会把原因写进容器里（见那边的 try/catch） */
+.scene-error {
+  margin: 0;
+  padding: 20px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--status-critical);
+}
+
 /* ---------- 图表 ---------- */
 
 .charts {

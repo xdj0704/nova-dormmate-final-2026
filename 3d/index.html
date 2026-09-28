@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DormMate 3D · Step 6-2 简化宿舍</title>
+<title>DormMate 3D · Step 6-3 MQTT 驱动</title>
 <style>
   html, body { height: 100%; }
 
@@ -33,6 +33,26 @@
     border: 1px solid #e1e0d9;
     border-radius: 5px;
   }
+
+  /* 连接状态。文字说了算，前面那个点是辅助 —— 只给颜色的话，
+     色觉障碍和黑白打印都读不出来。 */
+  .conn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 9px;
+    font-size: 13px;
+    color: #52514e;
+  }
+
+  .conn-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #898781;   /* 灰色 = 还没连上 */
+  }
+
+  .conn.is-on .conn-dot { background: #0ca30c; }
 
   /* 3D 容器。三条不能省的：
      - 必须有确定的高度。高度是 0 的话 clientHeight 就是 0，相机算不出宽高比。
@@ -81,15 +101,18 @@
     color: #d03b3b;
   }
 
-  /* ---- 测试按钮 ---- */
+  /* ---- 按钮 ---- */
 
   .controls {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
-    margin: 0 24px 24px;
+    margin: 0 24px 12px;
   }
+
+  /* 第二行（状态预览）离上一行远一点，两组按钮别糊成一片 */
+  .controls + .controls { margin-top: 16px; }
 
   .controls .hint {
     font-size: 13px;
@@ -121,21 +144,45 @@
     border-color: #2a78d6;
     box-shadow: inset 0 0 0 1px #2a78d6;
   }
+
+  /* 宿舍那三个按钮用等宽字体，dorm-a 这种标识符等宽才好认 */
+  .controls button[data-node] {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
 </style>
 </head>
 <body>
 
   <header>
     <h1>DormMate 3D</h1>
-    <p class="sub">Step 6-2：简化宿舍 —— 地板 / 墙 / 床 / 窗户 / 风扇，点按钮看四种状态</p>
+    <p class="sub">
+      Step 6-3：订阅 <code>dormmate/+/env</code>，选中的那个宿舍收到数据就换样子
+    </p>
+    <p class="conn" id="conn">
+      <span class="conn-dot"></span><span id="conn-text">准备连接…</span>
+    </p>
   </header>
 
-  <!-- index.html 只管三件事：把容器摆好、调 createDorm3D、把按钮接上。
+  <!-- index.html 只管四件事：把容器摆好、调 createDorm3D、把按钮接上、
+       把 MQTT 收到的数据筛一遍再交给它。
        宿舍长什么样、每种状态改什么，全在 scene.js 里，这个文件一概不管。 -->
   <div id="scene"></div>
 
   <div class="controls">
-    <span class="hint">试一下：</span>
+    <span class="hint">宿舍：</span>
+    <!-- data-node 里写的必须是统一约定的三个节点名。写错了 pick() 直接
+         忽略（它认不出这个名字），点了没反应 —— 不会画出别人的数据。 -->
+    <button type="button" data-node="dorm-a">dorm-a</button>
+    <button type="button" data-node="dorm-b">dorm-b</button>
+    <button type="button" data-node="dorm-c">dorm-c</button>
+  </div>
+
+  <div class="controls">
+    <span class="hint">手动预览：</span>
+    <!-- 这四个按钮是不经过 Broker 的：现场没网、或 Broker 没起来时，
+         照样能把四种状态看一遍。手动点出来的状态会在覆盖层上写明
+         「手动预览」，收到新数据就自动撤掉，不会冒充真实数据。 -->
     <!-- data-status 里写的必须是统一规则那四个字，一个字都不能差 ——
          差一个字 updateScene 就认不出来，只能退回「正常」并在控制台警告。 -->
     <button type="button" data-status="正常">正常</button>
@@ -143,6 +190,19 @@
     <button type="button" data-status="偏热">偏热</button>
     <button type="button" data-status="偏湿">偏湿</button>
   </div>
+
+  <!-- mqtt.js 5.10.1：直接借 dashboard/lib/ 里那份，不再拷一份到 3d/。
+       两个页面本来就都在同一个 http 服务器上，同一个文件引两次浏览器只下一次，
+       而多存一份的代价是「升级时要记得改两个地方」。
+       它挂了就一条数据都收不到，所以不走 CDN。 -->
+  <script src="../dashboard/lib/mqtt.min.js"></script>
+
+  <!-- 统一规则。**必须是普通 script**：shared/rules.js 是个 IIFE，
+       把 judgeStatus 挂在 globalThis 上，不用 export。
+       放在 module 之前，模块里才调得到 judgeStatus。
+       顺带一句：模块里不能写 import { judgeStatus } from '../shared/rules.js' ——
+       那个文件没有 export，import 进来是 undefined。 -->
+  <script src="../shared/rules.js"></script>
 
   <!-- three.js 0.160.0：先用 CDN。
 
@@ -182,38 +242,262 @@
   <script type="module">
     import { createDorm3D } from './scene.js';
 
-    // M5 起是多节点，所以这里写明是哪个宿舍；M1~M4 只有一个宿舍时不写也行。
-    const NODE_ID = 'dorm-a';
+    /* M5 起是多节点。和 dashboard 一样只认这三个 ——
+       不在这三个里面的 nodeId 一律丢弃，不给一份脏数据建新格子。 */
+    const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
+    const TOPIC = 'dormmate/+/env';
+
+    /* Broker 地址跟着页面的访问地址走：本机打开就是 ws://localhost:9001，
+       手机用 http://10.102.196.160:8000/3d/ 打开就是
+       ws://10.102.196.160:9001。写死 localhost 的话，手机浏览器里的 localhost
+       指的是手机自己，连不回来。
+       （和 dashboard/dashboard.js、web/script.js 里那份是同一套写法，
+       三处各留一份：三个页面互不依赖，为三行代码共用一个 shared/ 文件
+       反而要多发一次请求。改的时候三处一起改。） */
+    function brokerUrl(hostname) {
+      return 'ws://' + (hostname || 'localhost') + ':9001';
+    }
+
+    const BROKER_URL = brokerUrl(location.hostname);
+
+    /**
+     * 从 topic 里取出节点名。约定是 dormmate/<nodeId>/env。
+     * 形状不对就返回空串 —— 调用方据此跳过 topic 与报文的一致性检查，
+     * 而不是拿一个猜出来的节点名去报警。
+     */
+    function topicNode(topic) {
+      const m = /^dormmate\/([^/]+)\/env$/.exec(topic);
+      return m ? m[1] : '';
+    }
 
     const dorm = createDorm3D('scene');
 
-    const buttons = Array.prototype.slice.call(
-      document.querySelectorAll('.controls button')
+    const statusButtons = Array.prototype.slice.call(
+      document.querySelectorAll('.controls button[data-status]')
     );
+    const nodeButtons = Array.prototype.slice.call(
+      document.querySelectorAll('.controls button[data-node]')
+    );
+    const connEl = document.getElementById('conn');
+    const connText = document.getElementById('conn-text');
+
+    /* 每个节点最新收到的那一条。null = 还没收到过。
+       只留最新一条，不留 history：看趋势是 dashboard 的事，
+       这个页面回答的是「现在长什么样」。
+
+       为什么要按节点分开存：从 dorm-a 切到 dorm-b 时，得马上知道
+       dorm-b 现在是什么状态。只留一份「当前状态」的话，切过去的瞬间
+       画的还是 dorm-a 的样子，得等 dorm-b 下一条数据来了才对 ——
+       在那之前屏幕上是错的。 */
+    const latest = {};
+    NODE_IDS.forEach(function (id) { latest[id] = null; });
+
+    let currentNodeId = NODE_IDS[0];
+
+    /* 手动点状态按钮只是「先看看长什么样」，不代表这个宿舍真的这样。
+       置 true 之后覆盖层会写明「手动预览」，一收到新数据就自动撤销。 */
+    let preview = false;
+
+    /** 覆盖层末尾那句补充说明。没数据、或正在手动预览时才不是空串。 */
+    function note() {
+      if (!latest[currentNodeId]) return '（还没有收到数据）';
+      return preview ? '（手动预览）' : '';
+    }
 
     /**
-     * 应用一个状态：改场景 + 改覆盖层文字 + 标出当前按钮。
-     * 这三件事分属三个对象（scene / label / DOM），所以放在页面这边组合，
-     * scene.js 里的 updateScene 只管场景那部分。
+     * 把「哪个宿舍 + 什么状态」摆到画面上。
+     *
+     * 三件事一起改：3D 场景、覆盖层文字、两组按钮的高亮。
+     * 分成三个函数迟早会出现「场景已经变了、按钮还停在旧的高亮」——
+     * 它们本来就是同一件事的三个面。
+     *
+     * @param {string} status 交给 updateScene 的状态
      */
     function apply(status) {
       const applied = dorm.updateScene(status);
-      dorm.setLabel('当前宿舍：' + NODE_ID + '｜状态：' + applied);
+      dorm.setLabel('当前宿舍：' + currentNodeId + '｜状态：' + applied + note());
 
-      buttons.forEach(function (btn) {
+      statusButtons.forEach(function (btn) {
         btn.classList.toggle('is-active', btn.dataset.status === applied);
+      });
+      nodeButtons.forEach(function (btn) {
+        btn.classList.toggle('is-active', btn.dataset.node === currentNodeId);
       });
     }
 
-    buttons.forEach(function (btn) {
+    /**
+     * 画当前选中的那个宿舍。有数据就画它的状态。
+     *
+     * 没有数据时退回「正常」的外观：空白或者半成品的样子，
+     * 看的人分不清是「还没收到」还是「页面坏了」。兜个正常态，
+     * 再在覆盖层上写明还没收到，两件事就都说得清了。
+     */
+    function render() {
+      preview = false;
+      const rec = latest[currentNodeId];
+      if (rec) { apply(rec.status); return; }
+      apply('正常');
+    }
+
+    /**
+     * 切宿舍。已经有数据的节点，切过去会立刻画出它那条的状态。
+     * 和 dashboard 的 selectNode 不一样，这里**不**在「点的是当前这个」时提前返回：
+     * 页面打开时第一次调用就是 currentNodeId 自己，提前返回的话
+     * 初始那一次就什么都画不出来了。
+     */
+    function pick(nodeId) {
+      if (!Object.prototype.hasOwnProperty.call(latest, nodeId)) return;
+      currentNodeId = nodeId;
+      render();
+    }
+
+    statusButtons.forEach(function (btn) {
       btn.addEventListener('click', function () {
+        preview = true;
         apply(btn.dataset.status);
       });
     });
 
-    // 页面一打开就摆成「正常」，并且让「正常」那个按钮是高亮的 ——
-    // 否则初始状态和按钮高亮对不上，看的人会以为是坏的。
-    apply('正常');
+    nodeButtons.forEach(function (btn) {
+      btn.addEventListener('click', function () { pick(btn.dataset.node); });
+    });
+
+    /* ---------- MQTT ---------- */
+
+    function setConn(on, text) {
+      connEl.className = on ? 'conn is-on' : 'conn';
+      connText.textContent = text;
+    }
+
+    /* 当前那根连接。null 表示还没连上。 */
+    let client = null;
+
+    /**
+     * 收一条环境报文。
+     *
+     * 只做两件事：复核 status、把这条记到它自己的节点名下。
+     * **动画面这一步是最后一行**，而且只在「这条正好是当前选中的宿舍」时才走。
+     *
+     * 三个宿舍的数据是混在同一个通配符 topic 里进来的。不筛的话，
+     * dorm-b 的数据会直接把画面改成 dorm-b 的样子，而左上角还写着 dorm-a ——
+     * 这是这一步最容易出的错，而且屏幕上看着挺正常，只有盯着标签才发现对不上。
+     *
+     * @param {string} topic       消息来自哪个 topic
+     * @param {object} payload     mqtt.js 给的二进制载荷
+     */
+    function onMessage(topic, payload) {
+      const fromTopic = topicNode(topic);
+
+      let data = null;
+      try {
+        data = JSON.parse(payload.toString());
+      } catch (err) {
+        console.warn('[3d] 报文不是合法 JSON，丢弃：' + topic, err);
+        return;
+      }
+
+      if (!data || typeof data !== 'object'
+          || typeof data.temperature !== 'number'
+          || typeof data.humidity !== 'number') {
+        console.warn('[3d] 报文缺少 temperature / humidity（且必须是数字），丢弃：'
+          + topic);
+        return;
+      }
+
+      /* 先把节点名认下来。不认识的直接丢，不给它建格子 ——
+         否则任意一个脏 nodeId 都能往 latest 里塞一条。 */
+      if (!Object.prototype.hasOwnProperty.call(latest, data.nodeId)) {
+        console.warn('[3d] 不认识的 nodeId：「' + data.nodeId + '」，丢弃：' + topic);
+        return;
+      }
+
+      if (fromTopic && fromTopic !== data.nodeId) {
+        console.warn('[3d] topic 里的节点（' + fromTopic + '）和报文里的（'
+          + data.nodeId + '）对不上，以下面报文里的为准');
+      }
+
+      if (typeof judgeStatus !== 'function') {
+        console.warn('[3d] 未加载 shared/rules.js，无法复核 status，丢弃：' + topic);
+        return;
+      }
+
+      /* status 一律用规则复核，报文里写什么都不算数 ——
+         和 dashboard 的 handleMessage 是同一个口径。 */
+      const expected = judgeStatus(data.temperature, data.humidity);
+      if (data.status !== expected) {
+        console.warn('[3d] status 不一致：收到「' + data.status + '」，规则算出「'
+          + expected + '」，以规则为准');
+      }
+
+      latest[data.nodeId] = {
+        nodeId: data.nodeId,
+        temperature: data.temperature,
+        humidity: data.humidity,
+        status: expected,
+        time: data.time,
+      };
+
+      /* 关键的一行：不是当前选中的宿舍就到此为止，画面一个字都不动。 */
+      if (data.nodeId === currentNodeId) render();
+    }
+
+    function connect() {
+      if (typeof mqtt === 'undefined') {
+        setConn(false, '未加载 mqtt.js');
+        console.error('[3d] 缺少 dashboard/lib/mqtt.min.js，请重新下载后刷新');
+        return;
+      }
+
+      setConn(false, '连接中… ' + BROKER_URL);
+
+      const c = mqtt.connect(BROKER_URL, {
+        clientId: 'dormmate-3d-' + Math.random().toString(16).slice(2, 8),
+        clean: true,
+        reconnectPeriod: 2000,
+        connectTimeout: 5000,
+        keepalive: 30,
+      });
+      client = c;
+
+      /* 每个回调开头都先确认自己还是当前那根连接。断开或换过连接之后，
+         旧连接的回调还可能补触发一次，不挡掉就会把新连接的状态覆盖成旧的。 */
+      function current() { return client === c; }
+
+      c.on('connect', function () {
+        if (!current()) return;
+        setConn(true, '已连接 · ' + BROKER_URL);
+        c.subscribe(TOPIC, { qos: 1 }, function (err) {
+          if (err) console.error('[3d] 订阅失败：', err);
+        });
+      });
+
+      c.on('reconnect', function () {
+        if (current()) setConn(false, '重连中…');
+      });
+
+      c.on('close', function () {
+        if (current()) setConn(false, '已断开 · 等 Broker 起来会自动重连');
+      });
+
+      c.on('error', function (err) {
+        if (!current()) return;
+        console.error('[3d] 连接错误：', err);
+        setConn(false, '连不上 ' + BROKER_URL);
+      });
+
+      /* 唯一的接入口。mqtt.js 给的是二进制，转成字符串这一步在 onMessage 里做。 */
+      c.on('message', function (topic, payload) {
+        onMessage(topic, payload);
+      });
+    }
+
+    /* 打开就先摆成 dorm-a。这时还没有任何数据，
+       覆盖层会写明「（还没有收到数据）」，不会假装有数据。 */
+    pick(NODE_IDS[0]);
+
+    /* 打开就连。连不上也不影响手动预览按钮 —— 那是不经过 Broker 的，
+       现场没网的时候正好用来演示。 */
+    connect();
   </script>
 
 </body>

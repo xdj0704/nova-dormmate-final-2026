@@ -90,10 +90,29 @@ const mqttStub = {
   },
 };
 
+/* ---------- 3d/scene.js 打桩 ---------- */
+/* 不记录的话就测不出「切节点 / 收到新消息时到底有没有把状态交给 3D」——
+   而这正是 Step 6-3 的全部内容。
+   打桩挂的是 createDorm3D（模块里 import 的那个名字），不是 3D 场景本身。 */
+const sceneCalls = [];
+function createDorm3DStub(hostId) {
+  const rec = { hostId, statuses: [], labels: [], disposed: 0 };
+  sceneCalls.push(rec);
+  return {
+    /* 真的那个也会返回「实际生效的状态」，所以桩照做 ——
+       renderScene 拿它的返回值拼标签文字。 */
+    updateScene(status) { rec.statuses.push(status); return status; },
+    setLabel(text) { rec.labels.push(text); return text; },
+    setFanOn() {},
+    dispose() { rec.disposed += 1; },
+  };
+}
+
 const context = {
   document: documentStub,
   Chart: ChartStub,
   mqtt: mqttStub,
+  createDorm3D: createDorm3DStub,
   location: { hostname: 'localhost' },
   getComputedStyle: () => ({ getPropertyValue: (n) => PALETTE[n] || '' }),
   window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
@@ -104,11 +123,28 @@ context.globalThis = context;
 context.window.document = documentStub;
 
 /* ---------- 加载 shared/rules.js，再加载 dashboard.js ---------- */
+
+/* Step 6-3 起 dashboard.js 是 ES 模块（它 import 了 ../3d/scene.js），
+   而 vm.runInContext 只能跑普通脚本 —— 原样喂进去会抛
+   「Cannot use import statement outside a module」。
+
+   处理方式和 tests/scene3d.test.js 里改写 'three' 那个标识符是一个思路：
+   把 import 那一行摘掉，改用上下文里同名的打桩函数顶上。
+   摘之前先数一遍，必须正好一条；将来谁再加一条 import，这里立刻炸出来，
+   而不是把那条也悄悄摘了、测了个假的。
+
+   注意这只是**跑起来**的方式。原文件里到底怎么写的那一行，
+   由下面 J 段的两条静态断言盯着（正则 + 文件真的在）。 */
+const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
+const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
+const importCount = (fs.readFileSync(DASH_SRC, 'utf8').match(/^import\s/gm) || []).length;
+
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(ROOT, 'shared', 'rules.js'), 'utf8'), context,
   { filename: path.join(ROOT, 'shared', 'rules.js') });
 
-let src = fs.readFileSync(path.join(ROOT, 'dashboard', 'dashboard.js'), 'utf8');
+let src = fs.readFileSync(DASH_SRC, 'utf8');
+src = src.replace(SCENE_IMPORT, '/* import 已摘除：顶上用的是上下文里的 createDorm3D 打桩 */\n');
 /* 只加测试钩子，不改原文件 */
 src += `
 ;globalThis.__nodes = nodes;
@@ -120,12 +156,14 @@ globalThis.__current = function () { return currentNodeId; };
 globalThis.__topicNode = topicNode;
 globalThis.__connect = connect;
 globalThis.__disconnect = disconnect;
+globalThis.__renderScene = renderScene;
 `;
-vm.runInContext(src, context, { filename: path.join(ROOT, 'dashboard', 'dashboard.js') });
+vm.runInContext(src, context, { filename: DASH_SRC });
 
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
-  __topicNode: topicNode, __connect: connect, __disconnect: disconnect } = context;
+  __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
+  __renderScene: renderScene } = context;
 
 /* ---------- 断言 ---------- */
 let pass = 0, fail = 0;
@@ -378,6 +416,131 @@ mc2.handlers.error.forEach((fn) => fn(new Error('boom')));
 console.error = realError;
 check('连接出错显示「连接失败」', els['conn-text'].textContent, '连接失败');
 
+/* ============ M. 3D 视图接线（Step 6-3）============ */
+console.log('\n=== M. 3D 视图接线 ===');
+
+/* 这个桩是按调用顺序把所有状态和文字都记下来的。
+   这一段要盯的就一件事：**画面跟的是「当前选中的节点」，不是「最后一个发消息的节点」**。
+   三个宿舍的数据混在同一个通配符 topic 里进来，这一步最容易出的错就是
+   dorm-b 一来就把画面改成 dorm-b 的样子，而左上角还写着 dorm-a ——
+   屏幕上看着挺正常，只有盯着标签才发现对不上。 */
+const scene = sceneCalls[0];
+const lastStatus = () => scene.statuses[scene.statuses.length - 1];
+const lastLabel = () => scene.labels[scene.labels.length - 1];
+
+/* --- 接线本身 --- */
+
+check('★ dashboard.js 只有一条 import（下面摘 import 靠的是正则，多一条会被一起摘掉）',
+  importCount, 1);
+check('★ 那条 import 拿的是 ../3d/scene.js 里的 createDorm3D（不是 3d/index.html 里那份拷贝）',
+  SCENE_IMPORT.test(fs.readFileSync(DASH_SRC, 'utf8')), true);
+check('那个文件真的在（../ 是相对 dashboard.js 自己算的，不是相对页面）',
+  fs.existsSync(path.join(ROOT, '3d', 'scene.js')), true);
+
+const dashHtml = fs.readFileSync(path.join(ROOT, 'dashboard', 'index.html'), 'utf8');
+const modAt = dashHtml.indexOf('<script type="module"');
+const mapAt = dashHtml.indexOf('<script type="importmap">');
+
+check('★ dashboard.js 用 type="module" 载入（不然 import 直接是语法错）',
+  dashHtml.indexOf('<script type="module" src="dashboard.js">') >= 0, true);
+check('★ dashboard 也有一张 importmap（scene.js 里写的是裸名字 three，'
+  + 'importmap 是文档级的，缺了它就在 scene.js 里报「Failed to resolve」）',
+  mapAt >= 0, true);
+check('★ importmap 排在模块脚本之前（顺序反了浏览器不认）',
+  mapAt >= 0 && modAt > mapAt, true);
+check('★ type="module" 全页只有一处（只该有 dashboard.js 那一条）',
+  (dashHtml.match(/<script[^>]*type="module"/g) || []).length, 1);
+check('★ mqtt.js / Chart.js / rules.js 都还在模块脚本之前 —— 它们挂的是全局变量，'
+  + '必须在模块跑起来之前挂好',
+  ['lib/mqtt.min.js', 'chart.umd.min.js', '../shared/rules.js']
+    .every((f) => dashHtml.slice(0, modAt).includes(f)), true);
+check('容器 #scene3d 在页面上', dashHtml.indexOf('<div id="scene3d">') >= 0, true);
+
+/* --- 初始化 --- */
+
+check('页面起来时建了一个 3D 场景', sceneCalls.length, 1);
+check('★ 建的时候容器 id 和 index.html 里那个一致（对不上就挂到别的元素里去了）',
+  scene.hostId, 'scene3d');
+check('★ 打开页面时覆盖层写的是「还没有收到数据」，不假装有数据',
+  scene.labels[0].includes('还没有收到数据'), true);
+check('初始场景退回「正常」的外观（空白或半成品分不清是没数据还是坏了）',
+  scene.statuses[0], '正常');
+
+/* --- 只画当前选中的那个节点 --- */
+
+clearAll();
+check('★ 清空后 3D 立刻退回「还没有收到数据」', lastLabel().includes('还没有收到数据'), true);
+check('清空后场景退回「正常」', lastStatus(), '正常');
+
+/* C 段留下的当前节点是 dorm-b。这时喂一条 dorm-a 的：
+   数据要收下，画面一个字都不能动。 */
+const nStatus = scene.statuses.length;
+const nLabel = scene.labels.length;
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60));
+check('dorm-a 的数据收下了', nodes['dorm-a'].latest.status, '偏热');
+check('★ 不是当前节点的消息：3D 一次都没被调', scene.statuses.length, nStatus);
+check('★ 覆盖层也一个字没动（还写着 dorm-b）', scene.labels.length, nLabel);
+
+/* 切过去：不用等新数据，立刻画出它那条的样子 */
+selectNode('dorm-a');
+check('★ 切到已有数据的节点，立刻画出它的状态', lastStatus(), '偏热');
+check('★ 覆盖层写明是哪个宿舍的哪个状态',
+  lastLabel().includes('dorm-a') && lastLabel().includes('偏热'), true);
+check('覆盖层把读数也带上（标签上不必再回头找卡片）',
+  lastLabel().includes('31℃') && lastLabel().includes('60%'), true);
+
+/* 反方向再来一遍，确认不是「第一次刚好对了」 */
+const n2 = scene.statuses.length;
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80));
+check('★ 当前是 dorm-a，dorm-b 的消息同样不改画面',
+  scene.statuses.length, n2);
+selectNode('dorm-b');
+check('★ 切到 dorm-b，画的是它自己的偏湿', lastStatus(), '偏湿');
+
+const n3 = scene.statuses.length;
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 16, 60));
+check('★ 当前节点收到新消息，画面跟着变', lastStatus(), '偏冷');
+check('确实重画了（不是恰好在上一行就画好了）', scene.statuses.length > n3, true);
+
+/* --- status 复核的结果才交给 3D --- */
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, '正常'));   // 报文里故意写错
+check('报文里写「正常」，3D 上画的仍然是规则算出来的「偏热」', lastStatus(), '偏热');
+check('日志里警告了不一致', top().level, 'warn');
+
+/* --- 幂等：消息来了直接调，不用先判断变没变 --- */
+
+const n4 = scene.statuses.length;
+renderScene();
+renderScene();
+check('★ renderScene 是幂等的（重复调用画出同样的状态，不会翻转或累加）',
+  scene.statuses.slice(n4), ['偏热', '偏热']);
+
+/* --- 切到还没收到数据的节点 --- */
+
+clearAll();
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60));
+selectNode('dorm-c');
+check('★ 切到没收到数据的节点：退回「正常」的外观', lastStatus(), '正常');
+check('★ 覆盖层如实写「还没有收到数据」，不沿用上一个节点的偏冷',
+  lastLabel().includes('dorm-c') && lastLabel().includes('还没有收到数据'), true);
+
+selectNode('dorm-a');
+check('★ 切回有数据的节点，状态又回来了（不是只有第一次切才画）', lastStatus(), '偏冷');
+
+/* --- 脏数据不污染画面 --- */
+
+clearAll();
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60));
+const n5 = scene.statuses.length;
+console.error = () => {};
+handleMessage('dormmate/dorm-a/env', '这不是 JSON');
+handleMessage('dormmate/dorm-a/env', JSON.stringify({ nodeId: 'dorm-a', humidity: 60 }));
+handleMessage('dormmate/dorm-a/env', mk('dorm-z', 31, 60));
+console.error = realError;
+check('★ 三条脏数据一条都没改到画面', scene.statuses.length, n5);
+check('画面还是那条干净数据的「正常」', lastStatus(), '正常');
+
 /* ============ L. 没加载 mqtt.js（现场没网的情况）============ */
 console.log('\n=== L. 没加载 mqtt.js ===');
 const els2 = {};
@@ -396,21 +559,29 @@ const doc2 = {
 const ctx2 = {
   document: doc2,
   Chart: ChartStub,
+  /* 这里故意让 3D 建不起来（模拟这台设备没有 WebGL）：
+     和 mqtt 那条一起，凑成「两个依赖同时缺」的最坏情况 ——
+     页面照样得起来。initScene3D 的 try/catch 就是为这个写的。 */
+  createDorm3D: () => { throw new Error('这台设备没有可用的 WebGL'); },
   location: { hostname: 'localhost' },
   /* 故意不给 mqtt —— 模拟 vendor/mqtt.min.js 没下载到 */
   getComputedStyle: () => ({ getPropertyValue: () => '' }),
   window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
-  console, JSON, Math, Date, Number, Object, Array, String, Set, isNaN, parseInt,
+  /* 只把 error 静音：initScene3D 捕到异常后会 console.error 一行，
+     那是**预期行为**，不是测试失败。log 留着，方便排查。 */
+  console: { log: console.log, warn: console.warn, error: () => {} },
+  JSON, Math, Date, Number, Object, Array, String, Set, isNaN, parseInt,
 };
 ctx2.globalThis = ctx2;
 ctx2.window.document = doc2;
 
-let src2 = fs.readFileSync(path.join(ROOT, 'dashboard', 'dashboard.js'), 'utf8');
-src2 += ';globalThis.__simulate = simulate;\n';
+let src2 = fs.readFileSync(DASH_SRC, 'utf8');
+src2 = src2.replace(SCENE_IMPORT, '/* import 已摘除，理由同上 */\n');
+src2 += ';globalThis.__simulate = simulate;\nglobalThis.__renderScene = renderScene;\n';
 
 vm.createContext(ctx2);
 vm.runInContext(fs.readFileSync(path.join(ROOT, 'shared', 'rules.js'), 'utf8'), ctx2);
-vm.runInContext(src2, ctx2, { filename: path.join(ROOT, 'dashboard', 'dashboard.js') });
+vm.runInContext(src2, ctx2, { filename: DASH_SRC });
 
 check('没有 mqtt 也不抛异常，页面照常起来', typeof ctx2.judgeStatus, 'function');
 check('状态显示「未加载 mqtt.js」', els2['conn-text'].textContent, '未加载 mqtt.js');
@@ -421,6 +592,12 @@ ctx2.__simulate();
 check('没有 Broker 时「模拟三节点数据」照样能用', els2['cards'].innerHTML.includes('dorm-a'), true);
 check('三张卡都出来了', ['dorm-a', 'dorm-b', 'dorm-c'].every(
   (id) => els2['cards'].innerHTML.includes(id)), true);
+
+/* 3D 建不起来（没有 WebGL）时，dorm3d 是 null。renderScene 头一行就得跳过，
+   而不是去调 null.updateScene。 */
+ctx2.__renderScene();
+check('★ 没有 WebGL 时 renderScene 直接跳过，不抛异常', true, true);
+check('3D 建不起来不影响数据照常进（卡片还是三张）', els2['cards'].innerHTML.includes('dorm-c'), true);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);
