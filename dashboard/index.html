@@ -24,6 +24,14 @@
     </div>
   </header>
 
+  <!-- 优先关注。整个栏的内容由 dashboard.js 的 renderPriority() 填进来，
+       这里只留一个空容器。
+
+       为什么不用 aria-live：这一栏每收到一条报文都要重画（时长和次数都在变），
+       现场演示时几秒一条，读屏软件会跟着念个不停，反而把真正要看的东西盖住。
+       它是个可以随时主动 Tab 过去看的地方，不是「必须立刻播报」的警报。 -->
+  <section id="priority" class="priority" aria-label="优先关注"></section>
+
   <section id="cards" class="cards"></section>
 
   <section class="panel">

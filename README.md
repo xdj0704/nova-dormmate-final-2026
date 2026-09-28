@@ -59,7 +59,8 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── test_report.py       # 报告渲染的测试（30 条，需要 pandas）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
 │   ├── miniapp-rules.test.js # 小程序 rules.js ↔ shared/rules.js 交叉比对（48 条）
-│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图 / 3D 接线（162 条，假 DOM + 假 mqtt）
+│   ├── logic.test.js        # dashboard/logic.js 的纯函数：解析 / 时长 / 连续异常段 / 挑优先（79 条）
+│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图 / 3D 接线 / 优先关注栏（210 条，假 DOM + 假 mqtt）
 │   ├── scene3d.test.js      # 3d/scene.js 与 3d/index.html 的结构（198 条，假 three 模块 + 假 DOM）
 │   ├── scene3d-page.test.js # 3d/index.html 里那段模块脚本：MQTT 驱动 3D（65 条）
 │   └── script.test.js       # 前端回归测试（130 条，纯 Node 无依赖）
@@ -73,6 +74,7 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── index.html           # 建容器 + 一张 three 的 importmap（scene.js 里的裸名 three 靠它解析）
 │   ├── style.css
 │   ├── dashboard.js         # ES 模块：订阅 dormmate/+/env、校验报文、复核 status、卡片 + 趋势图 + 日志 + 3D 视图
+│   ├── logic.js             # 优先关注的算法：只放纯函数，不碰 DOM、不读当前时间（ES 模块，单独测）
 │   └── lib/
 │       ├── mqtt.min.js      # 本地引用：它挂了就一条数据都收不到，所以不走 CDN
 │       └── chart.umd.min.js # 备用：Chart.js 默认走 CDN，断网时改成引用这个
@@ -367,13 +369,14 @@ node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
 node tests/scene3d.test.js                        # ⑧ 3D 场景，198 条
 node tests/scene3d-page.test.js                   # ⑨ 3D 页面的 MQTT 接线，65 条
 node tests/miniapp-rules.test.js                  # ⑥ 两份规则实现交叉比对，48 条
-node tests/dashboard.test.js                      # ⑦ 多节点看板，162 条
+node tests/dashboard.test.js                      # ⑦ 多节点看板，210 条
+node tests/logic.test.js                          # ⑩ 优先关注的算法，79 条
 node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ```
 
 `unittest discover` 会把 `tests/` 下三个 `test_*.py` 一起收进来
 （22 + 134 + 30 = 186 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib。
-`node` 那六条不需要任何依赖，也不用起服务器。
+`node` 那七条不需要任何依赖，也不用起服务器。
 
 画图那几只测试在开头 `skipUnless(HAS_MPL)`：没装 matplotlib 时会**跳过**
 （输出里是 `s` 不是 `.`）而不是报一堆错 —— 读 CSV、统计、复核这几步没它也
@@ -387,9 +390,10 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
 | ⑤ 130 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错 |
 | ⑥ 48 条 | `miniapp/utils/rules.js` 与 `shared/rules.js` 的交叉比对：两份实现分别放进各自的 vm 跑，在 8211 组温湿度（温度 -20~60 步长 0.5 × 湿度 0~100 步长 2）上逐对比 `judgeStatus` 与 `getAdvice`，结果必须完全一致；另有一条守卫确认这个网格真的覆盖到了四种状态，否则「全都一样」可能只是压根没测到 |
-| ⑦ 162 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示；Step 6-3 的 3D 接线：**收到别的节点的消息时 3D 一次都不许被调**、切节点立刻改画、收到的 status 是复核之后才交给 3D 的、`renderScene` 的幂等与「3D 建不起来时直接跳过」 |
+| ⑦ 210 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示；Step 6-3 的 3D 接线：**收到别的节点的消息时 3D 一次都不许被调**、切节点立刻改画、收到的 status 是复核之后才交给 3D 的、`renderScene` 的幂等与「3D 建不起来时直接跳过」；Step 7-1 的「优先关注」栏：`abnormalStart` / `abnormalCount` 的维护（首条开段、起点不动、节点之间互不串、来正常数据两个字段一起清零、清零后再异常是新的一段、段里从偏热变偏湿仍是同一段、**报文谎称「正常」但规则算出偏热时段不被打断**）、`abnormalCount > 0` 与 `latest.status !== '正常'` 的等价不变量、页面刚加载时那栏就画好了且说的是「还没有收到数据」而不是「三个都正常」、点那栏走的**是注册在 `#priority` 上的真实委托回调**（`clickFocus()` 模拟的是事件，不是直接调 `selectNode`，所以选择器写错这里会红）且卡片 / 趋势图 / 3D 一起切过去并改口说「正在查看」、以及交给 MQTTX 的那三组数据在 `handleMessage` 上端到端跑一遍 |
 | ⑧ 198 条 | `3d/scene.js` 配假 `three` 模块 + 假 DOM 实跑（模块里的裸名字 `three` 是不认 importmap 的，测试把那一行 import 改写成指向本地假模块的绝对 file:// URL）：容器查找与报错、renderer 的像素比封顶与尺寸、宿舍每部分的几何 / 朝向 / 摞放关系（床垫正好压在床架上、3 片扇叶互成 120°、窗扇挂在铰链的一侧、支架不在会转的那个 Group 里）、两盏灯与阴影相机、相机参数与 `lookAt`、`updateScene` 四种状态各自改了什么以及切回来有没有残留、不认识的 status 退回「正常」并在控制台警告、`setFanOn` 的归一化与「关掉不归零」、`setLabel` 的覆盖层、动画循环随 dt 累加（**验证转动快慢与帧率无关**）、resize 自适应与 0×0 容器不产生 NaN、dispose 是否真的回收了几何体 / 材质 / 监听（**包括嵌在 Group 里的零件**）、index.html 的 importmap（合法 JSON、出现顺序比的是**标签**位置、版本号）与 4 个按钮的接线、覆盖层那两条关键 CSS、以及 `lib/` 里那份的大小与自包含性。22 个变异（含「灯不能和相机同侧」「改完阴影相机范围要重算投影矩阵」「假模块的 traverse 退回只走一层」）逐个塞回源码验证过，全部被抓住 |
 | ⑨ 65 条 | `3d/index.html` 里那段 `<script type="module">`：**从 HTML 里抠出来**，摘掉 import 换成打桩的 `createDorm3D`，配上假 `mqtt` 和假的按钮桩实跑。盯的就是 Step 6-3 那条规则 —— **画面跟的是「当前选中的宿舍」，不是「最后一个发消息的宿舍」**：给 dorm-b 发消息时 3D 一次都不许被调、切过去才画、而且画的是它最新那条；没收到数据的节点退回「正常」的外观并在覆盖层上如实说明；报文里写错的 `status` 一律以规则算出的为准；脏数据四条（非 JSON / 缺字段 / 类型不对 / 未知节点）一条都不许改到画面；`shared/rules.js` 必须是普通 script 且排在模块之前；6-2 留下的 4 个手动预览按钮仍然可用，且会被下一次真数据顶掉 |
+| ⑩ 79 条 | `dashboard/logic.js` 的纯函数逐个钉住：`parseTime` 只认 `YYYY-MM-DD HH:mm:ss`（`/`、`T`、少秒、不补零、前后空格、空串、`null`、数字、中文一律 `NaN`）且按 UTC 折算（同一串在不同时区差几小时这条就红了）、跨零点 / 跨月 / 闰日、`fmtDuration` 的向下取整（4 分 59 秒说「4 分钟」）与非正数兜底、`abnormalDuration` 在起点晚于终点时返回 0 而不是负数、`nextAbnormal` 不改传入的对象 / 认得不完整的 `prev`、以及 `pickPriority` 的整套判定：三组场景、**时长优先于条数（7 分钟的 1 次排在 1 分钟的 99 次前面）**、追平那句话只点**时长相同**的那个（跟所有人比是错的）、第 3 步是固定码元序而不是跟着区域设置走的 `localeCompare`。另有守门的静态检查：导出就这 5 个、没有 `export default`、源码里不许出现 `document` / `window` / `innerHTML` / 定时器 / `Date.now(` |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -1477,6 +1481,195 @@ if (record.nodeId === currentNodeId) renderScene();
 `data-node` / `data-status` —— HTML 里少写一个按钮，测试就会红。
 
 
+
+## Step 7-1：A1 优先关注
+
+三个宿舍同时在报，**先说哪个**？这一步在看板顶上加一条栏回答这件事：
+它从三个节点里挑出最该先看的那个，点一下整页（卡片、趋势图、3D）就切过去。
+
+### 挑人的规则
+
+只有异常节点参加比较，按固定的三步走，前面分出胜负就不再往下看：
+
+1. **连续异常时长**，长的优先；
+2. 时长一样，比**这一段里的消息条数**，多的优先；
+3. 还一样，按 `nodeId` 字典序 —— 这一步不是为了「更准」，是为了**确定**：
+   同一份数据永远得到同一个结果，不会因为对象键的遍历顺序变了就换了个人。
+
+```
+dorm-b 已连续偏热 7 分钟（2 次），持续时间最长
+```
+
+### 时长为什么必须从报文里的 `time` 算
+
+**不读浏览器当前时间**，两端都取 JSON 里的 `time`：`最新一条的 time − 这段第一条的 time`。
+
+现场演示时三台机器的钟不一定对得上；手动录进去的历史数据，`time` 也可能是编的。
+用「20:00 到 20:07」算出来永远是 7 分钟，跟什么时候跑的没关系 ——
+**测试也才写得成定值**，否则每跑一次结果都不一样，等于没测。
+
+`time` 的解析也是自己手写的（`parseTime`）。`new Date('2026-09-22 20:30:00')`
+这种写法**不是标准 ISO 8601**（标准的要 `T`），各家引擎给的结果不一致 ——
+Safari 历史上直接给 `Invalid Date`。所以用严格正则拆开，再用 `Date.UTC` 拼：
+这样同一串在任何时区都是同一个数，加上两端待遇相同，相减之后时区自动抵消。
+
+### 「这段异常」是怎么算的
+
+每个节点维护两个字段，收到消息就更新：
+
+| 字段 | 含义 |
+|---|---|
+| `abnormalStart` | **当前这段连续异常**第一条消息的 `time` |
+| `abnormalCount` | 这段里已经收到了几条 |
+
+收到正常数据时两个一起清零。规矩只有一条但有个坑：判「正不正常」用的是
+**复核之后**的状态，不是报文里那个字符串。报文写着 `"status": "正常"`、
+但温湿度按规则算出来是偏热时，**这一段不被打断** —— 不然发错一个字段
+就能把「已经连续偏热半小时」的记录抹掉。
+
+只有 `abnormalCount` 一个字段说了算「这段还在不在」。要是再拿
+`abnormalStart` 空不空当第二个判据，两个字段一旦对不上（比如 `time` 传了空串），
+起点会被后来每条消息顶掉，界面上的时长永远停在「不到 1 分钟」，而且**哪儿都不会报错**。
+
+### 那句话为什么不是一句写死的话
+
+尾巴如实说明**赢在哪一步**：赢在时长就写「持续时间最长」；是靠次数追平的写
+「持续时间和 X 一样长，异常次数最多」；三步全平了写「和 X 完全并列，
+按节点名顺序排在前面」；只有一个异常节点时写「是目前唯一的异常节点」。
+
+一律写「持续时间最长」是不行的 —— 靠次数赢的那次，那句话就是假话，
+而这一栏存在的意义正是让人相信这个排序。比次数时也只跟**时长相同**的那些比：
+一个只异常了一分钟却有 99 条消息的节点，次数比谁都多，但它根本没进到比次数这一步，
+说它「异常次数最多」同样是假话。
+
+### 两种「挑不出人」不是一回事
+
+`pickPriority` 在两种情况下都返回 `null`：**三个都正常**，和**一条数据都还没收到**。
+约定就是这样（「没有要优先处理的」），但**话不能一样**：
+
+```
+还没有收到任何节点的数据          ← 刚打开页面 / 刚点完清空
+三个节点都正常，没有需要优先处理的宿舍   ← 确实收到过数据，且都不异常
+```
+
+页面刚打开、还没连上 broker 的那几秒，那三个节点是**不知道**，不是正常。
+一开始两种都写「三个都正常」，是真机上看出来的：刷新页面，顶上立刻挂着一句
+「三个节点都正常」，而那时一条数据都还没进来。区分放在画的地方做，
+纯函数那边不用多一个返回值。
+
+### 算法单独放一个文件
+
+`dashboard/logic.js` 里只有纯函数（`parseTime` / `fmtDuration` / `abnormalDuration` /
+`nextAbnormal` / `pickPriority`），**不碰 DOM、不读全局变量、不调 `Date.now()`**，
+用 `export` 导出；`dashboard.js` 那边 `import { pickPriority, nextAbnormal }`。
+
+这么分就是为了能直接测：`tests/logic.test.js` 把它当普通文件加载进来逐个调，
+不用起 jsdom，也不用起浏览器。源码里「不许出现 `document` / `window` /
+`innerHTML` / 定时器 / `Date.now(`」这几条是**测试里的静态断言**盯着，
+改回 `Date.now()` 会当场红。
+
+点击是**事件委托**，挂在 `#priority` 容器上，走的是 `selectNode`
+—— 和点对应的那张卡片**完全同一条路**，所以卡片、趋势图、3D 一起切过去。
+全正常时那栏是个没有 `data-node` 的 `<p>`，这个判断顺手把它挡掉了。
+
+### 真机验过
+
+MQTTX 发场景一（下面那组 6 条），headless Edge 读回 DOM：
+
+```
+优先关注  dorm-b 已连续偏热 7 分钟（4 次），持续时间最长        正在查看
+<div class="scene-label">当前宿舍：dorm-b｜状态：偏热｜31℃ / 60%</div>
+```
+
+点那栏之前 `#detail-node` 还是 `dorm-a`，点完变成 `dorm-b`，
+卡片上的「查看中」和 3D 的覆盖层一起跟过去。
+
+#### ⚠ 拿 MQTTX 验这几组时，两个坑
+
+**一、先点「清空」，再发下一组。** 三组场景共用 20:00 这个起点，
+不清空的话上一组的段会接着往下算，时长和条数全不对。
+
+**二、broker 上有 retain 的旧数据时，时长会算成 0。**
+`simulator.py` 是带 retain 发的（README 上面那节写了），所以新订阅者一上来就会
+**立刻收到三条旧报文**。如果那三条的 `time` 比你要发的场景新（比如是今天刚发的、
+而场景用的是 2026-09-22），那么每个节点的这段异常就从今天那条开始 ——
+拿 9 月 22 日的时间去减，结果是**负数**，`abnormalDuration` 一律返回 0，
+栏上于是三个节点「完全并列」。
+
+验的时候我就是这么栽的：日志里数字都对，栏上却写「三个节点都正常」
+或者「三个并列」。清掉 retain 就正常了：
+
+```bash
+mosquitto_pub -h localhost -p 1883 -t 'dormmate/dorm-a/env' -r -n
+```
+
+（`-r -n` = 发一条空的 retain，等于把这条 retained 消息删掉。三个节点各来一次。）
+
+顺带一提，这也是「先点清空」有用的另一个原因：清空是页面自己的账，
+和 broker 上的 retain 无关，两边都干净了才对得上。
+
+### 三组测试数据（MQTTX 直接发）
+
+都发到 `dormmate/<nodeId>/env`，**`time` 是决定时长的唯一因素**（不是真实时间），
+`status` 必须和规则算出来的一致（不一致只会多一条警告，以规则为准）。
+
+**场景一 · 按时长决出优先**（6 条，预期 `dorm-b`，7 分钟最长）
+
+```json
+{"nodeId":"dorm-a","temperature":16,"humidity":60,"status":"偏冷","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-a","temperature":16,"humidity":60,"status":"偏冷","time":"2026-09-22 20:03:00"}
+{"nodeId":"dorm-b","temperature":31,"humidity":60,"status":"偏热","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-b","temperature":31,"humidity":60,"status":"偏热","time":"2026-09-22 20:07:00"}
+{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:05:00"}
+```
+
+→ `dorm-b 已连续偏热 7 分钟（2 次），持续时间最长`（三段：3 / 7 / 5 分钟）
+
+**场景二 · 时长相同，按次数决出**（7 条，预期 `dorm-b`，都是 6 分钟但 3 条）
+
+```json
+{"nodeId":"dorm-a","temperature":16,"humidity":60,"status":"偏冷","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-a","temperature":16,"humidity":60,"status":"偏冷","time":"2026-09-22 20:06:00"}
+{"nodeId":"dorm-b","temperature":31,"humidity":60,"status":"偏热","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-b","temperature":31,"humidity":60,"status":"偏热","time":"2026-09-22 20:03:00"}
+{"nodeId":"dorm-b","temperature":31,"humidity":60,"status":"偏热","time":"2026-09-22 20:06:00"}
+{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:06:00"}
+```
+
+→ `dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-a 一样长，异常次数最多`
+（注意尾巴没有写「持续时间最长」—— 它没有赢在时长那一步）
+
+**场景三 · 全部正常**（3 条，预期栏里说都正常）
+
+```json
+{"nodeId":"dorm-a","temperature":25,"humidity":60,"status":"正常","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-b","temperature":25,"humidity":60,"status":"正常","time":"2026-09-22 20:00:00"}
+{"nodeId":"dorm-c","temperature":25,"humidity":60,"status":"正常","time":"2026-09-22 20:00:00"}
+```
+
+→ `pickPriority` 返回 `null`，栏里写「三个节点都正常，没有需要优先处理的宿舍」
+
+这三组不只是文档：`tests/dashboard.test.js` 的 N 段把同一份数据
+在 `handleMessage` 上**端到端跑一遍**，逐条比对上面前三句原话。
+现场照着发会出现什么，测试里已经先验过了。
+
+### 变异测试
+
+14 个变异逐个塞回源码，确认测试变红，再还原（还原后全套必须仍然是绿的）。
+包括：正常数据不清零、每条异常都开新段、先比次数再比时长、第 3 步改用
+`localeCompare`、去掉「只挑异常节点」的过滤、次数跟所有人比、时长改用 `Date.now()`、
+「算不算异常」从 `latest` 上读、`selectNode` / `clearAll` / 启动时忘了重画那栏、
+委托的选择器写错、漏掉 `logic.js` 的 import、漏掉 `nextAbnormal` 的赋值。
+**14 个全部被抓住。**
+
+其中两个第一次跑时逃掉了，都补了测试：
+`localeCompare` 那条在 `dorm-a/b/c` 上给出的顺序和码元序**碰巧一样**，
+所以得挑一对能把两种排法分开的名字（`dorm-B` vs `dorm-a`：码元序 `'B' < 'a'`，
+本地化排序反过来）才测得出来；启动时那栏画没画，则是补了一条**页面刚加载那一刻的
+快照**——后面各段都会往里灌数据，不先存下来就再也看不到那个状态了。
+（另有一个逃掉的是我自己变异写错了，那条赋值是个空操作，不是测试的漏洞。）
 
 ## 已知限制
 

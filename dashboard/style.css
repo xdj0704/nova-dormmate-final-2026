@@ -180,6 +180,80 @@ button:focus-visible {
   color: var(--text-secondary);
 }
 
+/* ---------- 优先关注 ---------- */
+
+/* 只在面板最上面留一行；下面卡片区自己带 margin-bottom，这里补上距离 */
+.priority { margin-bottom: 18px; }
+
+/* 全正常时是个 <p>，有优先节点时是个 <button>。
+   两者共用这套外观 —— 换的只是能不能点，不是整块版面的样子；
+   版面一跳，看的人会以为出了什么事。 */
+.focus {
+  --c: var(--text-muted);   /* 全正常（以及未识别状态）时的兜底 */
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  width: 100%;
+  margin: 0;
+  padding: 14px 18px;
+  text-align: left;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-left: 4px solid var(--c);
+  border-radius: 12px;
+}
+
+/* 只给按钮加悬停，别让那个 <p> 也像能点 */
+button.focus:hover { border-color: var(--text-muted); }
+
+/* 已经在看这个节点了。用的是和卡片选中**一模一样**的中性描边 ——
+   「选中」和「这个宿舍在报警」是两件事，描边要是跟着 --c 走，
+   这两件事就变成同一个视觉信号了。 */
+.focus.is-active {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--text-primary) inset;
+}
+
+/* 「优先关注」这个标签。和卡片上那个「查看中」同一套做法：
+   黑底白字的小胶囊，不靠颜色单独表意。 */
+.focus-tag {
+  flex: 0 0 auto;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--text-primary);
+  color: var(--page);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 全正常时标签退成灰的：这条不是警报，别抢注意力 */
+.focus--calm .focus-tag {
+  background: var(--page);
+  color: var(--text-muted);
+  border: 1px solid var(--hairline);
+}
+
+/* flex: 1 让右边那个「查看详情」一直贴到最右边，不管这句原因有多长 */
+.focus-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.focus--calm .focus-text { color: var(--text-secondary); }
+
+.focus-state {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.focus.is-active .focus-state { color: var(--text-primary); }
+
 /* ---------- 节点卡片 ---------- */
 
 .cards {

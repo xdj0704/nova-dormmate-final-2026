@@ -30,13 +30,17 @@ function makeEl(id) {
       contains: (c) => classes.has(c),
     },
     _classes: classes,
-    addEventListener() {},
+    /* 把注册的回调留下来。「优先关注」那条栏的点击是事件委托（内容整块重画，
+       不给每次新生成的按钮单独绑），不记下来就没法触发它 —— 而
+       「点一下要切到那个节点」正是这一步的验收点之一。 */
+    _handlers: {},
+    addEventListener(ev, fn) { (this._handlers[ev] = this._handlers[ev] || []).push(fn); },
   };
 }
 
 const els = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'simulate', 'clear', 'chart-temp', 'chart-humidity',
+  'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle'].forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
@@ -125,26 +129,45 @@ context.window.document = documentStub;
 /* ---------- 加载 shared/rules.js，再加载 dashboard.js ---------- */
 
 /* Step 6-3 起 dashboard.js 是 ES 模块（它 import 了 ../3d/scene.js），
-   而 vm.runInContext 只能跑普通脚本 —— 原样喂进去会抛
-   「Cannot use import statement outside a module」。
+   Step 7-1 又多了一条（./logic.js）。而 vm.runInContext 只能跑普通脚本 ——
+   原样喂进去会抛「Cannot use import statement outside a module」。
 
    处理方式和 tests/scene3d.test.js 里改写 'three' 那个标识符是一个思路：
-   把 import 那一行摘掉，改用上下文里同名的打桩函数顶上。
-   摘之前先数一遍，必须正好一条；将来谁再加一条 import，这里立刻炸出来，
-   而不是把那条也悄悄摘了、测了个假的。
+   把 import 那两行摘掉。摘之前先数一遍，必须正好两条；
+   将来谁再加一条 import，这里立刻炸出来，而不是把那条也悄悄摘了、测了个假的。
 
-   注意这只是**跑起来**的方式。原文件里到底怎么写的那一行，
-   由下面 J 段的两条静态断言盯着（正则 + 文件真的在）。 */
+   两条摘掉之后顶上放的东西不一样：
+     ../3d/scene.js —— 换成打桩的 createDorm3D（3D 不是这一步要测的）
+     ./logic.js     —— 换成**真文件**（见下面 runInContext 那段）
+   这么分是因为「优先关注」的比较规则正是 Step 7-1 的全部内容，
+   打个桩等于把要测的东西测没了。
+
+   注意这只是**跑起来**的方式。原文件里到底怎么写的那两行，
+   由下面 M 段的两条静态断言盯着（正则 + 文件真的在）。 */
 const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
-const importCount = (fs.readFileSync(DASH_SRC, 'utf8').match(/^import\s/gm) || []).length;
+const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
+const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
+const dashText = fs.readFileSync(DASH_SRC, 'utf8');
+const importCount = (dashText.match(/^import\s/gm) || []).length;
 
 vm.createContext(context);
-vm.runInContext(fs.readFileSync(path.join(ROOT, 'shared', 'rules.js'), 'utf8'), context,
-  { filename: path.join(ROOT, 'shared', 'rules.js') });
+vm.runInContext(fs.readFileSync(RULES_SRC, 'utf8'), context, { filename: RULES_SRC });
 
-let src = fs.readFileSync(DASH_SRC, 'utf8');
+/* logic.js 跑真的那份。它同样是 ES 模块，把 `export ` 前缀摘掉就行 ——
+   函数名照旧留在作用域里，顶层 function 声明在 vm 里就是上下文的全局属性。
+   两个脚本共用一个上下文，所以后面 dashboard.js 里那句 pickPriority 调到的
+   就是这里定义的那一个。
+
+   顺带一个副作用是好事：logic.js 和 dashboard.js 的顶层名字撞了的话，
+   这里会当场抛「Identifier 'x' has already been declared」，不会悄悄跑过去。 */
+vm.runInContext(fs.readFileSync(LOGIC_SRC, 'utf8').replace(/^export\s+/gm, ''),
+  context, { filename: LOGIC_SRC });
+
+let src = dashText;
 src = src.replace(SCENE_IMPORT, '/* import 已摘除：顶上用的是上下文里的 createDorm3D 打桩 */\n');
+src = src.replace(LOGIC_IMPORT, '/* import 已摘除：上面跑的是真的 logic.js */\n');
 /* 只加测试钩子，不改原文件 */
 src += `
 ;globalThis.__nodes = nodes;
@@ -157,13 +180,20 @@ globalThis.__topicNode = topicNode;
 globalThis.__connect = connect;
 globalThis.__disconnect = disconnect;
 globalThis.__renderScene = renderScene;
+globalThis.__renderPriority = renderPriority;
 `;
 vm.runInContext(src, context, { filename: DASH_SRC });
+
+/* 页面刚加载完、一条数据都还没收到的那一刻，顶上那条栏画了什么。
+   先存下来 —— 后面各段都会往里灌数据，之后就再也看不到这个状态了。
+   N 段拿它验「启动时就画好了」和「没数据时不谎称都正常」。 */
+const BAR_AT_LOAD = els.priority.innerHTML;
 
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
   __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
-  __renderScene: renderScene } = context;
+  __renderScene: renderScene, __renderPriority: renderPriority,
+  pickPriority } = context;
 
 /* ---------- 断言 ---------- */
 let pass = 0, fail = 0;
@@ -173,11 +203,15 @@ function check(label, actual, expected) {
   ok ? pass++ : fail++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}` + (ok ? `  =>  ${a}` : `\n        实际: ${a}\n        期望: ${e}`));
 }
-function mk(nodeId, t, h, status) {
+/* time 可以指定。不指定时用这个固定的默认值。
+   「优先关注」的时长完全由 time 决定（故意不读浏览器当前时间），
+   所以 N 段必须能逐条控制它，否则时长那几条没法写出定值。 */
+const DEFAULT_TIME = '2026-09-22 20:30:00';
+function mk(nodeId, t, h, status, time) {
   return JSON.stringify({
     nodeId, temperature: t, humidity: h,
     status: status === undefined ? context.judgeStatus(t, h) : status,
-    time: '2026-09-22 20:30:00',
+    time: time === undefined ? DEFAULT_TIME : time,
   });
 }
 const top = () => messages[0];
@@ -430,10 +464,10 @@ const lastLabel = () => scene.labels[scene.labels.length - 1];
 
 /* --- 接线本身 --- */
 
-check('★ dashboard.js 只有一条 import（下面摘 import 靠的是正则，多一条会被一起摘掉）',
-  importCount, 1);
-check('★ 那条 import 拿的是 ../3d/scene.js 里的 createDorm3D（不是 3d/index.html 里那份拷贝）',
-  SCENE_IMPORT.test(fs.readFileSync(DASH_SRC, 'utf8')), true);
+check('★ dashboard.js 只有两条 import（上面摘 import 靠的是两条正则，多一条会被漏掉）',
+  importCount, 2);
+check('★ 其中一条拿的是 ../3d/scene.js 里的 createDorm3D（不是 3d/index.html 里那份拷贝）',
+  SCENE_IMPORT.test(dashText), true);
 check('那个文件真的在（../ 是相对 dashboard.js 自己算的，不是相对页面）',
   fs.existsSync(path.join(ROOT, '3d', 'scene.js')), true);
 
@@ -541,11 +575,196 @@ console.error = realError;
 check('★ 三条脏数据一条都没改到画面', scene.statuses.length, n5);
 check('画面还是那条干净数据的「正常」', lastStatus(), '正常');
 
+/* ============ N. 优先关注（Step 7-1）============ */
+console.log('\n=== N. 优先关注 ===');
+
+const ids = ['dorm-a', 'dorm-b', 'dorm-c'];
+const T = (hm) => '2026-09-22 ' + hm;   // 三组场景的时间都在这天
+const focusHTML = () => els.priority.innerHTML;
+/* 点一下那条栏。走的是页面真正注册在 #priority 上的那个委托回调，
+   不是直接调 selectNode —— 委托的 selector 写错了这里就该红。 */
+function clickFocus(nodeId) {
+  els.priority._handlers.click.forEach((fn) => fn({
+    target: { closest: (sel) => (sel === '.focus' ? { dataset: { node: nodeId } } : null) },
+  }));
+}
+
+/* --- 接线本身 --- */
+
+check('★ dashboard.js 有两条 import（scene.js 的 3D 工厂 + logic.js 的算法）',
+  importCount, 2);
+check('★ logic.js 那条拿的是 pickPriority / nextAbnormal',
+  LOGIC_IMPORT.test(dashText), true);
+check('★ logic.js 那个文件真的在（./ 是相对 dashboard.js 自己算的，不是相对页面）',
+  fs.existsSync(LOGIC_SRC), true);
+check('index.html 里有 #priority 容器', dashHtml.includes('id="priority"'), true);
+
+/* --- 启动那一刻（一条数据都没有）--- */
+
+check('★ 启动时就画好了那条栏（不是等第一条消息才出现）',
+  BAR_AT_LOAD.includes('class="focus'), true);
+/* 「三个都正常」在一条数据都没收到时是假话：那三个节点是**不知道**，不是正常。
+   这两种情况都由 pickPriority 返回 null，区分在画的地方做。 */
+check('★ 启动时说的是「还没有收到数据」，不是「三个都正常」',
+  [BAR_AT_LOAD.includes('还没有收到任何节点的数据'),
+    BAR_AT_LOAD.includes('三个节点都正常')], [true, false]);
+check('启动时它不是按钮（没东西可点）', BAR_AT_LOAD.includes('<button'), false);
+/* 页面里跑的就是真的那份 logic.js（上面 runInContext 喂进去的），
+   不是另写一个桩 —— 所以下面每一条都在验同一个函数 */
+check('拿到的 pickPriority 就是 logic.js 里那个', typeof pickPriority, 'function');
+
+/* --- 维护 abnormalStart / abnormalCount --- */
+
+clearAll();
+check('清空后三个节点的连续异常段都是空的',
+  ids.map((id) => nodes[id].abnormalStart + ' / ' + nodes[id].abnormalCount),
+  ['null / 0', 'null / 0', 'null / 0']);
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
+check('★ 第一条异常：起点是它自己，记 1 次',
+  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount],
+  [T('20:00:00'), 1]);
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60, undefined, T('20:03:00')));
+check('★ 段接着走：起点不动，次数加一',
+  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [T('20:00:00'), 2]);
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:04:00')));
+check('别的节点各算各的段，互不影响',
+  ids.map((id) => nodes[id].abnormalCount), [2, 1, 0]);
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:05:00')));
+check('★ 来一条正常数据：起点和次数一起清零',
+  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [null, 0]);
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:09:00')));
+check('★ 清零之后再异常：新的一段从这条开始（不沿用 20:00:00）',
+  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [T('20:09:00'), 1]);
+
+/* 段里状态从偏热变成偏湿：算同一段。这里统计的是「连续异常了多久」，
+   不是「连续偏热了多久」—— 所以起点不动、次数继续加。 */
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:06:00')));
+check('★ 段里从偏热变偏湿，仍是同一段：起点不动、次数继续加',
+  [nodes['dorm-b'].abnormalStart, nodes['dorm-b'].abnormalCount], [T('20:04:00'), 2]);
+
+/* 报文谎称「正常」、规则算出「偏热」时，段不能被打断 ——
+   用的是复核之后的状态，不是报文里那个字符串。 */
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, '正常', T('20:07:00')));
+check('★ 报文谎称「正常」但规则算出偏热：段没被打断（用的是复核后的状态）',
+  [nodes['dorm-b'].abnormalStart, nodes['dorm-b'].abnormalCount], [T('20:04:00'), 3]);
+
+/* 两个字段必须始终一致：有异常计数 <=> 最新状态不是正常。
+   它们由同一个函数一起写，这里把这条不变量钉住 ——
+   一旦哪天有人只改了其中一个，这里立刻红。
+   （还没收到数据的节点两边都是「没有」，也算一致。） */
+check('★ 不变量：abnormalCount > 0 恰好等价于 latest 不是「正常」',
+  ids.map((id) => (nodes[id].abnormalCount > 0) === (nodes[id].latest
+    ? nodes[id].latest.status !== '正常' : false)),
+  [true, true, true]);
+
+/* --- 页面顶上那条栏 --- */
+
+/* 此刻：dorm-a 偏热 20:09 起 1 次（时长 0），dorm-b 偏热 20:04 起 3 次（3 分钟），
+   dorm-c 还没收到过。当前看的是 dorm-a（M 段留下的）。 */
+check('★ 顶部那栏挑出了 dorm-b', focusHTML().includes('dorm-b'), true);
+check('★ 那句原因原样摆在栏里',
+  focusHTML().includes('dorm-b 已连续偏热 3 分钟（3 次），持续时间最长'), true);
+check('那条栏是个 button，带着 nodeId（点击委托靠它认人）',
+  /<button[^>]*data-node="dorm-b"/.test(focusHTML()), true);
+check('颜色跟着状态走（偏热 -> is-critical，和卡片同一套 class）',
+  focusHTML().includes('focus is-critical'), true);
+check('当前看的不是它 -> 右边写「查看详情」', focusHTML().includes('查看详情'), true);
+check('当前看的不是它 -> 不带选中描边', /\bis-active\b/.test(focusHTML()), false);
+
+/* --- 点它 = 点对应那张卡片 --- */
+
+clickFocus('dorm-b');
+check('★ 点「优先关注」切到了 dorm-b', current(), 'dorm-b');
+check('★ 卡片跟着切（dorm-b 那张变成「查看中」）',
+  /data-node="dorm-b"[^>]*aria-pressed="true"/.test(els.cards.innerHTML), true);
+check('★ 趋势图跟着切（画的是 dorm-b 自己的历史）',
+  tempChart.data.datasets[0].data, nodes['dorm-b'].history.map((r) => r.temperature));
+check('★ 3D 跟着切（画的是 dorm-b 的状态）', lastStatus(), '偏热');
+check('★ 切过去之后栏里改口说「正在查看」', focusHTML().includes('正在查看'), true);
+check('★ 而且栏本身带上了选中描边',
+  /class="focus is-critical is-active"/.test(focusHTML()), true);
+check('标记变了，挑中的节点没变（只是「正在看」这件事变了）',
+  pickPriority(nodes).nodeId, 'dorm-b');
+
+/* --- 清空之后：又回到「一条数据都没有」 --- */
+
+clearAll();
+/* 清空不是「三个都正常」，是「什么都不知道了」—— 和刚打开页面是同一种状态，
+   所以话也该是同一句。这条同时钉住了 clearAll 必须重画那条栏。 */
+check('★ 清空后说的是「还没有收到数据」，不是「三个都正常」',
+  [focusHTML().includes('还没有收到任何节点的数据'),
+    focusHTML().includes('三个节点都正常')], [true, false]);
+check('★ 没数据时不是按钮（点不动，也不该看着像能点）',
+  focusHTML().includes('<button'), false);
+check('没数据时没有 data-node，点上去什么也不会发生',
+  focusHTML().includes('data-node'), false);
+check('pickPriority 在一条数据都没有时返回 null', pickPriority(nodes), null);
+/* 点一个没有 data-node 的东西不能把 currentNodeId 弄坏 */
+check('当前还看在 dorm-b 上（切节点只由真实的点击改）', current(), 'dorm-b');
+
+/* --- 三组场景：和交给 MQTTX 的那三组是同一份数据 --- */
+
+/* 下面这三组就是回给用户的 MQTTX 测试数据。先在这里跑一遍 ——
+   现场照着发的时候页面上会出现什么，这里已经验过了。 */
+console.log('  -- 场景一：按时长决出优先 --');
+clearAll();
+[['dorm-a', 16, 60, '20:00:00'], ['dorm-a', 16, 60, '20:03:00'],
+  ['dorm-b', 31, 60, '20:00:00'], ['dorm-b', 31, 60, '20:07:00'],
+  ['dorm-c', 25, 80, '20:00:00'], ['dorm-c', 25, 80, '20:05:00'],
+].forEach(([id, t, h, hm]) => {
+  handleMessage('dormmate/' + id + '/env', mk(id, t, h, undefined, T(hm)));
+});
+check('★ 场景一：三段各 2 条，时长 3 / 7 / 5 分钟',
+  ids.map((id) => nodes[id].abnormalCount + ' 条'), ['2 条', '2 条', '2 条']);
+check('★ 场景一：时长最长的 dorm-b 胜出', pickPriority(nodes).nodeId, 'dorm-b');
+check('★ 场景一：原因',
+  pickPriority(nodes).reason, 'dorm-b 已连续偏热 7 分钟（2 次），持续时间最长');
+check('场景一：栏里也这么说', focusHTML().includes('持续时间最长'), true);
+
+console.log('  -- 场景二：时长相同，按次数决出 --');
+clearAll();
+[['dorm-a', 16, 60, '20:00:00'], ['dorm-a', 16, 60, '20:06:00'],
+  ['dorm-b', 31, 60, '20:00:00'], ['dorm-b', 31, 60, '20:03:00'], ['dorm-b', 31, 60, '20:06:00'],
+  ['dorm-c', 25, 80, '20:00:00'], ['dorm-c', 25, 80, '20:06:00'],
+].forEach(([id, t, h, hm]) => {
+  handleMessage('dormmate/' + id + '/env', mk(id, t, h, undefined, T(hm)));
+});
+check('★ 场景二：三段的条数分别是 2 / 3 / 2',
+  ids.map((id) => nodes[id].abnormalCount), [2, 3, 2]);
+check('★ 场景二：三段时长都是 6 分钟（起点 20:00、最新 20:06）',
+  ids.map((id) => nodes[id].abnormalStart), [T('20:00:00'), T('20:00:00'), T('20:00:00')]);
+check('★ 场景二：条数最多的 dorm-b 胜出', pickPriority(nodes).nodeId, 'dorm-b');
+check('★ 场景二：原因如实说赢在次数，不写「持续时间最长」',
+  pickPriority(nodes).reason,
+  'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-a 一样长，异常次数最多');
+
+console.log('  -- 场景三：全部正常 --');
+clearAll();
+[['dorm-a', 25, 60, '20:00:00'], ['dorm-b', 25, 60, '20:00:00'], ['dorm-c', 25, 60, '20:00:00']]
+  .forEach(([id, t, h, hm]) => {
+    handleMessage('dormmate/' + id + '/env', mk(id, t, h, undefined, T(hm)));
+  });
+check('★ 场景三：数据都收下了（不是被拦掉才显得「全正常」）',
+  ids.map((id) => nodes[id].history.length + ' / ' + nodes[id].latest.status),
+  ['1 / 正常', '1 / 正常', '1 / 正常']);
+check('★ 场景三：三个节点的异常计数都是 0', ids.map((id) => nodes[id].abnormalCount), [0, 0, 0]);
+check('★ 场景三：pickPriority 返回 null', pickPriority(nodes), null);
+check('★ 场景三：栏里说三个都正常', focusHTML().includes('三个节点都正常'), true);
+
+/* 三组跑完，让后面的 L 段从一个干净的、当前节点确定的状态开始 */
+clearAll();
+selectNode('dorm-a');
+
 /* ============ L. 没加载 mqtt.js（现场没网的情况）============ */
 console.log('\n=== L. 没加载 mqtt.js ===');
 const els2 = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'simulate', 'clear', 'chart-temp', 'chart-humidity',
+  'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle'].forEach((id) => { els2[id] = makeEl(id); });
 
 const doc2 = {
@@ -575,12 +794,19 @@ const ctx2 = {
 ctx2.globalThis = ctx2;
 ctx2.window.document = doc2;
 
-let src2 = fs.readFileSync(DASH_SRC, 'utf8');
+let src2 = dashText;
 src2 = src2.replace(SCENE_IMPORT, '/* import 已摘除，理由同上 */\n');
-src2 += ';globalThis.__simulate = simulate;\nglobalThis.__renderScene = renderScene;\n';
+src2 = src2.replace(LOGIC_IMPORT, '/* import 已摘除：下面跑的是真的 logic.js */\n');
+src2 += ';globalThis.__simulate = simulate;\nglobalThis.__renderScene = renderScene;\n'
+  + 'globalThis.__renderPriority = renderPriority;\n';
 
 vm.createContext(ctx2);
-vm.runInContext(fs.readFileSync(path.join(ROOT, 'shared', 'rules.js'), 'utf8'), ctx2);
+vm.runInContext(fs.readFileSync(RULES_SRC, 'utf8'), ctx2);
+/* 这里也得喂真的 logic.js：simulate() 会走到 renderPriority，
+   没有它的话这一段测的就不是「没网时页面能不能起来」，
+   而是「pickPriority is not defined」—— 一个跟本节无关的错。 */
+vm.runInContext(fs.readFileSync(LOGIC_SRC, 'utf8').replace(/^export\s+/gm, ''),
+  ctx2, { filename: LOGIC_SRC });
 vm.runInContext(src2, ctx2, { filename: DASH_SRC });
 
 check('没有 mqtt 也不抛异常，页面照常起来', typeof ctx2.judgeStatus, 'function');
@@ -598,6 +824,11 @@ check('三张卡都出来了', ['dorm-a', 'dorm-b', 'dorm-c'].every(
 ctx2.__renderScene();
 check('★ 没有 WebGL 时 renderScene 直接跳过，不抛异常', true, true);
 check('3D 建不起来不影响数据照常进（卡片还是三张）', els2['cards'].innerHTML.includes('dorm-c'), true);
+
+/* 「优先关注」不依赖任何外部东西（3D 和 mqtt 都缺着，它照样得算出来）——
+   它是三个模块里唯一一个纯计算，没网没显卡的时候正好靠它撑住现场演示。 */
+check('★ 没网没显卡时「优先关注」照样算得出来（挑出异常的那个节点）',
+  els2.priority.innerHTML.includes('优先关注') && els2.priority.innerHTML.includes('dorm-b'), true);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

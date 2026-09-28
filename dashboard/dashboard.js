@@ -2,6 +2,7 @@
 // Step 5-3 / 5-4：三节点 Dashboard。订阅 MQTT 显示真实数据，
 // 「模拟三节点数据」按钮则在没接 Broker 时也能把界面跑起来。
 // Step 6-3：详情区嵌一个 3D 视图，跟着当前选中的节点走。
+// Step 7-1：顶部一条「优先关注」，自动挑出最该先看的那个节点。
 //
 // handleMessage(topic, payloadText) 是唯一的消息入口，两个来源都走它：
 //   client.on('message')  -> 真实 MQTT
@@ -10,16 +11,24 @@
 // 和真实数据完全一致 —— 反过来说，改 handleMessage 就等于同时改了两边。
 //
 // 这个文件是 **ES 模块**（index.html 里写的是 type="module"），因为它 import 了
-// ../3d/scene.js。三件事跟着变了，改的时候别漏：
+// ../3d/scene.js 和 ./logic.js。三件事跟着变了，改的时候别漏：
 //   1) 页面必须走 http 服务器打开，file:// 下模块会被 CORS 拒掉
 //   2) index.html 里要有 importmap，且排在模块脚本之前（scene.js 用的是裸名字 'three'）
 //   3) mqtt / Chart / judgeStatus 仍然走全局变量，它们不是 import 进来的
+//
+// 这个文件负责「维护状态 + 摆到页面上」，不负责「怎么比」：
+// 比大小、算时长、拼那句原因都在 ./logic.js 里，那边是纯函数，单独测。
 
 /* 3D 场景。拿的是 createDorm3D 这个工厂，不是场景本身 ——
    这个页面只建一个，但工厂的返回值里带着 updateScene / setLabel / dispose，
    后续要加第二个视角（比如三节点并排）时不用改这里。
    路径相对**本文件**算：本文件在 dashboard/ 下，所以是 ../3d/scene.js。 */
 import { createDorm3D } from '../3d/scene.js';
+
+/* 优先关注的算法。只有两个函数被这里用到，其余（parseTime / fmtDuration /
+   abnormalDuration）是给测试单独钉的，页面不直接调。
+   nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个。 */
+import { pickPriority, nextAbnormal } from './logic.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -29,9 +38,13 @@ import { createDorm3D } from '../3d/scene.js';
    只由报文里的 nodeId 决定，见 handleMessage 第 4 步。 */
 const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
 
+/* abnormalStart / abnormalCount 是 Step 7-1 加的：当前这段**连续异常**
+   从哪条消息开始、已经有几条。怎么变由 logic.js 的 nextAbnormal 决定，
+   这里只负责存。0 / null = 不在异常中。
+   「优先关注」比的就是这两个字段 —— 见 renderPriority。 */
 const nodes = {};
 NODE_IDS.forEach(function (id) {
-  nodes[id] = { latest: null, history: [] };
+  nodes[id] = { latest: null, history: [], abnormalStart: null, abnormalCount: 0 };
 });
 
 /* 每个节点最多留多少条历史。不设上限的话挂机久了数组会一直涨，图上也会挤成
@@ -128,6 +141,7 @@ const el = {
   detailMeta: document.getElementById('detail-meta'),
   chartNote: document.getElementById('chart-note'),
   scene3d: document.getElementById('scene3d'),
+  priority: document.getElementById('priority'),
   simulate: document.getElementById('simulate'),
   clear: document.getElementById('clear'),
   conn: document.getElementById('conn'),
@@ -217,6 +231,54 @@ function renderDetailHead() {
   el.detailMeta.textContent = node.latest
     ? '最新一条 ' + node.latest.time + ' · 这个节点已收到 ' + node.history.length + ' 条'
     : '还没有收到这个节点的数据';
+}
+
+/* ---------- 优先关注 ---------- */
+
+/**
+ * 重画顶部那条「优先关注」。
+ *
+ * 挑哪个节点全交给 logic.js 的 pickPriority，这个函数只负责把结果摆到页面上，
+ * 一个比较都不做 —— 比较的规矩只有一份，写在 logic.js 里，那边有单独的测试。
+ *
+ * 整块用 innerHTML 重画，和卡片一样。所以点击也是事件委托，
+ * 挂在容器上，不给每次重画出来的那个按钮单独绑。
+ *
+ * 它跟着 currentNodeId 变（要标出「正在查看」），所以切节点时也得重画 ——
+ * 这也是它不能只跟 handleMessage 走的原因。
+ */
+function renderPriority() {
+  const pick = pickPriority(nodes);
+
+  /* 没挑出人来有两种情况，说的话不能一样 ——
+     「三个都正常」在一条数据都没收到时是句假话：页面刚打开、还没连上
+     broker 的那几秒，那三个节点是**不知道**，不是正常。
+     pickPriority 两种情况都返回 null（约定就是「没有要优先的」），
+     所以这层区分放在画的地方做，纯函数那边不用多一个返回值。 */
+  if (!pick) {
+    const hasData = NODE_IDS.some(function (id) { return nodes[id].latest !== null; });
+    el.priority.innerHTML = '<p class="focus focus--calm">'
+      + '<span class="focus-tag">优先关注</span>'
+      + '<span class="focus-text">' + (hasData
+        ? '三个节点都正常，没有需要优先处理的宿舍'
+        : '还没有收到任何节点的数据') + '</span>'
+      + '</p>';
+    return;
+  }
+
+  /* 颜色跟着这个节点的状态走，和卡片用同一套 class、同一套状态色。
+     状态色是保留色，所以这里必须配着文字用 —— 那句 reason 里本来就写着
+     「偏热」两个字，颜色只是让它在三步之外也能被看见。 */
+  const view = viewFor(nodes[pick.nodeId].latest.status);
+  const current = pick.nodeId === currentNodeId;
+
+  el.priority.innerHTML = '<button class="focus ' + view.cls
+    + (current ? ' is-active' : '') + '"'
+    + ' type="button" data-node="' + esc(pick.nodeId) + '" aria-pressed="' + current + '">'
+    + '<span class="focus-tag">优先关注</span>'
+    + '<span class="focus-text">' + esc(pick.reason) + '</span>'
+    + '<span class="focus-state">' + (current ? '正在查看' : '查看详情') + '</span>'
+    + '</button>';
 }
 
 /* ---------- 3D 视图 ---------- */
@@ -430,6 +492,9 @@ function selectNode(nodeId) {
   renderDetailHead();
   renderScene();
   renderCharts();
+  /* 「优先关注」栏本身不重算（异常状态一点没变），但要重画 ——
+     它上面标着「正在查看 / 查看详情」，那两个字跟着 currentNodeId 走。 */
+  renderPriority();
 }
 
 /* ---------- 唯一的消息入口 ---------- */
@@ -542,13 +607,20 @@ function handleMessage(topic, payloadText) {
   };
 
   /* 4) 只动这个节点自己的那份数据。写错了地方就是「串线」，
-      所以下面这两行只认 record.nodeId，不看别的。 */
+      所以下面这几行只认 record.nodeId，不看别的。 */
   const node = nodes[record.nodeId];
   node.latest = record;
   node.history.push(record);
   if (node.history.length > HISTORY_MAX) {
     node.history.splice(0, node.history.length - HISTORY_MAX);
   }
+
+  /* 5) 维护「当前这段连续异常」。用的是**复核之后**的 status ——
+      报文里写「正常」但规则算出「偏热」时，算它还在异常里，段不中断。
+      nextAbnormal 是纯函数，只读 node 上那两个字段，别的不碰。 */
+  const abnormal = nextAbnormal(node, record.status, record.time);
+  node.abnormalStart = abnormal.abnormalStart;
+  node.abnormalCount = abnormal.abnormalCount;
 
   const summary = record.nodeId + ' ' + fmt(record.temperature) + '℃ '
     + fmt(record.humidity) + '% ' + expected;
@@ -571,6 +643,10 @@ function handleMessage(topic, payloadText) {
      卡片和图表是「三个节点一起显示」，所以它们每次都刷；
      3D 是「只显示当前选中的那个」，所以它要挑。 */
   if (record.nodeId === currentNodeId) renderScene();
+
+  /* 「优先关注」也是每次都要重算的：这一条报文可能让它换了人，
+     也可能还是同一个人但时长和次数都变了（那句 reason 里写着）。 */
+  renderPriority();
   return true;
 }
 
@@ -618,12 +694,17 @@ function clearAll() {
   NODE_IDS.forEach(function (id) {
     nodes[id].latest = null;
     nodes[id].history = [];
+    /* 连异常段一起清。留着的话，清空之后明明一条数据都没有，
+       顶部还挂着「dorm-b 已连续偏热 12 分钟」—— 那是上一次的账。 */
+    nodes[id].abnormalStart = null;
+    nodes[id].abnormalCount = 0;
   });
   messages.length = 0;
   renderCards();
   renderDetailHead();
   renderScene();
   renderCharts();
+  renderPriority();
   renderLog();
 }
 
@@ -759,6 +840,15 @@ el.cards.addEventListener('click', function (e) {
   if (card && card.dataset.node) selectNode(card.dataset.node);
 });
 
+/* 「优先关注」那条也是重绘的，同样用委托。
+   它跟卡片走的是**同一条路**（selectNode）—— 点它和点对应那张卡片
+   没有任何区别，卡片、趋势图、3D 一起切过去。
+   全正常时那里是个没有 data-node 的 <p>，这个判断顺手把它挡掉了。 */
+el.priority.addEventListener('click', function (e) {
+  const focus = e.target && e.target.closest ? e.target.closest('.focus') : null;
+  if (focus && focus.dataset.node) selectNode(focus.dataset.node);
+});
+
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 if (darkQuery.addEventListener) darkQuery.addEventListener('change', applyChartTheme);
 
@@ -766,6 +856,7 @@ renderCards();
 renderDetailHead();
 renderScene();
 renderCharts();
+renderPriority();
 renderLog();
 
 /* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，
