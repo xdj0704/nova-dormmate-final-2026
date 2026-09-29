@@ -1226,9 +1226,18 @@ check('★ 路径只留文件名（那份 JSON 里本来就只有名字，这里
     longPath.note.includes('dorm-a_history_sim.csv'),
     longPath.note.includes('new_samples.csv')],
   [false, false, true, true]);
+/* 两个文件名都要挡：一个给空串，一个给 null（不是字符串）。
+   早先这条只断言了新数据那一半，historyFile: null 那一半没人管 ——
+   函数里那句 typeof 判断于是可以整个换成 String(value) 还照样绿，
+   页面上会印出「拿 null（40 条）训练的」。变异测试把它抓出来了。 */
+const blankName = buildMlNote(mlJson({ newFile: '', historyFile: null })).note;
 check('文件名给空了就说「那两份文件」，不留一个空括号',
-  buildMlNote(mlJson({ newFile: '', historyFile: null })).note
-    .includes('那两份文件（6 条）'), true);
+  [blankName.includes('那两份文件（6 条）'),
+    blankName.includes('那两份文件（40 条）训练的'),
+    blankName.includes('（），'), blankName.includes('null')],
+  [true, true, false, false]);
+check('文件名只有空格时也算没给（trim 过，不留一格空白）',
+  buildMlNote(mlJson({ newFile: '   ' })).note.includes('那两份文件（6 条）'), true);
 /* 条数写不出来时说「若干」—— 不能写 0，0 是「一条都没有」的意思。 */
 check('条数缺了说「若干」，不说 0',
   buildMlNote(mlJson({ newRows: undefined })).note.includes('（若干 条）'), true);
