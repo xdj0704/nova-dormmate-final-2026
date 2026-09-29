@@ -21,8 +21,13 @@ Step 2-4 干的事：把温度和湿度随时间的变化画成折线图，存�
 
 Step 2-5 干的事：把 summary 和趋势图拼成一份 report/report.html，用浏览器就能看。
 报告里的数字全部来自 summary（也就是全来自这次算出来的数据），一个都不写死。
-后面要加的「事件复盘」「今日摘要」「ML 异常分析」按 sections 参数往里塞，见
-build_report()。
+后面要加的「事件复盘」「ML 异常分析」按 sections 参数往里塞，见 build_report()。
+
+Step 8-2 干的事：报告末尾加一块「今日摘要」——按宿舍把这一天里的连续异常段
+说成人话（「dorm-b 14:10 起持续偏热 40 分钟后恢复」）。分段算法在
+analysis/daily_summary.py，报告这边只负责把算好的那段话和事件明细摆进 HTML。
+摘要用的 df 就是手上这一份（已经 add_rule_status 过），不另读一次文件 ——
+同一份报告上下两截说的必须是同一份数据。
 
 用 py -3.14 而不是 python：PATH 上的 python 是 32 位解释器，
 pandas 和 matplotlib 都不发布 32 位 Windows 包，装不上。64 位那个两个都装好了。
@@ -50,9 +55,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from analysis import rules  # noqa: E402  —— 必须在上面调整完 sys.path 之后
+from analysis import daily_summary, rules  # noqa: E402  —— 必须在上面调整完 sys.path 之后
 
 DEFAULT_CSV = ROOT / "data" / "dormmate.csv"
+
+# Step 8-2 的「模拟日数据」：由 analysis/make_sim_data.py 生成，带 nodeId 列，
+# 一天三个宿舍。它是演示「今日摘要」用的那份输入。
+DEFAULT_SIM = ROOT / "data" / "day_sim.csv"
 
 # time 列的统一格式（网页 formatTime() 写出来的就是这个）。
 # 画图时要把这串文本 parse 回 datetime 才能放到横轴上：strptime 给死格式，
@@ -77,7 +86,10 @@ NORMAL = rules.STATUS_NORMAL
 # 温湿度单元格是空的时候 pandas 读成 NaN，而 NaN 和任何数比大小都是 False ——
 # 直接丢给规则会被一路走到最后判成「正常」。报告里出现这种假数据最要命，
 # 所以缺失单独标出来，让它同时出现在状态统计和关注列表里。
-MISSING = "(缺失)"
+#
+# 值的本尊在 analysis/daily_summary.py：分段的算法要知道「哪种值算没有可用数据」
+# 才能跳过它，算法在哪家、常量就放哪家。这里指过去，全项目仍然只有一份定义。
+MISSING = daily_summary.MISSING
 
 # 表格最多打印多少行。截断的只是打印，summary 里永远是完整的。
 MAX_PRINT = 20
@@ -941,6 +953,48 @@ def _trend_block(trend_path: Path) -> str:
                               f"（用了 --no-plot，或者画图那步没成功）。</p>")
 
 
+# ---------------------------------------------------------------- 今日摘要区块
+
+# 事件明细表的列。和 daily_summary 返回的那几个字段一一对应 ——
+# 「持续（分钟）」右对齐，数字列对不齐的话一列看着像两列。
+EVENT_HEADER = ["宿舍", "开始", "结束", "持续（分钟）", "异常类型", "结果"]
+
+
+def daily_summary_section(daily: dict) -> dict:
+    """「今日摘要」区块（Step 8-2）。返回 sections 里的一项。
+
+    参数是 daily_summary.summarize_frame() 算好的那个字典，不是 DataFrame ——
+    命令行上也要把这段话打出来（见 main），一句话算两遍容易有两份说法，
+    所以算一次、渲染两次。
+
+    数据里没有 nodeId 列时（比如 data/dormmate.csv 是从单节点看板导出的），
+    区块照样出，但说的是一句实话：这份数据没法按宿舍分开。
+    """
+    # 数据来源要注明。值是从 CSV 的 source 列读出来的，不写死 ——
+    # 写死的话，拿现场数据跑出来的报告也会自称「模拟日数据」。
+    body = [f'<p class="note">数据来源：{_esc(daily["source"])}</p>']
+
+    if not daily["nodes"]:
+        # 分不了组（没有 nodeId 列）：那句话本身就是在说这件事，压低一号显示
+        body.append(f'<p class="empty">{_esc(daily["text"])}</p>')
+        return {"title": "今日摘要", "html": "\n".join(body)}
+
+    body.append(f"<p>{_esc(daily['text'])}</p>")
+
+    if not daily["events"]:
+        # 有数据、只是一段异常都没有。那句话已经把话说完了，不摆一张空表。
+        return {"title": "今日摘要", "html": "\n".join(body)}
+
+    rows = [
+        [event["nodeId"], event["start"], event["end"],
+         _num(event["minutes"]), event["status"],
+         "已恢复" if event["recovered"] else "仍未恢复"]
+        for event in daily["events"]
+    ]
+    body.append(_html_table(EVENT_HEADER, rows, right=(3,)))
+    return {"title": "今日摘要", "html": "\n".join(body)}
+
+
 def _document(body: str) -> str:
     """把各个区块包成一份完整的 HTML 文档。
 
@@ -1060,12 +1114,21 @@ def main(argv: list[str] | None = None) -> int:
         # 留下的旧图，或者误报"图没生成"
         plot_trend(df)
 
+    # 今日摘要只算一次：下面命令行要打出来，报告里也要放进去。
+    # 两处各算一遍的话，屏幕上和报告里有可能不是同一句话（口径一变就分叉），
+    # 而且那种不一致没人会去核对。
+    daily = daily_summary.summarize_frame(df, file=str(csv_path))
+
+    print()
+    print(f"今日摘要（数据来源：{daily['source']}）：")
+    print(f"  {daily['text']}")
+
     if args.no_report:
         print(f"跳过 {DEFAULT_REPORT_HTML.name}（--no-report）")
         return 0
 
     print()
-    report_path = write_report(summary)
+    report_path = write_report(summary, sections=[daily_summary_section(daily)])
     print(f"报告：{report_path}")
 
     return 0

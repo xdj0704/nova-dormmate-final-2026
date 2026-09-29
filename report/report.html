@@ -43,7 +43,7 @@ img { max-width: 100%; height: auto; border: 1px solid var(--line);
 </head>
 <body>
 <h1>DormMate 宿舍环境报告</h1>
-<p class="meta">生成时间：2026-09-26 14:36:22　·　数据来源：dormmate.csv <span class="path">(C:\Users\xdj\Desktop\DormMate Final\data\dormmate.csv)</span>　·　数据时间范围：2026-09-22 20:30:00 ~ 2026-09-22 20:30:55</p>
+<p class="meta">生成时间：2026-09-29 17:30:52　·　数据来源：dormmate.csv <span class="path">(C:\Users\xdj\Desktop\DormMate Final\nova-dormmate-final-2026\data\dormmate.csv)</span>　·　数据时间范围：2026-09-22 20:30:00 ~ 2026-09-22 20:30:55</p>
 <section>
 <h2>摘要</h2>
 <div class="cards"><div class="card"><span class="label">记录数</span><span class="value">12 <small>条</small></span></div><div class="card"><span class="label">温度最高</span><span class="value">31 <small>℃</small></span></div><div class="card"><span class="label">温度最低</span><span class="value">16 <small>℃</small></span></div><div class="card"><span class="label">湿度最高</span><span class="value">80 <small>%</small></span></div><div class="card"><span class="label">湿度最低</span><span class="value">60 <small>%</small></span></div></div>
@@ -120,6 +120,11 @@ img { max-width: 100%; height: auto; border: 1px solid var(--line);
 <section>
 <h2>趋势图</h2>
 <img src="trend.png" alt="温度与湿度随时间的变化">
+</section>
+<section>
+<h2>今日摘要</h2>
+<p class="note">数据来源：CSV 里没有 source 列，看不出这份数据是现场采集的还是模拟出来的</p>
+<p class="empty">这份 CSV 里没有 nodeId 列，没法按宿舍分开算今日摘要。先在网页上导出一份带 nodeId 的数据。</p>
 </section>
 </body>
 </html>
