@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -678,17 +679,27 @@ class TestMakeSimData(unittest.TestCase):
         每个进程都不一样，同一个进程里两次调用却又是稳定的 ——
         那样这个测试才是唯一能发现它的地方。
         两个进程故意给不同的 PYTHONHASHSEED，把这条差异放大出来。
+
+        三份文件都要比：Step 9-1 那两份用的是同一个「字符串做种子」的套路，
+        但换了一条随机流（dormmate-history-...）—— 这条流要是哪天被改成
+        hash()，只有这里能抓住。两次运行各写各的子目录，不然第二次会把
+        第一次那两份按固定文件名盖掉。
         """
         folder = Path(tempfile.mkdtemp())
         script = str(analysis.ROOT / "analysis" / "make_sim_data.py")
         produced = []
-        for index, out in enumerate((folder / "a.csv", folder / "b.csv")):
+        for index, name in enumerate(("a", "b")):
+            run = folder / name
+            run.mkdir()
+            out = run / "day_sim.csv"
             done = subprocess.run(
                 [sys.executable, script, "--out", str(out)],
                 cwd=str(analysis.ROOT), capture_output=True,
                 env=dict(os.environ, PYTHONHASHSEED=str(index + 1)))
             self.assertEqual(done.returncode, 0, done.stderr)
-            produced.append(out.read_bytes())
+            produced.append([out.read_bytes(),
+                             (run / make_sim_data.HISTORY_NAME).read_bytes(),
+                             (run / make_sim_data.SAMPLES_NAME).read_bytes()])
 
         self.assertEqual(produced[0], produced[1])
 
@@ -827,6 +838,295 @@ class TestMakeSimData(unittest.TestCase):
         df = pd.DataFrame(self.rows)
         df["rule_status"] = df["status"]
         return daily_summary.find_daily_events(df)
+
+
+# ------------------------------------------------- Step 9-1：历史 + 新数据
+
+
+class TestHistory(unittest.TestCase):
+    """dorm-a 的 40 条「平时」历史（data/dorm-a_history_sim.csv 的内容）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = make_sim_data.build_history()
+
+    def test_四十条全是dorm_a(self):
+        self.assertEqual(len(self.rows), 40)
+        self.assertEqual(len(self.rows), make_sim_data.HISTORY_COUNT)
+        self.assertEqual({row["nodeId"] for row in self.rows}, {"dorm-a"})
+
+    def test_source全是模拟(self):
+        self.assertEqual({row["source"] for row in self.rows}, {"模拟"})
+
+    def test_取值就是平时那个范围(self):
+        # 题目给的范围钉在常数上，再按常数逐条验
+        self.assertEqual(make_sim_data.HISTORY_TEMPERATURE, (24.0, 26.0))
+        self.assertEqual(make_sim_data.HISTORY_HUMIDITY, (55.0, 65.0))
+        for row in self.rows:
+            with self.subTest(time=row["time"]):
+                self.assertLessEqual(make_sim_data.HISTORY_TEMPERATURE[0],
+                                     row["temperature"])
+                self.assertLessEqual(row["temperature"],
+                                     make_sim_data.HISTORY_TEMPERATURE[1])
+                self.assertLessEqual(make_sim_data.HISTORY_HUMIDITY[0],
+                                     row["humidity"])
+                self.assertLessEqual(row["humidity"],
+                                     make_sim_data.HISTORY_HUMIDITY[1])
+
+    def test_四十条条条都正常(self):
+        # 「平时」就是这个意思：一条异常都没有。这也是取值要离三道阈值都远的原因
+        # —— 贴着阈值抖的话，40 条里蹦出一个偏热，这句话就时真时假了
+        self.assertEqual({row["status"] for row in self.rows}, {"正常"})
+
+    def test_每一行的status都由规则算出来(self):
+        for row in self.rows:
+            with self.subTest(time=row["time"]):
+                self.assertEqual(row["status"],
+                                 rules.judge_status(row["temperature"],
+                                                    row["humidity"]))
+
+    def test_从0800起每五分钟一个到1115(self):
+        times = [row["time"] for row in self.rows]
+
+        self.assertEqual(times[0], "2026-09-23 08:00:00")
+        self.assertEqual(times[-1], "2026-09-23 11:15:00")
+        self.assertEqual(times, sorted(times))      # 时间就是行序
+
+        moments = [datetime.strptime(t, "%Y-%m-%d %H:%M:%S") for t in times]
+        gaps = {(after - before).total_seconds()
+                for before, after in zip(moments, moments[1:])}
+        # 每步都正好一个采样间隔：跳点、重复、步长不齐都会在这里现形
+        self.assertEqual(gaps, {make_sim_data.INTERVAL * 60})
+
+    def test_在day_sim的后一天(self):
+        # 同一天同一时刻，day_sim.csv 里 dorm-a 是一个读数、这份历史里是另一个
+        # 读数（两条互不相干的随机流）—— 并排一放像在吵架。所以错开一天。
+        self.assertEqual(make_sim_data.history_day(make_sim_data.DAY).isoformat(),
+                         "2026-09-23")
+        days = {row["time"][:10] for row in self.rows}
+        self.assertEqual(days, {"2026-09-23"})
+
+        sim_days = {row["time"][:10] for row in make_sim_data.build_rows()}
+        self.assertEqual(sim_days & days, set())
+
+    def test_同一个种子两次一模一样(self):
+        self.assertEqual(make_sim_data.to_csv_text(self.rows),
+                         make_sim_data.to_csv_text(make_sim_data.build_history()))
+
+    def test_换种子历史跟着变但条条还是正常(self):
+        other = make_sim_data.build_history(seed=make_sim_data.SEED + 1)
+        self.assertNotEqual(make_sim_data.to_csv_text(self.rows),
+                            make_sim_data.to_csv_text(other))
+
+        # 换几个种子，40 条还得条条正常 —— 抖动的幅度不能贴着阈值
+        for seed in (7, 20260922, make_sim_data.SEED + 2):
+            rows = make_sim_data.build_history(seed=seed)
+            with self.subTest(seed=seed):
+                self.assertEqual(len(rows), 40)
+                self.assertEqual({row["status"] for row in rows}, {"正常"})
+
+
+class TestNewSamples(unittest.TestCase):
+    """6 条「待判断新数据」（data/new_samples.csv 的内容）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = make_sim_data.build_new_samples()
+        cls.history = make_sim_data.build_history()
+
+    def test_就是题目给的那六条(self):
+        self.assertEqual(make_sim_data.NEW_SAMPLES,
+                         [(25, 60), (26, 62), (29, 72), (31, 60), (25, 80), (17, 60)])
+        self.assertEqual(len(self.rows), 6)
+        self.assertEqual(
+            [(row["temperature"], row["humidity"]) for row in self.rows],
+            [(25, 60), (26, 62), (29, 72), (31, 60), (25, 80), (17, 60)])
+
+    def test_status按统一规则算出来(self):
+        # 回归测试数据对得上：25/60 正常、31/60 偏热、25/80 偏湿、17/60 偏冷
+        self.assertEqual([row["status"] for row in self.rows],
+                         ["正常", "正常", "正常", "偏热", "偏湿", "偏冷"])
+        for row in self.rows:
+            with self.subTest(temperature=row["temperature"]):
+                self.assertEqual(row["status"],
+                                 rules.judge_status(row["temperature"],
+                                                    row["humidity"]))
+
+    def test_全是dorm_a而且source是模拟(self):
+        self.assertEqual({row["nodeId"] for row in self.rows}, {"dorm-a"})
+        self.assertEqual({row["source"] for row in self.rows}, {"模拟"})
+
+    def test_时间从1120起每五分钟一个到1145(self):
+        times = [row["time"] for row in self.rows]
+        self.assertEqual(times[0], "2026-09-23 11:20:00")
+        self.assertEqual(times[-1], "2026-09-23 11:45:00")
+        moments = [datetime.strptime(t, "%Y-%m-%d %H:%M:%S") for t in times]
+        gaps = {(after - before).total_seconds()
+                for before, after in zip(moments, moments[1:])}
+        self.assertEqual(gaps, {make_sim_data.INTERVAL * 60})
+
+    def test_接在历史后面且一个时刻都不重叠(self):
+        times = [row["time"] for row in self.rows]
+        last_history = max(row["time"] for row in self.history)
+
+        # 第一条新数据 = 最后一条历史 + 一个采样间隔，中间不留空档
+        self.assertEqual(
+            datetime.strptime(times[0], "%Y-%m-%d %H:%M:%S")
+            - datetime.strptime(last_history, "%Y-%m-%d %H:%M:%S"),
+            timedelta(minutes=make_sim_data.INTERVAL))
+        self.assertEqual(set(times) & {row["time"] for row in self.history}, set())
+        self.assertTrue(all(moment > last_history for moment in times))
+
+    def test_换种子这六条一个字都不变(self):
+        # 这 6 条是题目给的输入，不是造出来的：--seed 只管造数据的那几条随机流
+        folder = Path(tempfile.mkdtemp())
+
+        def run(name, seed):
+            out = folder / name / "day.csv"
+            capture(make_sim_data.main, ["--out", str(out), "--seed", str(seed)])
+            return out.parent
+
+        base = run("base", make_sim_data.SEED)
+        other = run("other", 7)
+
+        self.assertEqual((base / make_sim_data.SAMPLES_NAME).read_bytes(),
+                         (other / make_sim_data.SAMPLES_NAME).read_bytes())
+        # 历史是造出来的，换个种子就该不一样
+        self.assertNotEqual((base / make_sim_data.HISTORY_NAME).read_bytes(),
+                            (other / make_sim_data.HISTORY_NAME).read_bytes())
+
+        # 写出来的和生成函数算的是同一份。用 bytes 解码比，不用 read_text ——
+        # 后者走 universal newlines，会把 CRLF 折成 LF，比出来的是假差异
+        self.assertEqual(
+            (base / make_sim_data.SAMPLES_NAME).read_bytes().decode("utf-8-sig"),
+            make_sim_data.to_csv_text(make_sim_data.build_new_samples()))
+        self.assertEqual(
+            (base / make_sim_data.HISTORY_NAME).read_bytes().decode("utf-8-sig"),
+            make_sim_data.to_csv_text(make_sim_data.build_history()))
+
+
+class TestTwoFilesApart(unittest.TestCase):
+    """两份文件分开保存 —— 新数据不许混进历史里。"""
+
+    def test_文件名是固定那两个(self):
+        self.assertEqual(make_sim_data.HISTORY_NAME, "dorm-a_history_sim.csv")
+        self.assertEqual(make_sim_data.SAMPLES_NAME, "new_samples.csv")
+        self.assertNotEqual(make_sim_data.HISTORY_NAME, make_sim_data.SAMPLES_NAME)
+
+    def test_命令行入口一次写三份而且各归各的(self):
+        folder = Path(tempfile.mkdtemp())
+        out = folder / "day_sim.csv"
+        capture(make_sim_data.main, ["--out", str(out)])
+
+        for path in (out, folder / make_sim_data.HISTORY_NAME,
+                     folder / make_sim_data.SAMPLES_NAME):
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_file())
+
+        # 三份各是各的条数。BOM 没坏的话 load() 也读得回来
+        self.assertEqual(len(analysis.load(out)), len(make_sim_data.build_rows()))
+        self.assertEqual(len(analysis.load(folder / make_sim_data.HISTORY_NAME)), 40)
+        self.assertEqual(len(analysis.load(folder / make_sim_data.SAMPLES_NAME)), 6)
+
+    def test_日数据那份还是原来那864行(self):
+        # 多写了两份文件，day_sim.csv 不该被牵动一个字节
+        folder = Path(tempfile.mkdtemp())
+        out = folder / "day_sim.csv"
+        capture(make_sim_data.main, ["--out", str(out)])
+
+        self.assertEqual(out.read_bytes().decode("utf-8-sig"),
+                         make_sim_data.to_csv_text(make_sim_data.build_rows()))
+
+    def test_新数据一条都没混进历史里(self):
+        history = make_sim_data.build_history()
+        samples = make_sim_data.build_new_samples()
+
+        # ① 条数：历史正好 40 —— 混进那 6 条就该是 46
+        self.assertEqual(len(history), make_sim_data.HISTORY_COUNT)
+        # ② 时刻：两边没有一个共同的时刻
+        self.assertEqual({row["time"] for row in history}
+                         & {row["time"] for row in samples}, set())
+
+        # ③ 取值：异常的那几条，取值上就不可能出现在历史里 ——
+        #    历史的温度恒在 24~26、湿度恒在 55~65，31 ℃ / 17 ℃ / 80 % 都不在这两个区间里。
+        #    这条是【从取值区间证出来的】，不是「恰好没撞上」。
+        pairs = {(row["temperature"], row["humidity"]) for row in history}
+        for row in samples:
+            if row["status"] == rules.STATUS_NORMAL:
+                continue
+            with self.subTest(temperature=row["temperature"]):
+                self.assertNotIn((row["temperature"], row["humidity"]), pairs)
+
+    def test_换一天两份也跟着换(self):
+        # --date 管的是 day_sim 那一天，这两份排在它的【后一天】—— 换一天就得一起换。
+        # 少了这道，两份文件会一直赖在 09-23，而日数据跑到别的日期去了，
+        # 摆在一起就是「一天的数据配另一天的基准」。
+        folder = Path(tempfile.mkdtemp())
+        out = folder / "day.csv"
+        capture(make_sim_data.main, ["--out", str(out), "--date", "2026-01-01"])
+
+        self.assertEqual({moment[:10] for moment in analysis.load(out)["time"]},
+                         {"2026-01-01"})
+        for name in (make_sim_data.HISTORY_NAME, make_sim_data.SAMPLES_NAME):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    {moment[:10]
+                     for moment in analysis.load(folder / name)["time"]},
+                    {"2026-01-02"})
+
+    def test_命令行入口把那两份也报出来(self):
+        folder = Path(tempfile.mkdtemp())
+        text = capture(make_sim_data.main, ["--out", str(folder / "day.csv")])
+
+        self.assertIn(make_sim_data.HISTORY_NAME, text)
+        self.assertIn(make_sim_data.SAMPLES_NAME, text)
+        self.assertIn("40 条平时历史", text)
+        self.assertIn("6 条待判断新数据", text)
+        # 报的是「从哪一刻起」，而且报的是第一条 —— 这两句是写给人看的第一手信息，
+        # 报成末点、或者报成另一个节点，扫一眼是看不出来的
+        self.assertIn("2026-09-23 08:00:00 起", text)
+        self.assertIn("2026-09-23 11:20:00 起", text)
+        self.assertIn(f"（{make_sim_data.HISTORY_NODE} 的 40 条平时历史", text)
+
+
+class TestHistoryAndSamplesFile(unittest.TestCase):
+    """data/ 里那两份跟着仓库走的文件，必须和生成脚本对得上。"""
+
+    def _data(self, name):
+        path = Path(analysis.DEFAULT_SIM).parent / name
+        if not path.is_file():
+            self.skipTest(f"data/{name} 不存在（演示数据，可以没有）")
+        return path
+
+    def _generated(self, rows) -> bytes:
+        """现生成一份写到临时文件，回读 bytes（BOM 和 CRLF 都在里面）。"""
+        path = Path(tempfile.mkdtemp()) / "x.csv"
+        make_sim_data.write_csv(rows, path)
+        return path.read_bytes()
+
+    def test_历史文件和重新生成的一模一样(self):
+        # 对不上就说明有人手改过文件，或者改了脚本没重新生成
+        self.assertEqual(self._data(make_sim_data.HISTORY_NAME).read_bytes(),
+                         self._generated(make_sim_data.build_history()))
+
+    def test_新数据文件和重新生成的一模一样(self):
+        self.assertEqual(self._data(make_sim_data.SAMPLES_NAME).read_bytes(),
+                         self._generated(make_sim_data.build_new_samples()))
+
+    def test_两份都读得回来且条数对(self):
+        self.assertEqual(
+            len(analysis.load(self._data(make_sim_data.HISTORY_NAME))), 40)
+        self.assertEqual(
+            len(analysis.load(self._data(make_sim_data.SAMPLES_NAME))), 6)
+
+    def test_两份是两个文件不是一份(self):
+        history = analysis.load(self._data(make_sim_data.HISTORY_NAME))
+        samples = analysis.load(self._data(make_sim_data.SAMPLES_NAME))
+
+        self.assertNotEqual(make_sim_data.HISTORY_NAME, make_sim_data.SAMPLES_NAME)
+        self.assertEqual(set(history["nodeId"]), {"dorm-a"})
+        self.assertEqual(set(samples["nodeId"]), {"dorm-a"})
+        self.assertEqual(set(samples["time"]) & set(history["time"]), set())
 
 
 class TestSampleDayFile(unittest.TestCase):

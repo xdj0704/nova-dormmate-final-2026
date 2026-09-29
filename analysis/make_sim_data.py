@@ -1,4 +1,5 @@
 """Step 8-2 数据源：生成「模拟日数据」data/day_sim.csv。
+（Step 9-1 起，同一次运行还多写两份：dorm-a 的平时历史、6 条待判断新数据。）
 
 运行（在项目根下、或任何别的目录下都行）：
 
@@ -6,6 +7,17 @@
     py -3.14 analysis/make_sim_data.py --seed 7
     py -3.14 analysis/make_sim_data.py --hot-start 14:30 --humid-start 21:00
     py -3.14 analysis/make_sim_data.py --out data/other.csv
+
+一次运行出三份文件，都写在 --out 那个目录里，列完全一样：
+
+    day_sim.csv              这一天三个宿舍的完整数据（864 行，2 个事件）
+    dorm-a_history_sim.csv   dorm-a 的 40 条「平时」历史（条条正常）
+    new_samples.csv          6 条「待判断新数据」
+
+后两份是 Step 9-1 要用的输入：一份基准，加一批等着照基准判断的新读数。
+【分开放】是这一步的硬要求 —— 新数据混进历史里，「拿历史当基准去判断新数据」
+就变成了拿自己判断自己。两份文件的时间首尾相接（历史的末点 + 5 分钟 = 新数据第一条），
+所以画在一条时间轴上也接得上，但各自落在自己的文件里。
 
 为什么要有这么一个文件：dashboard 导出的 dormmate.csv 是「点一下、发一条」攒出来的，
 时间戳全挤在几秒里，看不出「持续了多久」。要看「14:10 起持续偏热 40 分钟后恢复」
@@ -23,8 +35,12 @@ status 【不写死】，每一行都用 analysis/rules.py 转发的 rules.judge
     dorm-b  下午连续偏热约 40 分钟后恢复
     dorm-c  晚间开始偏湿，一直到这一天结束都还没恢复
 
-随机种子固定（默认 20260922），所以同一个种子跑多少次，出来的 CSV 一个字节都不差。
+随机种子固定（默认 2350），所以同一个种子跑多少次，出来的 CSV 一个字节都不差。
 换 --seed 或 --hot-start / --humid-start，摘要就会跟着变 —— 这正是这一步要验证的事。
+
+后两份的日期是 --date 的【后一天】，不是 --date 本身（见 history_day()）：
+同一天同一时刻，day_sim.csv 里 dorm-a 是一个读数、这份历史里是另一个读数
+（两条互不相干的随机流），并排一放像在吵架。错开一天，各说各的、各自自洽。
 
 用 py -3.14 而不是 python：PATH 上的 python 是 32 位解释器，pandas 装不上。
 本文件本身只用标准库，但它要调用 pandas 版的 daily_summary，跟着整套工具链用同一个解释器。
@@ -98,6 +114,30 @@ HOT_MINUTES = 40
 
 HOT_NODE = "dorm-b"
 HUMID_NODE = "dorm-c"
+
+# ------------------------------------------- Step 9-1：平时历史 + 待判断新数据
+
+# 这两份和 day_sim.csv 是同一个脚本出的，但【另起一条随机流】—— 种子字符串里
+# 带 history 字样（见 build_history）。这样动这里的常数，day_sim.csv 一个字节
+# 都不会跟着挪。那份文件有逐字节的测试钉着，跟着变就说不清「到底改了什么」。
+HISTORY_NODE = "dorm-a"
+HISTORY_COUNT = 40
+HISTORY_START = "08:00"
+
+# 「平时」的取值：温度 24~26 ℃、湿度 55~65 %。整段离三条阈值（18 / 30 / 75）
+# 都远，所以 40 条里一条异常都抖不出来 —— 这正是「平时」该有的样子。
+# 反过来，要是贴着阈值抖，「这 40 条全是正常」这句话就变成看运气了。
+HISTORY_TEMPERATURE = (24.0, 26.0)
+HISTORY_HUMIDITY = (55.0, 65.0)
+
+# 6 条待判断的新数据：(温度, 湿度)。【写死】—— 这是题目给的输入，不是造出来的，
+# 所以 build_new_samples() 一个随机数都不抽，换 --seed 也不动它们。
+NEW_SAMPLES = [(25, 60), (26, 62), (29, 72), (31, 60), (25, 80), (17, 60)]
+
+# 这两份的文件名。跟 day_sim.csv 放同一个目录（--out 挪到哪，它们跟到哪），
+# 名字固定 —— 后面几步要按名字找它们。
+HISTORY_NAME = "dorm-a_history_sim.csv"
+SAMPLES_NAME = "new_samples.csv"
 
 
 # ---------------------------------------------------------------- 时间轴
@@ -235,6 +275,63 @@ def build_rows(seed: int = SEED, day_text: str = DAY,
     return rows
 
 
+# ------------------------------------------- Step 9-1：平时历史 + 待判断新数据
+
+def history_day(day_text: str = DAY) -> Date:
+    """这两份数据自己那一天：day_sim 的【后一天】。
+
+    为什么不跟 day_sim 同一天：同一天同一时刻，day_sim.csv 里 dorm-a 是一个读数、
+    这份历史里是另一个读数（两条随机流各抽各的），并排一放像在吵架 ——
+    而「为什么同一个宿舍在 08:05 有两个温度」是个解释不清的问题。
+    错开一天就没这回事：两份数据各说各的，各自都是自洽的。
+    """
+    return Date.fromisoformat(day_text) + timedelta(days=1)
+
+
+def history_times(day: Date, count: int = HISTORY_COUNT) -> list[datetime]:
+    """历史那 40 个采样时刻：HISTORY_START 起，每 INTERVAL 分钟一个。
+
+    从 08:00 起、40 个点、5 分钟一个 —— 末点正好 11:15，新数据接着从 11:20 开始。
+    起点写成常数（不是 00:00）：白天有人在宿舍的时段读起来更像「平时的记录」，
+    而且和 day_sim 那边的事件时刻（14:10 / 21:30）不挨着，不会让人误以为有关联。
+    """
+    first = datetime.combine(day, parse_hm(HISTORY_START))
+    return [first + timedelta(minutes=INTERVAL * index) for index in range(count)]
+
+
+def build_history(seed: int = SEED, day_text: str = DAY) -> list[dict]:
+    """dorm-a 的 40 条「平时」历史，按时间先后排好。
+
+    单独一条随机流（种子里带 history 字样），不去碰 day_sim 那三条 ——
+    否则改这里一个常数，data/day_sim.csv 就会跟着变，而那份文件的测试是
+    逐字节比对的，改完之后「是谁动了它」得查半天。
+    """
+    rng = random.Random(f"dormmate-history-{seed}-{HISTORY_NODE}")
+    return [
+        _record(HISTORY_NODE, moment,
+                round(rng.uniform(*HISTORY_TEMPERATURE), 1),
+                round(rng.uniform(*HISTORY_HUMIDITY), 1))
+        for moment in history_times(history_day(day_text))
+    ]
+
+
+def build_new_samples(day_text: str = DAY) -> list[dict]:
+    """6 条「待判断新数据」，接着历史的末点往下排。
+
+    开始时刻是由历史推出来的（末点 + 一个间隔），不写死：改了 HISTORY_COUNT
+    或者 INTERVAL，新数据跟着走，不会突然和历史最后一条撞在同一个时刻上 ——
+    「新数据不能混进历史里」这条要求，第一个该守住的就是时间不重叠。
+
+    没有 seed 参数：这 6 条是题目给的输入，一个随机数都不抽。
+    """
+    first = history_times(history_day(day_text))[-1] + timedelta(minutes=INTERVAL)
+    return [
+        _record(HISTORY_NODE, first + timedelta(minutes=INTERVAL * index),
+                temperature, humidity)
+        for index, (temperature, humidity) in enumerate(NEW_SAMPLES)
+    ]
+
+
 # ---------------------------------------------------------------- 写文件
 
 def to_csv_text(rows: list[dict]) -> str:
@@ -301,12 +398,16 @@ def main(argv: list[str] | None = None) -> int:
                              f"取 {INTERVAL} 的整数倍 —— 采样点每 {INTERVAL} 分钟一个，"
                              "不整除的部分落不到点上，实际时长会短一截")
     parser.add_argument("--out", default=str(DEFAULT_OUT),
-                        help=f"写到哪（相对路径按项目根解析，默认 {DEFAULT_OUT}）")
+                        help=f"日数据写到哪（相对路径按项目根解析，默认 {DEFAULT_OUT}）。"
+                             f"另外两份（{HISTORY_NAME}、{SAMPLES_NAME}）"
+                             "也写在同一个目录里")
     args = parser.parse_args(argv)
 
     try:
         rows = build_rows(args.seed, args.date, args.hot_start, args.humid_start,
                           args.hot_minutes)
+        history = build_history(args.seed, args.date)
+        samples = build_new_samples(args.date)
     except ValueError as exc:
         # 时间格式写错了（--date 或 --hot-start / --humid-start）。
         # parser.error() 会打印用法再退出，比抛一个 traceback 让人去猜是哪个参数强。
@@ -315,12 +416,24 @@ def main(argv: list[str] | None = None) -> int:
     out_path = Path(args.out)
     if not out_path.is_absolute():
         out_path = ROOT / out_path
+    # 另两份跟着日数据走：同一个目录、固定的文件名。这样 --out 一挪，
+    # 三份一起挪，不会出现「日数据在临时目录、历史还写在项目里」这种事
+    # （测试跑 main() 的时候就是靠这条不往仓库里写东西）。
+    history_path = out_path.with_name(HISTORY_NAME)
+    samples_path = out_path.with_name(SAMPLES_NAME)
+
     write_csv(rows, out_path)
+    write_csv(history, history_path)
+    write_csv(samples, samples_path)
 
     print(f"种子 {args.seed}　日期 {args.date}　间隔 {INTERVAL} 分钟/点")
     print(f"节点 {len(NODE_IDS)} 个：{'、'.join(NODE_IDS)}")
     print(f"共 {len(rows)} 行（每个节点 {len(rows) // len(NODE_IDS)} 行）")
     print(f"已写入：{out_path}")
+    print(f"已写入：{history_path}"
+          f"（{HISTORY_NODE} 的 {len(history)} 条平时历史，{history[0]['time']} 起）")
+    print(f"已写入：{samples_path}"
+          f"（{len(samples)} 条待判断新数据，{samples[0]['time']} 起）")
 
     # 顺手把这份数据算出来的摘要打出来。这一步就是为了让人看见：
     # 换 --seed 或 --hot-start 之后摘要确实跟着变了。

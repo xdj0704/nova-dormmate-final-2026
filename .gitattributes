@@ -16,3 +16,12 @@
 3d/lib/**        text eol=lf
 dashboard/lib/** text eol=lf
 web/vendor/**    text eol=lf
+
+# data/ 里的 CSV 反过来：它们**就该是 CRLF**（RFC 4180，Excel 打开也规矩），
+# 生成脚本 write_csv() 用的也是 CRLF + UTF-8 BOM。
+# 测试里有几条是逐字节比对的（Step 9-1 的历史 / 新数据那两份，连 BOM 和 CRLF
+# 一起比），所以检出到 worktree 的字节必须是定的那一种：
+#   只靠 core.autocrlf=true 的话，本机是 CRLF、别人的机器上未必 —— 那边一 clone
+#   出来就是 LF，逐字节比对当场红，而红的原因是「谁 clone 的」。
+# text eol=crlf：仓库里存 LF（和现在一样，内容不变），谁检出都拿到 CRLF。
+data/*.csv       text eol=crlf
