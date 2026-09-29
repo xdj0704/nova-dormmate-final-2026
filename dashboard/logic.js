@@ -1,5 +1,6 @@
 // dashboard/logic.js
-// 看板的判断逻辑：7-1 优先关注、7-2 处理动作、7-4 事件记录、8-1 总览与依据。
+// 看板的判断逻辑：7-1 优先关注、7-2 处理动作、7-4 事件记录、8-1 总览与依据、
+// 8-3 当前重点一行 + 语音提醒那句话。
 // **纯函数**——不碰 DOM，不读全局变量，不调 Date.now()。
 //
 // 单独拆一个文件出来，是因为这一整套判断（先比时长、再比次数、最后比名字）
@@ -310,10 +311,11 @@ export function closeEvent(event, time) {
 /**
  * 把「当前在异常中的节点」按那三步排好序，交给调用方。
  *
- * 抽出来是因为有三个地方要用这份排序：顶上的优先关注栏（pickPriority）、
- * B1 总览里那句「是当前重点」、B2 依据。各写一份的话，「谁是重点」
- * 就有了三个出处 —— 而且三份都「看着挺对」，对不上的时候没有任何地方会报错，
- * 只是页面上两句话指着不同的宿舍。
+ * 抽出来是因为有四个地方要用这份排序：pickPriority（对外那一份）、
+ * B1 总览里那句「是当前重点」（8-3 之后归 report.html）、B2 依据（同上）、
+ * 以及 8-3 的 buildAlert。各写一份的话，「谁是重点」就有了四个出处 ——
+ * 而且四份都「看着挺对」，对不上的时候没有任何地方会报错，
+ * 只是页面上那一行说的是 dorm-b、语音念的是 dorm-c。
  *
  * 排序的三步和判据见 pickPriority 的注释。
  *
@@ -354,8 +356,9 @@ function ranked(nodes) {
  * 拼出「凭什么」那半句 —— 不含节点名。
  *
  * 不含节点名是因为有两个地方要它，而那两处节点名的位置不一样：
- * 顶上那条栏写「dorm-b 已连续偏热 20 分钟（4 次），持续时间最长」，
- * B2 的依据写「优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间最长」
+ * pickPriority 的 reason 是「dorm-b 已连续偏热 20 分钟（4 次），持续时间最长」
+ * （reasonFor 在前面补上节点名），B2 的依据写
+ * 「优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间最长」
  * —— 节点名在「优先关注 …：」那里已经说过了，再说一遍就成了
  * 「优先关注 dorm-b：dorm-b 已连续…」。各拼一份的话，两处对「赢在哪一步」
  * 的说法迟早会不一样，而这一栏存在的意义正是让人相信这个排序。
@@ -493,7 +496,7 @@ function handlingNote(node) {
  * 换个宿舍数、换成四个节点，同一份代码说的还是实话。
  *
  * 「还没有收到数据」的节点单独说，不算进「正常」里 —— 页面刚打开那几秒
- * 那三个节点是**不知道**，不是正常。这一点和 renderPriority 是同一个口径。
+ * 那三个节点是**不知道**，不是正常。这一点和 8-3 的 calmLine 是同一个口径。
  *
  * @param {Object} nodes
  * @returns {string}
@@ -617,4 +620,169 @@ export function buildReasons(nodes) {
   });
 
   return parts.join('；') + '。';
+}
+
+/* ---------- Step 8-3：B4 当前重点一行 ---------- */
+
+/* 这一步是**信息分工**，不是又加一块内容：页面上原来有三处在说「谁是重点」
+   （7-1 那条栏、B1 总览、B2 依据），它们说的是同一件事，只是详略不同。
+   8-3 把它们并成看板顶部的一行，剩下的细节分给另外三个出口：
+
+     看板顶部 这一行        —— 谁、在不在处理、往哪走（扫一眼就够）
+     3D 场景               —— 哪个空间、风扇转没转、窗开没开（不堆文字）
+     语音提醒              —— 把同一件事念成一句人话
+     report.html           —— 开始 / 处理 / 恢复 / 持续了多久，完整的账
+
+   分工的判据是「这个出口**擅长**什么」：一行字只适合扫，不适合交代来龙去脉；
+   3D 天生适合表达空间和动作，不适合放文字；声音只能一句一句听，不能回头翻；
+   报告可以慢，所以该它承担完整记录。
+
+   下面两个函数都从 pickPriority 出发 —— 「谁是重点」仍然只有一份实现。
+   这一点必须守住：这一行和语音念的是同一件事，两处对不上的话，
+   看的人第一反应是「到底哪个算数」。 */
+
+/**
+ * 「温度在往哪走」—— 拿这个节点最近两条记录比一比。
+ *
+ * 只比温度、只看最近两条，是这一步定下的口径。不做滑动平均、不看更早的趋势：
+ * 这里要回答的是「刚发生的变化」，而不是「这一段的走势」—— 后者是趋势图的事。
+ *
+ * 三种结果：'上升' / '下降' / '持平'。
+ *
+ * 只有一条记录时返回**空串**，不是 '持平'。这两件事不一样：一条数据说不出
+ * 「在往哪走」，说成「持平」就是把「不知道」说成了「没变」—— 和 B1 那边
+ * 「还没有收到数据 ≠ 正常」是同一条原则。
+ *
+ * 比的是**精确值**，不设容差。设一个「小于 0.5 ℃ 算没变」的阈值需要先定下来
+ * 多少算没变，那是另一套规则，这一步不定；而且真实数据里 24.9 → 25.0
+ * 确实就是在上升。
+ *
+ * @param {{history: Array<{temperature: number}>}} node
+ * @returns {'上升'|'下降'|'持平'|''}
+ */
+export function tempTrend(node) {
+  const history = node && node.history;
+  if (!Array.isArray(history) || history.length < 2) return '';
+
+  const now = history[history.length - 1];
+  const before = history[history.length - 2];
+  if (!now || !before) return '';
+
+  /* Number.isFinite 顺手把 NaN / Infinity / 字符串 / undefined 一起挡掉。
+     报文在 handleMessage 里已经校验过一次，这里是纯函数的自保。 */
+  const a = before.temperature;
+  const b = now.temperature;
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return '';
+
+  if (b > a) return '上升';
+  if (b < a) return '下降';
+  return '持平';
+}
+
+/**
+ * 趋势那一段的说法。
+ *
+ * 「温度正在持平」不成话，所以持平单独一句。**不写成「温度不变」** ——
+ * 同一个意思在两个出口（这一行和语音）里各写各的，迟早会不一样。
+ */
+function trendText(trend) {
+  if (!trend) return '';
+  if (trend === '持平') return '温度持平';
+  return '温度正在' + trend;
+}
+
+/**
+ * 平静时候那一行（没有重点可言）。
+ *
+ * 「还没有收到数据」和「都正常」必须分开说 —— 页面刚打开那几秒，
+ * 那三个宿舍是**不知道**，不是正常。这一条和 B1 总览是同一个口径。
+ *
+ * 有节点还没收到数据时不说「都正常」，而是把两个数都报出来 ——
+ * 「当前 3 个宿舍都正常」在只收到 2 条消息时是句假话。
+ */
+function calmLine(nodes) {
+  const s = survey(nodes);
+  if (s.withData.length === 0) return '还没有收到任何节点的数据';
+  if (s.noData.length === 0) return '当前 ' + s.ids.length + ' 个宿舍都正常';
+  return '当前 ' + s.normal.length + ' 个宿舍正常，另有 ' + s.noData.length
+    + ' 个还没有收到数据';
+}
+
+/**
+ * B4 那一行：谁、在不在处理、温度往哪走。
+ *
+ *   「dorm-b｜处理中｜温度正在下降」
+ *
+ * 三段用 ｜ 分开，**没有内容的那段整个不出现**（不写空串、不留两个连着的 ｜）：
+ *   - 没按过按钮 -> 没有「处理中」这段
+ *   - 只收到一条数据 -> 没有趋势这段（说不出「往哪走」，见 tempTrend）
+ * 全都拼不出来时只剩宿舍名，那也是实话 —— 数据里没有的东西不编。
+ *
+ * 【这一行里没有状态（偏热/偏湿）】这是有意的，也是分工的结果：
+ * 状态由**卡片上那个徽章**（颜色 + 图标 + 文字三重编码）、3D 场景（地板颜色、
+ * 窗户开合）、语音那句一起承担。一行字里塞四样东西，就又变回 8-1 那种
+ * 「两句话交代所有事」，那正是这一步要拆掉的。
+ * 想加回来的话，就在 parts 里插一个 top.status —— 改动只有一行。
+ *
+ * 【「处理中」只写这三个字，不写「风扇已开启」】开了什么是**空间动作**，
+ * 3D 里风扇转着比一行字直观得多 —— 那正是 3D 该承担的部分。
+ *
+ * @param {Object} nodes
+ * @returns {string} 一个宿舍名；平静时是一句没有重点的话
+ */
+export function buildFocus(nodes) {
+  const pick = pickPriority(nodes);
+  if (!pick) return calmLine(nodes);
+
+  const node = nodes[pick.nodeId] || {};
+  const parts = [pick.nodeId];
+
+  if (node.handling && node.handling !== '无') parts.push(String(node.handling));
+
+  const trend = trendText(tempTrend(node));
+  if (trend) parts.push(trend);
+
+  return parts.join('｜');
+}
+
+/**
+ * 语音念的那一句。**只有一句** —— 这是这个出口的约束，不是偷懒：
+ * 声音是线性的，说过就过去了，没人能回头翻。念三段话，听的人只记得住最后一句。
+ *
+ *   「dorm-b 偏热已持续 20 分钟（风扇已开启，处理中），温度正在下降。」
+ *
+ * 和 buildFocus 说的是同一个人（都走 pickPriority），但**不是同一串字**：
+ * ｜ 是给人扫的，念出来是「竖线」，所以这一句得自成一句人话。
+ * 两处各拼一份的风险是「重点换人了这边还念旧的」—— 那个风险由
+ * 「两个函数都必须从 pickPriority 出发」这条测试挡住。
+ *
+ * 处理状态复用 handlingNote()，和 7-1 那条栏、B2 依据是同一份说法 ——
+ * 「风扇已开启，处理中」这几个字全项目只有那一处拼得出来。
+ *
+ * @param {Object} nodes
+ * @returns {string} 以句号收尾的一句话
+ */
+export function buildAlert(nodes) {
+  const pick = pickPriority(nodes);
+  if (!pick) return calmLine(nodes) + '。';
+
+  const list = ranked(nodes);
+  /* **到不了**：pickPriority 的实现就是「ranked() 空了才返回 null」，
+     所以上面 pick 非空时这里必非空。留着是道保险 —— 万一以后 pickPriority
+     改成别的口径（比如自己过滤一遍），这里是 `list[0].status` 会直接炸掉
+     的地方，一句平静话比一个 TypeError 好收拾。
+     换句话说：这是一句**走不到的代码**，变异测试杀不掉它，因为删掉它
+     行为一个字都不变。这一点写在 README 的变异测试表里。 */
+  if (list.length === 0) return calmLine(nodes) + '。';
+
+  const top = list[0];
+  const node = nodes[pick.nodeId] || {};
+
+  let text = pick.nodeId + ' ' + top.status + '已持续 ' + fmtDuration(top.duration)
+    + handlingNote(node);
+
+  const trend = trendText(tempTrend(node));
+  if (trend) text += '，' + trend;
+
+  return text + '。';
 }

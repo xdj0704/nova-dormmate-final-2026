@@ -2,7 +2,9 @@
 // Step 5-3 / 5-4：三节点 Dashboard。订阅 MQTT 显示真实数据，
 // 「模拟三节点数据」按钮则在没接 Broker 时也能把界面跑起来。
 // Step 6-3：详情区嵌一个 3D 视图，跟着当前选中的节点走。
-// Step 7-1：顶部一条「优先关注」，自动挑出最该先看的那个节点。
+// Step 7-1：自动挑出最该先看的那个节点。
+// Step 8-3：顶部只剩一行「当前重点」，另加一个「语音提醒」按钮 ——
+//           信息按出口分工，细节分给 3D / 语音 / report.html（见 index.html 那段注释）。
 //
 // handleMessage(topic, payloadText) 是唯一的消息入口，两个来源都走它：
 //   client.on('message')  -> 真实 MQTT
@@ -28,10 +30,15 @@ import { createDorm3D } from '../3d/scene.js';
 /* 看板的判断逻辑。只有这几个函数被这里用到，其余（parseTime / fmtDuration /
    abnormalDuration / ranked 那一套）是给测试单独钉的，页面不直接调。
    nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个，
-   buildOverview / buildReasons 把它说成人话（8-1）。 */
+   buildFocus 把它压成顶部那一行，buildAlert 把它说成语音要念的一句话（8-3）。
+
+   buildOverview / buildReasons（8-1）**这里不 import 了**：8-3 起页面上不再
+   渲染那两句，顶上只有 buildFocus 那一行。那两个函数仍然留在 logic.js 里
+   ——「为什么是它、别人为什么不是」那套说法要去 report.html，那边要复用它，
+   而且 pickPriority 记进事件、跟着导出的 CSV 走的 reason 也在那儿。 */
 import { pickPriority, nextAbnormal, beginHandling, nextHandling,
   beginEvent, markPriority, markAction, closeEvent,
-  buildOverview, buildReasons } from './logic.js';
+  buildFocus, buildAlert } from './logic.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -44,7 +51,7 @@ const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
 /* abnormalStart / abnormalCount 是 Step 7-1 加的：当前这段**连续异常**
    从哪条消息开始、已经有几条。怎么变由 logic.js 的 nextAbnormal 决定，
    这里只负责存。0 / null = 不在异常中。
-   「优先关注」比的就是这两个字段 —— 见 renderPriority。
+   「谁是当前重点」比的就是这两个字段 —— 见 renderFocus。
 
    handling / action / actionTime / dataAfterAction 是 Step 7-2 加的：
    这个节点被「处理」过没有、做了什么、什么时候做的、做完之后收到了什么。
@@ -173,9 +180,9 @@ const el = {
   actionState: document.getElementById('action-state'),
   chartNote: document.getElementById('chart-note'),
   scene3d: document.getElementById('scene3d'),
-  priority: document.getElementById('priority'),
-  overview: document.getElementById('overview'),
-  reasons: document.getElementById('reasons'),
+  focus: document.getElementById('focus'),
+  speak: document.getElementById('speak'),
+  speakNote: document.getElementById('speak-note'),
   evBody: document.getElementById('event-body'),
   evCount: document.getElementById('event-count'),
   exportEvents: document.getElementById('export-events'),
@@ -311,13 +318,17 @@ function renderAction() {
   el.actionState.textContent = actionText(node);
 }
 
-/* ---------- 优先关注 ---------- */
+/* ---------- 当前重点一行（Step 8-3｜B4） ---------- */
 
 /**
- * 重画顶部那条「优先关注」。
+ * 重画看板顶部那一行。
  *
- * 挑哪个节点全交给 logic.js 的 pickPriority，这个函数只负责把结果摆到页面上，
- * 一个比较都不做 —— 比较的规矩只有一份，写在 logic.js 里，那边有单独的测试。
+ *   「dorm-b｜处理中｜温度正在下降」
+ *
+ * 挑哪个节点、那句话怎么拼，全交给 logic.js 的 buildFocus，这个函数只负责
+ * 把结果摆到页面上，一个比较都不做 —— 比较的规矩只有一份，写在 logic.js 里，
+ * 那边有单独的测试。这里再拼一份的话，页面上迟早出现「这一行说的是 dorm-b、
+ * 语音念的是 dorm-c」这种自相矛盾。
  *
  * 整块用 innerHTML 重画，和卡片一样。所以点击也是事件委托，
  * 挂在容器上，不给每次重画出来的那个按钮单独绑。
@@ -325,67 +336,101 @@ function renderAction() {
  * 它跟着 currentNodeId 变（要标出「正在查看」），所以切节点时也得重画 ——
  * 这也是它不能只跟 handleMessage 走的原因。
  *
- * pick 可以不传，那就自己算一遍。传进来的唯一地方是 handleMessage ——
- * 那边本来就要拿这个结果去记事件（见第 7 步），算两遍纯属浪费，
- * 而且两份结果摆在同一个函数里，读的人会开始怀疑它们会不会不一样。
- * 别的地方（切节点、清空、启动）传不传都行：数据没变，答案就没变。
- *
- * @param {{nodeId: string, reason: string}|null} [pick] 已经算好的结果
+ * 【为什么状态图标还在，状态两个字却没了】那一行的文字里没有「偏热」，
+ * 但颜色不能就此单独表意（项目里状态色一律配图标 + 文字）。所以这里放一个
+ * **形状**（太阳 / 雪花 / 水滴 / 对勾）：形状本身就把状态区分开了，颜色只是
+ * 让它在三步之外也能被看见。这也是卡片和 7-1 那条栏一直在用的同一套 ICONS。
  */
-function renderPriority(pick) {
-  const chosen = pick === undefined ? pickPriority(nodes) : pick;
+function renderFocus() {
+  const pick = pickPriority(nodes);
 
   /* 没挑出人来有两种情况，说的话不能一样 ——
-     「三个都正常」在一条数据都没收到时是句假话：页面刚打开、还没连上
-     broker 的那几秒，那三个节点是**不知道**，不是正常。
-     pickPriority 两种情况都返回 null（约定就是「没有要优先的」），
-     所以这层区分放在画的地方做，纯函数那边不用多一个返回值。 */
-  if (!chosen) {
-    const hasData = NODE_IDS.some(function (id) { return nodes[id].latest !== null; });
-    el.priority.innerHTML = '<p class="focus focus--calm">'
-      + '<span class="focus-tag">优先关注</span>'
-      + '<span class="focus-text">' + (hasData
-        ? '三个节点都正常，没有需要优先处理的宿舍'
-        : '还没有收到任何节点的数据') + '</span>'
+     「都正常」在一条数据都没收到时是句假话：页面刚打开、还没连上 broker 的
+     那几秒，那三个节点是**不知道**，不是正常。pickPriority 两种情况都返回 null
+     （约定就是「没有要优先的」），所以这层区分由 buildFocus 那侧做。
+     这里只负责画，不管那句该说什么。 */
+  if (!pick) {
+    el.focus.innerHTML = '<p class="focus focus--calm">'
+      + '<span class="focus-tag">当前重点</span>'
+      + '<span class="focus-text">' + esc(buildFocus(nodes)) + '</span>'
       + '</p>';
     return;
   }
 
   /* 颜色跟着这个节点的状态走，和卡片用同一套 class、同一套状态色。
-     状态色是保留色，所以这里必须配着文字用 —— 那句 reason 里本来就写着
-     「偏热」两个字，颜色只是让它在三步之外也能被看见。 */
-  const view = viewFor(nodes[chosen.nodeId].latest.status);
-  const current = chosen.nodeId === currentNodeId;
+     状态色是保留色，所以那个图标永远配着形状一起出现，不靠颜色单独表意。 */
+  const view = viewFor(nodes[pick.nodeId].latest.status);
+  const current = pick.nodeId === currentNodeId;
 
-  el.priority.innerHTML = '<button class="focus ' + view.cls
+  el.focus.innerHTML = '<button class="focus ' + view.cls
     + (current ? ' is-active' : '') + '"'
-    + ' type="button" data-node="' + esc(chosen.nodeId) + '" aria-pressed="' + current + '">'
-    + '<span class="focus-tag">优先关注</span>'
-    + '<span class="focus-text">' + esc(chosen.reason) + '</span>'
+    + ' type="button" data-node="' + esc(pick.nodeId) + '" aria-pressed="' + current + '">'
+    + '<span class="focus-tag">当前重点</span>'
+    + '<span class="focus-icon" aria-hidden="true">' + ICONS[view.icon] + '</span>'
+    + '<span class="focus-text">' + esc(buildFocus(nodes)) + '</span>'
     + '<span class="focus-state">' + (current ? '正在查看' : '查看详情') + '</span>'
     + '</button>';
 }
 
-/* ---------- 当前总览 + 判断依据（Step 8-1） ---------- */
+/* ---------- 语音提醒（Step 8-3｜B4） ---------- */
+
+/* 语音合成用浏览器自带的 speechSynthesis。和 3-2 的语音识别一样，
+   Chrome / Edge / Safari 都有，Firefox 也有。念的是**当前最重要的一句**，
+   不是把三个宿舍从头到尾念一遍 —— 声音是线性的，说过就过去了，
+   念三段话听的人只记得住最后一句。 */
+const SPEECH_LANG = 'zh-CN';
+
+function setSpeakNote(text) {
+  el.speakNote.textContent = text;
+}
 
 /**
- * 重画 B1 总览和 B2 依据这两句话。
+ * 浏览器支不支持语音合成。
  *
- * 两句都由 logic.js 现算，这里只负责贴上去，一个字都不拼 —— 拼的话就得
- * 先知道什么是「需要关注」、谁算「重点」，而那些规矩在 logic.js 里
- * 有单独的测试。这里再拼一份，页面上迟早会出现「上面说 2 个需要关注、
- * 下面只列出 1 个」这种自相矛盾。
- *
- * 用 textContent 而不是 innerHTML：这两句是纯文字，没有任何标签要解析，
- * 过一遍 innerHTML 只会多一个「哪天节点名里混进一个 < 就把版面撕了」的口子
- * （节点名是从 topic/报文里读来的，不是我们写的常量）。
- *
- * 它不跟着 currentNodeId 变（说的是三个节点的整体，不是当前选中的那个），
- * 所以切节点时不必重画，只有数据变了才要。
+ * 两个都要查：Chrome 上 speechSynthesis 一直存在，但 SpeechSynthesisUtterance
+ * 是个构造函数，缺了它 new 出来就是个 TypeError。少查一个的话，
+ * 不支持的环境里点一下按钮就是一条未捕获的异常 —— 按钮看着能用，按下去什么也没有。
  */
-function renderInsight() {
-  el.overview.textContent = buildOverview(nodes);
-  el.reasons.textContent = buildReasons(nodes);
+function speechSupported() {
+  return typeof window.speechSynthesis !== 'undefined'
+    && typeof window.SpeechSynthesisUtterance === 'function';
+}
+
+/**
+ * 念一遍当前最重要的一句提醒。
+ *
+ * **每次都现算**，不缓存上一句 —— 念之前数据可能已经变了，念一句旧的比不念更糟。
+ *
+ * 先 cancel() 再 speak()：连点两次的话，第二句会老老实实排在队列里等着，
+ * 等第一句念完（好几秒）它才开口，而那时候念的是**按下按钮那一刻**算出来的话，
+ * 早就不算数了。掐掉上一句、立刻念最新的，才符合「念的是此刻的重点」。
+ *
+ * 无论成功还是失败，都把念的内容写到按钮下面那行 —— 静音、没音箱、
+ * 声音太小的时候，那一行是唯一能确认「它到底念了什么」的地方。
+ */
+function speakAlert() {
+  const text = buildAlert(nodes);
+
+  if (!speechSupported()) {
+    setSpeakNote('这个浏览器不支持语音合成（window.speechSynthesis 不存在）。'
+      + '要念的是：' + text);
+    return;
+  }
+
+  window.speechSynthesis.cancel();
+
+  const utterance = new window.SpeechSynthesisUtterance(text);
+  utterance.lang = SPEECH_LANG;
+
+  /* 出错也要说出来。原始的错误码写在最前面 —— 解释文案可能对不上，错误码不会骗人
+     （和 3-2 那张 VOICE_ERRORS 表同一条原则）。 */
+  utterance.onerror = function (event) {
+    const code = event && event.error ? event.error : 'unknown';
+    setSpeakNote('朗读失败（' + code + '）。要念的是：' + text);
+  };
+
+  window.speechSynthesis.speak(utterance);
+  setSpeakNote('正在朗读：' + text);
 }
 
 /* ---------- 事件记录 ---------- */
@@ -544,11 +589,16 @@ function renderScene() {
      空白或者半成品的样子，看的人分不清是「还没收到」还是「页面坏了」。 */
   if (!node.latest) {
     dorm3d.updateScene('正常');
-    dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：还没有收到数据');
+    dorm3d.setLabel('当前宿舍：' + currentNodeId + '（还没有收到数据）');
   } else {
-    const applied = dorm3d.updateScene(node.latest.status);
-    dorm3d.setLabel('当前宿舍：' + currentNodeId + '｜状态：' + applied
-      + '｜' + fmt(node.latest.temperature) + '℃ / ' + fmt(node.latest.humidity) + '%');
+    dorm3d.updateScene(node.latest.status);
+    /* 标签上**只留宿舍名**（8-3 改的）。原来这里还写着状态和温湿度，
+       那是把卡片上的信息又抄了一遍 —— 而这一行落在画面正中间，
+       一眼看过去分不清哪个是「场景」哪个是「文字面板」。
+       分工是这样：宿舍名是场景答不出来的（画面里只有一间屋，不说不知道是哪个），
+       所以留在这儿；「这间怎么了」交给画面自己说（地板颜色、窗户开合、风扇转不转）；
+       温湿度是卡片的事，3D 一个字都不重复。 */
+    dorm3d.setLabel('当前宿舍：' + currentNodeId);
   }
 
   /* 风扇。两个来源，都是这个节点自己的字段：
@@ -563,6 +613,28 @@ function renderScene() {
      位置必须在 updateScene **之后**：scene.js 里写着「后调用的那次为准」，
      放在前面会被 updateScene 自己那次盖掉。 */
   if (node.handling !== '无') dorm3d.setFanOn(true);
+
+  /* 切节点之后那圈「当前重点」的环也要跟着改口 */
+  renderFocusMark();
+}
+
+/**
+ * 只更新「当前重点」那圈标记，画面其余部分一动不动。
+ *
+ * 单独一个函数，是因为它和「重画场景」的**时机不一样**：
+ *   场景只跟当前选中的那个宿舍有关 —— 收到别的节点的报文时一次都不该动
+ *   （动了屏幕上就会写着 dorm-a、画的却是 dorm-b）；
+ *   而「谁是重点」是**全局**的事 —— dorm-b 的一条数据就可能让正在看的
+ *   dorm-a 不再是重点，那圈环得当场灭掉。
+ * 两件事捆在一起写的话，后一种情况就只能靠「碰巧也在看那个节点」才更新得过来。
+ *
+ * 它不读 currentNodeId 以外的东西，也不改任何数据 —— 就是个开关。
+ */
+function renderFocusMark() {
+  if (!dorm3d) return;
+
+  const pick = pickPriority(nodes);
+  dorm3d.setFocus(!!pick && pick.nodeId === currentNodeId);
 }
 
 /* ---------- 图表 ---------- */
@@ -730,9 +802,10 @@ function selectNode(nodeId) {
   renderAction();
   renderScene();
   renderCharts();
-  /* 「优先关注」栏本身不重算（异常状态一点没变），但要重画 ——
-     它上面标着「正在查看 / 查看详情」，那两个字跟着 currentNodeId 走。 */
-  renderPriority();
+  /* 顶部那一行的**内容**一个字都没变（谁是重点跟选中谁没关系），
+     但它上面标着「正在查看 / 查看详情」，那两个字跟着 currentNodeId 走，
+     所以还是得重画一次。 */
+  renderFocus();
 }
 
 /* ---------- 唯一的消息入口 ---------- */
@@ -875,7 +948,7 @@ function handleMessage(topic, payloadText) {
   }
 
   /* 7) 事件记录。开案和结案的判据就是上面第 5 步那段异常段的起止，
-      不另立一套 —— 否则「优先关注栏里说的这段」和「事件里记的这段」
+      不另立一套 —— 否则「顶部那一行说的这段」和「事件里记的这段」
       会出现两个对不上的起点，而它们说的明明是同一件事。 */
   if (wasAbnormal && node.abnormalCount === 0) {
     /* 正 -> 0：来了一条正常数据，这段结束了。写 recoverTime 和 result，
@@ -919,11 +992,15 @@ function handleMessage(topic, payloadText) {
      卡片和图表是「三个节点一起显示」，所以它们每次都刷；
      3D 是「只显示当前选中的那个」，所以它要挑。 */
   if (record.nodeId === currentNodeId) renderScene();
+  /* 但「谁是重点」是全局的，收到哪个节点的报文都可能换人 ——
+     正在看的这间可能**因此不再是重点**，那圈环得当场灭掉。
+     所以这一句不带条件。 */
+  else renderFocusMark();
 
-  /* 「优先关注」也是每次都要重算的：这一条报文可能让它换了人，
-     也可能还是同一个人但时长和次数都变了（那句 reason 里写着）。
-     这里只算一次，算完喂给下面两个地方用 —— 上面那句 reason 和事件里
-     记的必须是**同一句话**。算两遍不只是白算，两份还可能对不上。 */
+  /* 这里算的 pick 只有一个去处：下面记事件时那句 reason。
+     8-3 之后页面顶上那一行**不读这个 pick**（它是 logic.js 里现拼的，
+     见下面 renderFocus 那段注释），所以别看到「算了却没人用」就想删 ——
+     事件里记的必须是 pickPriority 此刻的判断，不能是别处凑出来的。 */
   const pick = pickPriority(nodes);
 
   /* 被选中的那个节点，如果这一段还没记过「第一次被关注」，就把这一刻记上。
@@ -937,11 +1014,14 @@ function handleMessage(topic, payloadText) {
   }
 
   renderEvents();
-  renderPriority(pick);
-  /* B1 / B2 每次收到报文都重算。这两句里全是数字和节点名（「已持续 20 分钟」
-     「2 个需要关注」），缓存下来的话，页面上的总览会停在某一刻不再动，
-     而下面的卡片和栏里的数字一直在涨 —— 看着像数据不更新了。 */
-  renderInsight();
+  /* 顶部那一行每次收到报文都重算。它里面全是会变的东西（谁、在不在处理、
+     温度往哪走），缓存下来的话，页面上的重点会停在某一刻不再动，
+     而下面的卡片一直在涨 —— 看着像数据不更新了。
+
+     这里**不把上面算好的 pick 传进去**：那一行是 logic.js 现拼的
+     （buildFocus 内部自己走一遍 pickPriority），多算一遍不值一提，
+     而多一条「把结果传进去」的路，就多一个「传岔了」的机会。 */
+  renderFocus();
   return true;
 }
 
@@ -1016,10 +1096,13 @@ function clearAll() {
   renderAction();
   renderScene();
   renderCharts();
-  renderPriority();
+  renderFocus();
   renderEvents();
-  renderInsight();
   renderLog();
+  /* 清空之后「要念的那一句」也变了（变回「还没有收到任何节点的数据」），
+     但按钮下面那行字是**上一次念的内容**，不清的话它会一直挂在那儿，
+     看上去像是刚刚念过。 */
+  setSpeakNote('');
 }
 
 /* ---------- MQTT ---------- */
@@ -1155,14 +1238,19 @@ el.cards.addEventListener('click', function (e) {
   if (card && card.dataset.node) selectNode(card.dataset.node);
 });
 
-/* 「优先关注」那条也是重绘的，同样用委托。
+/* 顶部那一行也是重绘的，同样用委托。
    它跟卡片走的是**同一条路**（selectNode）—— 点它和点对应那张卡片
    没有任何区别，卡片、趋势图、3D 一起切过去。
-   全正常时那里是个没有 data-node 的 <p>，这个判断顺手把它挡掉了。 */
-el.priority.addEventListener('click', function (e) {
+   没有重点的时候那里是个没有 data-node 的 <p>，这个判断顺手把它挡掉了。 */
+el.focus.addEventListener('click', function (e) {
   const focus = e.target && e.target.closest ? e.target.closest('.focus') : null;
   if (focus && focus.dataset.node) selectNode(focus.dataset.node);
 });
+
+/* 「语音提醒」。念什么完全由 buildAlert 现算 —— 这里一个字都不拼。
+   它不读 currentNodeId：提醒说的是**全局的重点**，不是「正在看的那个」，
+   跟顶部那一行、优先关注记进事件的那条 reason 是同一个来源。 */
+el.speak.addEventListener('click', speakAlert);
 
 /* 「开启风扇 / 通风」。作用在**当前正在看的那个节点**上。
    写完这四个字段之后，卡片、详情区那行字、3D 里的风扇都是下一次
@@ -1191,11 +1279,11 @@ el.actionFan.addEventListener('click', function () {
   renderAction();
   renderScene();
   renderEvents();
-  /* B1 总览里会如实报出「（风扇已开启，处理中）」，所以按了按钮就得重画一次。
-     漏掉这一句的话，那句状态要等到**下一条报文进来**才出现 —— 中间那段时间
-     卡片上写着「处理中｜风扇已开启」、上面的总览里却什么都没有，
+  /* 顶部那一行里有「处理中」这三个字，所以按了按钮就得重画一次。
+     漏掉这一句的话，那两个字要等到**下一条报文进来**才出现 —— 中间那段时间
+     卡片上写着「处理中｜风扇已开启」、上面那一行里却什么都没有，
      看的人会以为按钮没生效。 */
-  renderInsight();
+  renderFocus();
 });
 
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1206,9 +1294,8 @@ renderDetailHead();
 renderAction();
 renderScene();
 renderCharts();
-renderPriority();
+renderFocus();
 renderEvents();
-renderInsight();
 renderLog();
 
 /* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，

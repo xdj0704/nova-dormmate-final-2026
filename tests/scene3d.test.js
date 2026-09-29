@@ -60,6 +60,7 @@ function check(label, cond, extra) {
 const STUB_SOURCE = `
 export const log = {
   renderers: [], scenes: [], cameras: [], lights: [], meshes: [], groups: [], clocks: [],
+  basicMaterials: [],
 };
 
 export const FrontSide = 0;
@@ -185,6 +186,13 @@ export class CylinderGeometry extends Geometry {
     super('Cylinder', { radiusTop: rt, radiusBottom: rb, height: h, radialSegments: seg });
   }
 }
+/* 「当前重点」那圈环用的（Step 8-3）。参数名照抄真 three 的签名，
+   好让下面「内径 < 外径」那条断言读起来和源码里写的是一个意思。 */
+export class RingGeometry extends Geometry {
+  constructor(inner, outer, seg) {
+    super('Ring', { innerRadius: inner, outerRadius: outer, thetaSegments: seg });
+  }
+}
 
 export class MeshStandardMaterial {
   constructor(opts) {
@@ -192,6 +200,20 @@ export class MeshStandardMaterial {
     Object.assign(this, o);
     this.color = new Color(o.color);
     this.disposed = 0;
+  }
+  dispose() { this.disposed++; }
+}
+
+/* 不受光材质。「当前重点」那圈环用它（Step 8-3）——
+   环是**标记**，不是场景里的东西，不该跟着屋里的光照变明暗。
+   参数全走 Object.assign，所以 transparent / opacity / side 都能原样读回来。 */
+export class MeshBasicMaterial {
+  constructor(opts) {
+    const o = opts || {};
+    Object.assign(this, o);
+    this.color = new Color(o.color);
+    this.disposed = 0;
+    log.basicMaterials.push(this);
   }
   dispose() { this.disposed++; }
 }
@@ -329,6 +351,7 @@ let pivotRef = null;
 let paneRef = null;
 let fanRef = null;
 let fanMountRef = null;
+let focusRingRef = null;
 
 (async function main() {
   console.log('== 3d/scene.js ==\n');
@@ -402,6 +425,7 @@ let fanMountRef = null;
     log.meshes.length = 0;
     log.groups.length = 0;
     log.clocks.length = 0;
+    log.basicMaterials.length = 0;
   };
 
   /* ===== B. 容器与覆盖层 ===== */
@@ -484,6 +508,7 @@ let fanMountRef = null;
     paneRef = h.windowPane;
     fanRef = h.fan;
     fanMountRef = h.fanMount;
+    focusRingRef = h.focusRing;
 
     const find = (n) => sceneRef.findByName(n);
 
@@ -663,9 +688,67 @@ let fanMountRef = null;
       && sceneRef.children.indexOf(pivotRef) >= 0
       && sceneRef.children.indexOf(fanMountRef) >= 0);
 
-    // 床 2 + 窗户 1 + 风扇 5（1 中心 + 3 扇叶 + 1 支架）+ 地板 1 + 大地面 1 + 墙 2 = 12
+    /* ---- 「当前重点」标记环（Step 8-3）---- */
+
+    // 3D 在这个项目里承担的是「哪个空间需要关注」。画面本身已经表达了状态
+    // （地板颜色、窗户开合、风扇转不转），但「这三个宿舍里哪个是当前重点」
+    // 是**全局**的事，画里只有一间屋，靠画面自己说不出来 —— 所以加这圈环。
+    //
+    // 位置贴着地、躺平，套在屋子外沿：看着像给这间屋画了个记号，
+    // 而不是又往屋里塞了一件家具。
+    const ring = find('focus-ring');
+    check('场景里有一圈「当前重点」的环，句柄上也能拿到（dashboard 靠它开关）',
+      !!ring && ring === focusRingRef);
+    check('那圈环是一个 Ring 几何体（不是靠改地板颜色冒充的）',
+      !!ring && ring.geometry.kind === 'Ring',
+      ring && ring.geometry.kind);
+    check('★ 内径小于外径（反过来的话什么也画不出来，而且不会有任何报错）',
+      !!ring && ring.geometry.parameters.innerRadius < ring.geometry.parameters.outerRadius,
+      ring && (ring.geometry.parameters.innerRadius + ' < '
+        + ring.geometry.parameters.outerRadius));
+    check('★ 环平铺在地上（绕 X 轴转 -90°；不转的话它是立着的一堵墙）',
+      !!ring && Math.abs(ring.rotation.x + Math.PI / 2) < 1e-9, ring && ring.rotation.x);
+    check('★ 环贴着地但不陷进去（y 略大于 0；等于 0 会和地板打架，看着一闪一闪）',
+      !!ring && ring.position.y > 0, ring && ring.position.y);
+    /* 环在屋里、贴着房间边缘但不到墙根。地板是 10×10（-5 ~ +5），
+       外径 4.75 落在里面一点 —— 这样它读起来是「这间屋子被圈住了」，
+       而不是压在地板缝上，也不是跑到屋外去。半宽从地板的几何体上取，
+       不写死 5：哪天屋子改大了，这两条跟着一起对。 */
+    const floorHalf = floorRef.geometry.parameters.width / 2;
+    check('★ 环比地板窄一点（不到墙根，免得压在地板缝上）',
+      !!ring && ring.geometry.parameters.outerRadius < floorHalf,
+      ring && ring.geometry.parameters.outerRadius + ' < ' + floorHalf);
+    check('★ 但又足够靠外（差不多是屋子的大小，不是地板中央画个小圈）',
+      !!ring && ring.geometry.parameters.outerRadius > floorHalf * 0.8,
+      ring && ring.geometry.parameters.outerRadius);
+    check('环是半透明的（盖在地板上，不该把地板整个遮掉）',
+      !!ring && ring.material.transparent === true && ring.material.opacity < 1,
+      ring && ring.material.opacity);
+    // 环躺平之后只有一面朝上。相机绕到屋后、俯角压得很低时看到的是背面，
+    // 单面材质那时候会整个消失 —— 所以两面都要画。
+    check('两面都画（相机转到背面时不会凭空消失）',
+      !!ring && ring.material.side === stub.DoubleSide,
+      ring && ring.material.side);
+    check('★ 一开始是藏着的（谁都不是重点，不该先亮着）',
+      !!ring && ring.visible === false, ring && ring.visible);
+    // 环是**标记**，不是屋里的一件东西：跟着光照变明暗的话，偏冷（屋里暗）
+    // 的时候这圈环也会变暗 —— 而那时它可能正是最该被看见的时候。
+    check('★ 环用的是不受光材质（MeshBasicMaterial，不跟着屋里光照变明暗）',
+      !!ring && log.basicMaterials.indexOf(ring.material) >= 0);
+    // 颜色特意**不用**那四个状态色（dashboard/style.css 里的 --status-*）：
+    // 它是「看这里」的指针，不是第五种状态。借了状态色的话，看的人会以为
+    // 那圈环也在说「偏热 / 偏湿」，而它说的其实是「这三个宿舍里先看这个」。
+    // （四个状态色写在这里是**照抄** style.css 的当前值 —— 那边改了颜色，
+    //  这一条就会红，正好提醒人回来对一眼。）
+    const STATUS_COLORS = [0x0ca30c, 0xfab219, 0xec835a, 0xd03b3b];
+    check('★ 环的颜色不是四个状态色里的任何一个（它是指针，不是第五种状态）',
+      !!ring && STATUS_COLORS.indexOf(ring.material.color.hex) < 0,
+      ring && '0x' + ring.material.color.hex.toString(16));
+
+    // 床 2 + 窗户 1 + 风扇 5（1 中心 + 3 扇叶 + 1 支架）+ 地板 1 + 大地面 1 + 墙 2
+    //  + 「当前重点」那圈环 1（Step 8-3）= 13
     check('场景里的网格数量正好是搭出来的这些（没有漏 add、也没有多建）',
-      log.meshes.length === 12, log.meshes.length + ' 个');
+      log.meshes.length === 13, log.meshes.length + ' 个');
   }
 
   /* ===== E. 灯光 ===== */
@@ -979,9 +1062,74 @@ let fanMountRef = null;
     sceneHandle.setFanOn(false);
   }
 
-  /* ===== K. setLabel ===== */
+  /* ===== K. setFocus（当前重点标记环）===== */
 
-  console.log('\nK. setLabel');
+  console.log('\nK. setFocus');
+
+  {
+    // 和 setFanOn 一样是个纯开关：只改 visible，不动别的任何东西。
+    // dashboard 那边每收到一条报文都可能调它一次（谁是重点随时会换人），
+    // 所以必须足够轻、也必须幂等 —— 重复开重复关不该有任何副作用。
+    check('setFocus(true) 返回 true', sceneHandle.setFocus(true) === true);
+    check('setFocus(false) 返回 false', sceneHandle.setFocus(false) === false);
+    check('空字符串归一化成 false（返回的是布尔，不是原值）',
+      sceneHandle.setFocus('') === false);
+    check('0 归一化成 false', sceneHandle.setFocus(0) === false);
+    check('非空字符串是真值（所以别传 \'false\' 这种字符串）',
+      sceneHandle.setFocus('on') === true);
+
+    sceneHandle.setFocus(true);
+    check('★ 开了之后环是可见的', focusRingRef.visible === true);
+    sceneHandle.setFocus(false);
+    check('★ 关了之后环藏起来', focusRingRef.visible === false);
+
+    /* 它只管那一圈环，不许顺手把场景改成别的样子 ——
+       「谁是重点」和「这间宿舍现在什么状态」是两件事：
+       收到别的节点的报文时画面一步都不该动，只有环要跟着重算。
+       这里把「别的都没动」钉住，dashboard 那边才敢分开调。 */
+    const before = {
+      bg: sceneRef.background.hex,
+      floor: floorRef.material.color.hex,
+      pivot: pivotRef.rotation.y,
+      fanSpin: fanRef.rotation.z,
+      label: envRef.host.children.find((c) => c.className === 'scene-label').textContent,
+    };
+    sceneHandle.setFocus(true);
+    sceneHandle.setFocus(false);
+    sceneHandle.setFocus(true);
+    check('★ 只动 visible，不碰背景色', sceneRef.background.hex === before.bg);
+    check('★ 只动 visible，不碰地板颜色（那是状态的表达）',
+      floorRef.material.color.hex === before.floor, floorRef.material.color.hex);
+    check('★ 只动 visible，不碰窗户开合', pivotRef.rotation.y === before.pivot);
+    check('★ 只动 visible，不碰风扇角度', fanRef.rotation.z === before.fanSpin);
+    check('★ 只动 visible，不碰覆盖层文字',
+      envRef.host.children.find((c) => c.className === 'scene-label').textContent
+      === before.label);
+
+    /* 幂等：连着开三次和开一次一样，连着关三次和关一次一样。
+       dashboard 每次收到报文都会重算一遍（大多数时候结论和上次相同），
+       不幂等的话那圈环会闪。 */
+    sceneHandle.setFocus(true);
+    sceneHandle.setFocus(true);
+    const onRepeat = focusRingRef.visible;
+    sceneHandle.setFocus(false);
+    sceneHandle.setFocus(false);
+    check('★ 连着开三次、关三次，结果和只做一次一样（幂等）',
+      [onRepeat, focusRingRef.visible], [true, false]);
+
+    // 它和状态无关：偏热的时候也关得掉、正常的时候也开得起来。
+    // 一旦写成「按状态决定亮不亮」，那圈环就不再表示「谁是重点」了。
+    const st = sceneHandle.updateScene(mod.STATUS.HOT);
+    sceneHandle.setFocus(true);
+    check('状态是偏热时照样能开（环和状态是两件事）',
+      [st === mod.STATUS.HOT, focusRingRef.visible], [true, true]);
+    sceneHandle.setFocus(false);
+    sceneHandle.updateScene(mod.STATUS.NORMAL);
+  }
+
+  /* ===== L. setLabel ===== */
+
+  console.log('\nL. setLabel');
 
   {
     const label = envRef.host.children.find((c) => c.className === 'scene-label');
@@ -1006,9 +1154,9 @@ let fanMountRef = null;
       label.textContent.indexOf('正常') >= 0, label.textContent);
   }
 
-  /* ===== L. dispose ===== */
+  /* ===== M. dispose ===== */
 
-  console.log('\nL. dispose');
+  console.log('\nM. dispose');
 
   {
     // 特意挑两个**嵌在 Group 里**的零件：床垫在 bed 里、扇叶在 fan 里。
@@ -1056,9 +1204,9 @@ let fanMountRef = null;
     check('dispose 之后再 resize 不会再有动作', rendererRef.sizes.length === sizeBefore);
   }
 
-  /* ===== M. index.html ===== */
+  /* ===== N. index.html ===== */
 
-  console.log('\nM. index.html');
+  console.log('\nN. index.html');
 
   {
     const html = fs.readFileSync(HTML_FILE, 'utf8');
@@ -1135,9 +1283,9 @@ let fanMountRef = null;
       /#scene\s*\{[^}]*height:/.test(bare));
   }
 
-  /* ===== N. 随包的文件 ===== */
+  /* ===== O. 随包的文件 ===== */
 
-  console.log('\nN. 随包的文件');
+  console.log('\nO. 随包的文件');
 
   {
     check('本地 three.module.js 在 3d/lib/ 里（断网时的退路）', fs.existsSync(LIB_FILE));

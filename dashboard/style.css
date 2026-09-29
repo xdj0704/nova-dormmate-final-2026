@@ -180,10 +180,36 @@ button:focus-visible {
   color: var(--text-secondary);
 }
 
-/* ---------- 优先关注 ---------- */
+/* ---------- 当前重点一行（Step 8-3｜B4） ---------- */
 
-/* 只在面板最上面留一行；下面卡片区自己带 margin-bottom，这里补上距离 */
-.priority { margin-bottom: 18px; }
+/* 顶部这块面板里只有一行的位置。它是页面上第一块东西，所以不再额外留上边距；
+   下边距由 .panel 自己带（见上面 .panel 那条）。 */
+.focus-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 那一行和「语音提醒」按钮并排。按钮 flex:0 0 auto，不管左边那句话有多长，
+   它都待在右上角 —— 位置固定的按钮才找得快。 */
+.focus-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.focus-row .focus-slot { flex: 1 1 auto; min-width: 0; }
+
+/* 念的是哪一句。用弱色、小一号：它是给「没听见」或「想确认」的人看的，
+   不是每时每刻都要占注意力的东西。空着的时候不占高度。 */
+.speak-note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.speak-note:empty { display: none; }
 
 /* 全正常时是个 <p>，有优先节点时是个 <button>。
    两者共用这套外观 —— 换的只是能不能点，不是整块版面的样子；
@@ -215,7 +241,7 @@ button.focus:hover { border-color: var(--text-muted); }
   box-shadow: 0 0 0 1px var(--text-primary) inset;
 }
 
-/* 「优先关注」这个标签。和卡片上那个「查看中」同一套做法：
+/* 「当前重点」这个标签。和卡片上那个「查看中」同一套做法：
    黑底白字的小胶囊，不靠颜色单独表意。 */
 .focus-tag {
   flex: 0 0 auto;
@@ -225,6 +251,20 @@ button.focus:hover { border-color: var(--text-muted); }
   color: var(--page);
   font-size: 11px;
   font-weight: 600;
+}
+
+/* 状态图标（太阳 / 雪花 / 水滴 / 对勾）。
+   8-3 把「偏热」那两个字从这一行里去掉了（分工），但**颜色不能就此单独表意** ——
+   所以留着这个图标：形状本身就把四种状态区分开了，颜色只是让它在三步之外
+   也能被看见。和卡片、和 7-1 那条栏用的是同一套 ICONS。
+
+   align-self: center 是必须的：这一行是 baseline 对齐（标签、正文、右端那三个字
+   要坐在同一条基线上），而 SVG 的基线在它自己的底边，按基线摆会整个往下栽。 */
+.focus-icon {
+  flex: 0 0 auto;
+  align-self: center;
+  display: inline-flex;
+  color: var(--c);
 }
 
 /* 全正常时标签退成灰的：这条不是警报，别抢注意力 */
@@ -462,35 +502,6 @@ button.focus:hover { border-color: var(--text-muted); }
   border-left: 3px solid var(--status-critical);
   border-radius: 8px;
   color: var(--status-critical);
-}
-
-/* ---------- 当前总览 + 判断依据（Step 8-1） ---------- */
-
-/* 这两句是整段话，不是标签也不是数字，所以行高给得比正文松一点 ——
-   句子里混着中文和「20 分钟」这种数字，行距紧了会挤成一团。
-   用 text-secondary 而不是 text-primary：它们是**解释**，
-   要读的时候读得到、不读也不挡着卡片和图表。 */
-.insight {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.75;
-  color: var(--text-secondary);
-}
-
-/* 同一张面板里的第二块（判断依据）。比 .panel-head h2 小一号、淡一档，
-   靠一条细线和上面那句总览分开 —— 两块内容连着读，但不是一个标题下的
-   两个子项，所以给的是分隔线而不是缩进。 */
-.panel-head--sub {
-  padding-top: 16px;
-  margin-top: 18px;
-  margin-bottom: 12px;
-  border-top: 1px solid var(--hairline);
-}
-
-.panel-head--sub h2 {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-muted);
 }
 
 /* ---------- 3D 视图 ---------- */

@@ -54,6 +54,26 @@ export const FAN_SPIN = 7;
  */
 export const WINDOW_OPEN_ANGLE = -Math.PI / 2.5;
 
+/**
+ * 「当前重点」标记环的颜色。
+ *
+ * 特意**不用**那四个状态色（--status-good/warning/serious/critical）。
+ * 状态色是保留色：偏热是红的、偏湿是橙的，那是「这间宿舍怎么了」。
+ * 这个环说的是另一件事 —— 「要看的是这一间」，是个**指路**的记号，
+ * 和严重程度无关。拿状态色去画它，看的人会以为环的颜色也在报状态，
+ * 而它换不换颜色其实只跟「谁是重点」有关。
+ *
+ * 值就是 style.css 里的 --focus（输入框聚焦环那个「纯 UI 用色，不代表任何状态」）。
+ * 这里写死一份、不读 CSS 变量：scene.js 要能在没有真实 DOM 的测试里跑起来，
+ * 读 getComputedStyle 会把这条依赖引进测试。改样式时两处一起改。
+ */
+export const FOCUS_COLOR = 0x2a78d6;
+
+/* 环的内外半径。地板是 10×10（-5 ~ +5），环贴着房间边缘但不到墙根，
+   这样它读起来是「这间屋子被圈住了」，而不是压在地板缝上。 */
+const FOCUS_RING_INNER = 4.35;
+const FOCUS_RING_OUTER = 4.75;
+
 /* ================= 尺寸 ================= */
 
 const ROOM = 10;      // 房间边长（X 和 Z 都是它）
@@ -97,10 +117,11 @@ const LOOK = {
  *            renderer: THREE.WebGLRenderer, floor: THREE.Mesh,
  *            ground: THREE.Mesh, bed: THREE.Group,
  *            windowPane: THREE.Mesh, windowPivot: THREE.Group,
- *            fan: THREE.Group, fanMount: THREE.Group,
+ *            fan: THREE.Group, fanMount: THREE.Group, focusRing: THREE.Mesh,
  *            updateScene: function(string): string,
  *            setFanOn: function(boolean): boolean,
  *            setLabel: function(string): string,
+ *            setFocus: function(boolean): boolean,
  *            dispose: function(): void}}
  * @throws {Error} 找不到容器、或这台设备没有可用的 WebGL
  */
@@ -235,6 +256,32 @@ export function createDorm3D(container) {
   floor.castShadow = false;      // 地面自己投自己只会出一身麻点
   floor.name = 'floor';
   scene.add(floor);
+
+  /* ================= 当前重点标记环（Step 8-3） ================= */
+
+  // 画面里这间宿舍正是「当前重点」时，地板上多一圈环。默认不出现。
+  //
+  // 为什么用**平躺的环**而不是把房间整体描个边：相机是斜着俯视的，地板在画面里
+  // 占的面积最大、遮挡最少，一圈环一眼就能看见；描边的话，两面墙是半透明的，
+  // 描出来的线会跟墙缝混在一起。
+  //
+  // 用 MeshBasicMaterial（不受光照影响）而不是 Standard：这是个**界面记号**，
+  // 不是场景里的一件东西。跟着灯光忽明忽暗的话，偏冷那段（两盏灯都偏蓝、
+  // 整体压暗）它就不显眼了，而「谁是重点」跟屋里冷不冷没有关系。
+  const focusRing = new THREE.Mesh(
+    new THREE.RingGeometry(FOCUS_RING_INNER, FOCUS_RING_OUTER, 64),
+    new THREE.MeshBasicMaterial({
+      color: FOCUS_COLOR, transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+    })
+  );
+  // RingGeometry 和地板一样躺在 XY 平面上，同样要绕 X 转 -90° 才放平。
+  focusRing.rotation.x = -Math.PI / 2;
+  // 抬 0.01 免得和地板共面闪烁（地面那一对用的是 0.02，这里小一号就够了 ——
+  // 环比地面小得多，边缘的斜视角度没那么刁）。
+  focusRing.position.y = 0.01;
+  focusRing.name = 'focus-ring';
+  focusRing.visible = false;
+  scene.add(focusRing);
 
   /* ================= 墙 ================= */
 
@@ -438,6 +485,28 @@ export function createDorm3D(container) {
   }
 
   /**
+   * 亮起 / 熄灭「当前重点」那圈标记。
+   *
+   * **和 updateScene 无关**，是两条独立的线：
+   *   updateScene  说「这间宿舍现在怎么了」（偏热 -> 地板红、风扇转）
+   *   setFocus     说「要看的就是这一间」（谁是当前重点）
+   * 所以它不放进 LOOK 表 —— 那张表是「状态 -> 外观」，而这个记号跟状态无关：
+   * 一个正常宿舍只要没别的异常，它也可以是当前重点吗？不会（重点只在异常里挑），
+   * 但**表里加一列 focus 会让「四种状态各自改什么」变得不容易一眼看全**，
+   * 而那正是那张表存在的意义。所以单独一个方法。
+   *
+   * 页面那边负责判断「当前画的这间是不是重点」—— scene.js 只认一个布尔值，
+   * 不知道 nodeId 是什么，也不该知道（那是看板的事）。
+   *
+   * @param {boolean} on 真值就亮
+   * @returns {boolean} 归一化之后的开关状态
+   */
+  function setFocus(on) {
+    focusRing.visible = !!on;
+    return focusRing.visible;
+  }
+
+  /**
    * 按状态改变场景外观。
    *
    * 四种状态各自改什么，全在上面那张 LOOK 表里，这里只负责照着贴上去。
@@ -536,7 +605,7 @@ export function createDorm3D(container) {
 
   return {
     scene, camera, renderer,
-    floor, ground, bed, windowPane, windowPivot, fan, fanMount,
-    updateScene, setFanOn, setLabel, dispose,
+    floor, ground, bed, windowPane, windowPivot, fan, fanMount, focusRing,
+    updateScene, setFanOn, setLabel, setFocus, dispose,
   };
 }

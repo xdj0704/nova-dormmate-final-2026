@@ -40,11 +40,11 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十三个（多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十六个（多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,'
   + 'beginEvent,markPriority,markAction,closeEvent,pickPriority,'
-  + 'buildOverview,buildReasons');
+  + 'buildOverview,buildReasons,tempTrend,buildFocus,buildAlert');
 /* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
    只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
    自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
@@ -61,6 +61,16 @@ check('★ ACTION_FAN 不导出（那串字只该从 logic.js 里出来一份）
     check('★ ' + name + ' 不导出（内部件：排序和说法各只留一份）',
       EXPORTS.includes(name), false);
   });
+
+/* 8-3 的内部件同理。trendText 是「上升/下降/持平」→ 那句话的唯一一份说法：
+   那一行和语音都用它，导出的话页面那边就能自己造第二种说法
+   （「温度在涨」/「温度上升」），同一件事两种说法而没人报错。
+   calmLine 是「没有重点时说什么」的唯一一份 —— 8-1 那两句里也各有一份类似的话，
+   但那两句归 report.html，页面上现在只剩 calmLine 这一份。 */
+['trendText', 'calmLine'].forEach(function (name) {
+  check('★ ' + name + ' 不导出（内部件：同一件事只留一种说法）',
+    EXPORTS.includes(name), false);
+});
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
@@ -94,14 +104,15 @@ vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
   nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority,
-  buildOverview, buildReasons } = context;
+  buildOverview, buildReasons, tempTrend, buildFocus, buildAlert } = context;
 
-check('十三个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
+check('十六个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
   beginHandling, nextHandling, beginEvent, markPriority, markAction, closeEvent,
-  pickPriority, buildOverview, buildReasons].map((f) => typeof f),
+  pickPriority, buildOverview, buildReasons, tempTrend, buildFocus, buildAlert]
+  .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function',
-  'function', 'function']);
+  'function', 'function', 'function', 'function', 'function']);
 
 /* ---------- 小工具 ---------- */
 
@@ -908,6 +919,237 @@ check('★ 总览和依据都不改传进来的 nodes（页面那边读的是同
    或随机成分，页面上就会出现两句对不上的话。 */
 check('★ 同样的输入连着算两遍，两句话一字不差',
   [buildOverview(TWO) === buildOverview(TWO), buildReasons(TWO) === buildReasons(TWO)],
+  [true, true]);
+
+/* ---------- J. Step 8-3：当前重点一行 + 语音提醒 ---------- */
+
+console.log('\n=== J. Step 8-3：当前重点一行 + 语音提醒 ===');
+
+/* 这一步是**信息分工**：页面上原来有三处在说「谁是重点」（7-1 那条栏、
+   B1 总览、B2 依据），8-3 并成看板顶部一行，剩下的细节分给 3D / 语音 /
+   report.html。所以这里测的是两个新出口各自「该说什么、不该说什么」。
+
+   两个函数都必须从 pickPriority 出发 —— 「谁是重点」只有一份实现。
+   两处各挑一次的话，页面上会出现「那一行说的是 dorm-b、语音念的是 dorm-c」，
+   而且不会有任何地方报错。J3 最后一组专门钉这一条。 */
+
+/**
+ * 一个带历史记录的节点。tempTrend 只看 history 的最后两条，
+ * 所以 history 的**方向**很关键：最后一个是「刚收到的那条」，
+ * 和页面里 history.push() 的方向一致（新的在后）。
+ *
+ * @param {number[]} temps 温度序列，最后一个是最新那条
+ * @param {Object} [opts] time / start / count / status / handling
+ */
+function traced(temps, opts) {
+  const o = opts || {};
+  const time = o.time || '2026-09-22 20:20:00';
+  const n = node(time, o.start || '2026-09-22 20:00:00',
+    o.count === undefined ? 2 : o.count, o.status || '偏热');
+  n.history = temps.map((t) => ({ time: time, temperature: t }));
+  if (o.handling) {
+    n.handling = o.handling;
+    n.action = '风扇已开启';
+  }
+  return n;
+}
+
+/* ---- J1. tempTrend：最近两条温度往哪走 ---- */
+
+check('★ 后一条比前一条高 -> 上升', tempTrend(traced([24, 26])), '上升');
+check('★ 后一条比前一条低 -> 下降', tempTrend(traced([26, 24])), '下降');
+check('★ 一样 -> 持平', tempTrend(traced([25, 25])), '持平');
+/* 只看最近两条。看更长的一段就成了「这一段的走势」，那是趋势图的事。 */
+check('★ 只看最近两条：前面跌得再狠，最近一次是涨的就是「上升」',
+  tempTrend(traced([30, 24, 26])), '上升');
+check('★ 反过来也一样：前面涨得再高，最近一次是跌的就是「下降」',
+  tempTrend(traced([18, 33, 31])), '下降');
+/* 比的是精确值，不设「小于 0.5℃ 算没变」那种容差 ——
+   设阈值要先定下来多少算没变，那是另一套规则，这一步不定；
+   而且真实数据里 24.9 → 25.0 确实就是在上升。 */
+check('★ 差 0.1℃ 也算上升（没有容差）', tempTrend(traced([24.9, 25])), '上升');
+check('★ 差 0.1℃ 也算下降', tempTrend(traced([25, 24.9])), '下降');
+
+/* 【只有一条记录时是空串，不是「持平」】这两件事不一样：
+   一条数据说不出「在往哪走」，说成「持平」就是把「不知道」说成了「没变」——
+   和 B1 那边「还没有收到数据 ≠ 正常」是同一条原则。 */
+check('★ 只有一条记录 -> 空串（说不出往哪走，不写成「持平」）',
+  tempTrend(traced([25])), '');
+check('一条记录都没有 -> 空串', tempTrend(traced([])), '');
+check('没有 history 字段 -> 空串，不炸', tempTrend(node('2026-09-22 20:20:00',
+  '2026-09-22 20:00:00', 2, '偏热')), '');
+check('history 不是数组 -> 空串，不炸', tempTrend({ history: '昨天' }), '');
+check('history 里有一项是 null -> 空串，不炸',
+  tempTrend({ history: [{ temperature: 25 }, null] }), '');
+check('温度不是有限数字 -> 空串（NaN 走进比较会得出「持平」这种假结论）',
+  [tempTrend({ history: [{ temperature: 25 }, { temperature: NaN }] }),
+    tempTrend({ history: [{ temperature: 25 }, { temperature: '26' }] }),
+    tempTrend({ history: [{ temperature: 25 }, {}] })], ['', '', '']);
+check('节点是 null / undefined / 空对象 -> 空串，不炸',
+  [tempTrend(null), tempTrend(undefined), tempTrend({})], ['', '', '']);
+
+/* ---- J2. buildFocus：看板顶部那一行 ---- */
+
+/* 平静时候那一行不带句号 —— 它不是一句话，是一个状态标签。
+   和 buildAlert（那一句是要念出来的）不一样，两边刻意各写各的标点。 */
+check('★ 一条数据都没有 -> 「还没有收到任何节点的数据」（不是「都正常」）',
+  buildFocus(NOBODY), '还没有收到任何节点的数据');
+check('★ 都正常 -> 「当前 3 个宿舍都正常」', buildFocus(ALL_CALM), '当前 3 个宿舍都正常');
+check('★ 只收到 2 个节点的数据 -> 两个数都报出来（第 3 个是不知道，不是正常）',
+  buildFocus(trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'), silent())),
+  '当前 2 个宿舍正常，另有 1 个还没有收到数据');
+check('nodes 是空对象 / undefined 也不炸',
+  [buildFocus({}), buildFocus(undefined)],
+  ['还没有收到任何节点的数据', '还没有收到任何节点的数据']);
+
+/* 有一条异常、只有一条数据：说不出往哪走，就只剩宿舍名。
+   拼不出来的那一段**整个不出现**，不留一个空串或两个连着的 ｜。 */
+check('★ 只有一条数据时只剩宿舍名（说不出「往哪走」就不说）',
+  buildFocus(ONE), 'dorm-b');
+check('★ 没有连着两个 ｜（空的那一段是整个不出现，不是拼个空串）',
+  buildFocus(ONE).includes('｜｜'), false);
+check('没有 ｜ 收尾 / 开头（段是拼上去的，不是占位符）',
+  [/｜$/.test(buildFocus(ONE)), /^｜/.test(buildFocus(ONE))], [false, false]);
+
+/* 规格里给的那个例子：谁、在不在处理、往哪走 */
+const BUSY = trio(calm('2026-09-22 20:00:00'),
+  traced([31, 30], { handling: '处理中' }),
+  calm('2026-09-22 20:00:00'));
+
+check('★ 三段拼起来就是规格里那个样子', buildFocus(BUSY), 'dorm-b｜处理中｜温度正在下降');
+check('★ 没按过按钮就没有「处理中」那一段',
+  buildFocus(trio(calm('2026-09-22 20:00:00'), traced([31, 30]),
+    calm('2026-09-22 20:00:00'))),
+  'dorm-b｜温度正在下降');
+/* 【「无」是字符串，所以它真的】上面那条用的是「没有 handling 这个字段」，
+   但页面里跑起来时不是那样：没按过按钮的节点，handling 就是字符串 '无'
+   （见 nextHandling / beginEvent）。所以这里不能只判 `if (node.handling)` ——
+   那样拼出来是「dorm-b｜无｜温度正在下降」，把「没人在处理」说成了一段内容。 */
+check('★ handling 是「无」（页面里没按过按钮就是这个值）-> 也不拼这一段',
+  buildFocus(trio(calm('2026-09-22 20:00:00'), traced([31, 30], { handling: '无' }),
+    calm('2026-09-22 20:00:00'))),
+  'dorm-b｜温度正在下降');
+/* 同一个坑，另一侧：handlingNote 用的是白名单（只认「处理中」），
+   所以语音那句本来就不会念出「无」。钉住这个不对称，免得日后统一成黑名单。 */
+check('★ 语音那句也不念「无」',
+  buildAlert(trio(calm('2026-09-22 20:00:00'), traced([31, 30], { handling: '无' }),
+    calm('2026-09-22 20:00:00'))).includes('无'),
+  false);
+check('★ 持平时的说法是「温度持平」，不是「温度正在持平」',
+  buildFocus(trio(calm('2026-09-22 20:00:00'), traced([31, 31], { handling: '处理中' }),
+    calm('2026-09-22 20:00:00'))),
+  'dorm-b｜处理中｜温度持平');
+
+/* 【这一行里没有状态】这是分工的结果，不是漏了：
+   状态由卡片徽章（颜色 + 形状 + 文字）、3D 场景、语音一起承担。
+   一行字里塞四样东西，就又变回 8-1 那种「两句话交代所有事」了。 */
+check('★ 这一行里不写状态（偏热/偏冷/偏湿一个都不出现）',
+  ['偏热', '偏冷', '偏湿'].map((s) => buildFocus(BUSY).includes(s)), [false, false, false]);
+/* 【也不写「风扇已开启」】开了什么是**空间动作**，3D 里风扇转着比一行字直观 ——
+   那正是 3D 该承担的部分。这一行只报「有没有人在处理」。 */
+check('★ 也不写「风扇已开启」（那是 3D 的事）',
+  [buildFocus(BUSY).includes('风扇已开启'), buildFocus(BUSY).includes('处理中')],
+  [false, true]);
+/* 一句原因也不写。它归 report.html ——那里才是交代来龙去脉的地方。 */
+check('★ 不写那句原因（「持续时间最长」之类一个都没有）',
+  buildFocus(BUSY).includes('已持续'), false);
+
+/* ---- J3. buildAlert：语音念的那一句 ---- */
+
+/* 只有一句 —— 这是这个出口的约束，不是偷懒：声音是线性的，说过就过去了，
+   没人能回头翻。念三段话，听的人只记得住最后一句。 */
+check('★ 一条数据都没有 -> 念的是「还没有收到数据」，不是「都正常」',
+  buildAlert(NOBODY), '还没有收到任何节点的数据。');
+check('★ 都正常 -> 念的是「都正常」', buildAlert(ALL_CALM), '当前 3 个宿舍都正常。');
+check('★ 平静时的两句以句号收尾（要念出来，得自成一句）',
+  [/。$/.test(buildAlert(NOBODY)), /。$/.test(buildAlert(ALL_CALM))], [true, true]);
+
+check('★ 一个异常：念的是「谁、什么状态、持续了多久」',
+  buildAlert(ONE), 'dorm-b 偏热已持续 20 分钟。');
+check('★ 有趋势就跟着念出来，自成一句',
+  buildAlert(trio(calm('2026-09-22 20:00:00'), traced([31, 30]),
+    calm('2026-09-22 20:00:00'))),
+  'dorm-b 偏热已持续 20 分钟，温度正在下降。');
+check('★ 正在处理就念出来（复用 handlingNote，和那一行、事件记录是同一份说法）',
+  buildAlert(BUSY), 'dorm-b 偏热已持续 20 分钟（风扇已开启，处理中），温度正在下降。');
+/* 念出来是「竖线」两个字，所以语音那一句里绝不能有 ｜ ——
+   这正是「两个出口不一样、不能共用一个字符串」的地方。 */
+check('★ 语音那句里没有 ｜（念出来是「竖线」）',
+  buildAlert(BUSY).includes('｜'), false);
+
+/* 【语音只说结果，不说排序依据】「是目前唯一的异常节点」「持续时间最长」
+   那套是 B2 依据的话，写在 report.html 里给人对着表格慢慢看。
+   念出来是一串听一遍就过去的字，交代不了「为什么不是别人」。 */
+check('★ 不念输赢的理由（不提别的宿舍、不说「唯一」）',
+  [buildAlert(ONE).includes('唯一'), buildAlert(TWO).includes('dorm-a'),
+    buildAlert(TWO).includes('持续最长')], [false, false, false]);
+check('两个都异常时也只念重点那一个，不把两个都念一遍',
+  [buildAlert(TWO), buildAlert(TWO).includes('dorm-c')],
+  ['dorm-b 偏热已持续 20 分钟。', false]);
+check('★ 每次都以句号收尾', /。$/.test(buildAlert(BUSY)), true);
+
+/* ---- 两个出口必须指向同一个人 ---- */
+
+[[TWO, '两个异常'], [FOUR, '四个节点'], [TIE, '时长打平'], [DEAD, '完全并列'],
+  [MIXED, '有节点没数据'], [ONE, '一个异常'], [RENAMED, '换过名字'], [ALL_BAD, '三个都不正常'],
+  [OUT_OF_ORDER, '键顺序和严重程度不一致'], [BUSY, '正在处理'], [ALL_CALM, '都正常'],
+  [NOBODY, '一条数据都没有']]
+  .forEach(function (item) {
+    const nodes = item[0];
+    const label = item[1];
+    const pick = pickPriority(nodes);
+    const line = buildFocus(nodes);
+    const spoken = buildAlert(nodes);
+
+    if (!pick) {
+      /* 没有重点时两边都不能凭空造一个出来：说的是同一句平静话，
+         只差头尾那点差别（一行不带句号、一句带）。 */
+      check('★ [' + label + '] 没有重点时，那一行和语音说的是同一件事',
+        [line + '。', spoken], [spoken, spoken]);
+      return;
+    }
+
+    /* 重点那个宿舍的名字必须出现在两个出口的最前面 ——
+       不是「包含」就行：包含的话，「dorm-b 不在重点里但被顺口提了一句」
+       也能过。这一行和这一句的开头就是答案本身。 */
+    check('★ [' + label + '] 那一行开头就是重点那个宿舍',
+      line.indexOf(pick.nodeId), 0);
+    check('★ [' + label + '] 语音那句开头也是同一个宿舍',
+      spoken.indexOf(pick.nodeId), 0);
+    check('★ [' + label + '] 两个出口指向的是 pickPriority 挑出来的那个人',
+      [line.indexOf(pick.nodeId), spoken.indexOf(pick.nodeId)], [0, 0]);
+  });
+
+/* 【buildAlert 里有一句走不到的话】它拿到 pick 之后又算了一遍 ranked()，
+   还判了一次 `list.length === 0`。那一句永远走不到：pickPriority 的实现就是
+   「ranked() 空了才返回 null」，所以 pick 非空 ⇒ ranked 非空。
+   变异测试杀不掉它（删掉它行为一个字都不变，见 README 的等价变异体），
+   所以在这里把**前提**钉住：没有重点的时候，走的必须是 calmLine 那条路，
+   绝不能是把 undefined 拼进句子里的那条。 */
+[[NOBODY, '一条数据都没有'], [ALL_CALM, '都正常'],
+  [trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'), silent()),
+    '只收到两个节点的数据']]
+  .forEach(function (item) {
+    const pick = pickPriority(item[0]);
+    const spoken = buildAlert(item[0]);
+    check('★ [' + item[1] + '] 没重点时走的是 calmLine 那条路（不是拼出 undefined）',
+      [pick, spoken.indexOf('undefined'), /。$/.test(spoken)], [null, -1, true]);
+  });
+
+/* ---- 纯函数：不改输入、同样输入同样输出 ---- */
+
+const J_SNAPSHOT = JSON.stringify(FOUR);
+buildFocus(FOUR);
+buildAlert(FOUR);
+tempTrend(FOUR['dorm-b']);
+check('★ 三个函数都不改传进来的 nodes（页面那边读的是同一份对象）',
+  JSON.stringify(FOUR), J_SNAPSHOT);
+
+/* 这一行和这一句都是**每条报文都重算**的（时长、趋势、处理状态都在变），
+   带上任何「当前时间」或随机成分，页面上就会出现某个数字停在某一刻不再动，
+   而下面的卡片一直在涨 —— 看着像数据不更新了。 */
+check('★ 同样的输入连着算两遍，那一行一字不差',
+  [buildFocus(BUSY) === buildFocus(BUSY), buildAlert(BUSY) === buildAlert(BUSY)],
   [true, true]);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);

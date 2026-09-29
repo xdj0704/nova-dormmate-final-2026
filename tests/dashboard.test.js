@@ -44,14 +44,14 @@ function makeEl(id) {
 
 const els = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
+  'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
   /* Step 7-4 的三件：事件表、条数、导出按钮。
      必须列在这里 —— getElementById 对没登记的 id 会现场造一个新的，
      那样断言里读到的 els['event-body'] 和页面里那个就不是同一个对象了。 */
   'event-body', 'event-count', 'export-events',
-  /* Step 8-1 的两句：B1 总览、B2 依据。同理必须登记。 */
-  'overview', 'reasons']
+  /* Step 8-3 的三件：顶上那一行、语音按钮、按钮下面那行说明。同理必须登记。 */
+  'focus', 'speak', 'speak-note']
   .forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
@@ -154,7 +154,7 @@ const mqttStub = {
    打桩挂的是 createDorm3D（模块里 import 的那个名字），不是 3D 场景本身。 */
 const sceneCalls = [];
 function createDorm3DStub(hostId) {
-  const rec = { hostId, statuses: [], labels: [], fans: [], ops: [], disposed: 0 };
+  const rec = { hostId, statuses: [], labels: [], fans: [], focus: [], ops: [], disposed: 0 };
   sceneCalls.push(rec);
   return {
     /* 真的那个也会返回「实际生效的状态」，所以桩照做 ——
@@ -167,9 +167,38 @@ function createDorm3DStub(hostId) {
        scene.js 里那句「后调用的那次为准」意味着 updateScene 和 setFanOn
        的先后顺序本身就是一个必须钉住的约定，分开两个数组就看不出顺序了。 */
     setFanOn(on) { rec.fans.push(on); rec.ops.push('setFanOn'); },
+    /* setFocus 是 Step 8-3 加的：画面里那圈「当前重点」的环亮不亮。
+       和 setFanOn 一样要按顺序记 —— 「什么时候亮的」本身就是这一步的验收点，
+       而它和 updateScene 的先后顺序（场景先重画、再开关环）也在这里钉住。 */
+    setFocus(on) { rec.focus.push(!!on); rec.ops.push('setFocus'); },
     dispose() { rec.disposed += 1; },
   };
 }
+
+/* ---------- speechSynthesis 打桩（Step 8-3）----------
+   真浏览器里 speak() 是异步出声的，测试环境没有声卡、也不需要。
+   这一步要验的是「按下按钮之后按顺序做了什么」：
+     先 cancel 再 speak（不 cancel 的话连点两次，第二句要排队等第一句念完）、
+     utterance 的 lang 设成了 zh-CN、
+     onerror 把**原始错误码**写进了那行说明。
+   所以三件事各记一份；顺序单独记在 speechLog 里 ——
+   只看 cancelled 和 uttered 两个计数是看不出先后顺序的。 */
+const speechLog = [];
+const spoken = [];
+function SpeechSynthesisUtteranceStub(text) {
+  this.text = text;
+  this.lang = '';
+  this.onerror = null;
+  spoken.push(this);
+}
+const speechStub = {
+  cancelled: 0,
+  uttered: [],
+  cancel() { this.cancelled += 1; speechLog.push('cancel'); },
+  /* 记下交给 speak 的那一个，好在断言里确认「念的」和「造出来的」是同一句 ——
+     造了一个 A、念了另一个 B 的话，两边的计数都对得上，只有这一份能看出来。 */
+  speak(u) { this.uttered.push(u); speechLog.push('speak'); },
+};
 
 const context = {
   document: documentStub,
@@ -178,7 +207,11 @@ const context = {
   createDorm3D: createDorm3DStub,
   location: { hostname: 'localhost' },
   getComputedStyle: () => ({ getPropertyValue: (n) => PALETTE[n] || '' }),
-  window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
+  window: {
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
+    speechSynthesis: speechStub,
+    SpeechSynthesisUtterance: SpeechSynthesisUtteranceStub,
+  },
   Blob: BlobStub,
   URL: URLStub,
   setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
@@ -212,7 +245,7 @@ const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene
    所以分隔符一律写 \s —— 它能匹配换行，折行处那几个空格加换行才过得去。
    写成 [ ] 或字面空格的话，摘不掉 import，下一句 vm 会抛
    「Cannot use import statement outside a module」。 */
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildOverview\s*,\s*buildReasons\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildFocus\s*,\s*buildAlert\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
 const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
 const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
@@ -247,19 +280,24 @@ globalThis.__topicNode = topicNode;
 globalThis.__connect = connect;
 globalThis.__disconnect = disconnect;
 globalThis.__renderScene = renderScene;
-globalThis.__renderPriority = renderPriority;
+globalThis.__renderFocus = renderFocus;
+globalThis.__speakAlert = speakAlert;
 globalThis.__events = events;
 globalThis.__renderEvents = renderEvents;
 globalThis.__buildEventsCSV = buildEventsCSV;
 globalThis.__exportEventsCSV = exportEventsCSV;
-globalThis.__renderInsight = renderInsight;
 `;
 vm.runInContext(src, context, { filename: DASH_SRC });
 
-/* 页面刚加载完、一条数据都还没收到的那一刻，顶上那条栏画了什么。
+/* 页面刚加载完、一条数据都还没收到的那一刻，顶上那一行画了什么。
    先存下来 —— 后面各段都会往里灌数据，之后就再也看不到这个状态了。
    N 段拿它验「启动时就画好了」和「没数据时不谎称都正常」。 */
-const BAR_AT_LOAD = els.priority.innerHTML;
+const FOCUS_AT_LOAD = els.focus.innerHTML;
+
+/* 那圈「当前重点」的环在启动那一刻是什么样，同样先存下来 ——
+   M 段读到的已经是 A~L 跑完之后的流水了（几十次调用），
+   要验「刚起来时就接过一次、传的是 false」只能靠这一份快照。 */
+const RING_AT_LOAD = sceneCalls[0].focus.slice();
 
 /* 处理动作那一行刚加载完的样子，同样先存下来 ——
    O 段一上来就 clearAll()，那之后再读到的就是「清空之后」画出来的，
@@ -280,21 +318,13 @@ const EVENTS_AT_LOAD = {
   body: els['event-body'].innerHTML,
 };
 
-/* B1 / B2 那两句刚加载完的样子。同样的道理，Q 段一上来就灌数据。
-   少了这一份，把文件末尾那次 renderInsight() 删掉也不会有人发现 ——
-   <p> 本来就是空的，看着跟「渲染过了、只是没有数据」一模一样。 */
-const INSIGHT_AT_LOAD = {
-  overview: els.overview.textContent,
-  reasons: els.reasons.textContent,
-};
-
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
   __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
-  __renderScene: renderScene, __renderPriority: renderPriority,
+  __renderScene: renderScene, __renderFocus: renderFocus, __speakAlert: speakAlert,
   __events: events, __buildEventsCSV: buildEventsCSV,
-  __renderInsight: renderInsight,
-  pickPriority, beginHandling, nextHandling } = context;
+  pickPriority, beginHandling, nextHandling,
+  buildFocus, buildAlert } = context;
 
 /* ---------- 断言 ---------- */
 let pass = 0, fail = 0;
@@ -600,6 +630,13 @@ check('★ 打开页面时覆盖层写的是「还没有收到数据」，不假
   scene.labels[0].includes('还没有收到数据'), true);
 check('初始场景退回「正常」的外观（空白或半成品分不清是没数据还是坏了）',
   scene.statuses[0], '正常');
+/* ★ 页面起来的时候就已经调过一次 setFocus 了 —— renderScene 的尾巴上那一句。
+   少了它（或者 scene.js 的返回值里根本没有 setFocus），那圈「当前重点」的环
+   永远不会出现，而那是在 renderScene 里头，页面上一点异常都看不出来。
+   （scene.js 那一侧的契约由 tests/scene3d.test.js 单独钉。） */
+check('★ 页面起来时就调过一次 setFocus，传的是 false'
+  + '（一条数据都没有，没有重点可言 —— 不是留着上一次的亮着的环）',
+  RING_AT_LOAD, [false]);
 
 /* --- 只画当前选中的那个节点 --- */
 
@@ -619,10 +656,16 @@ check('★ 覆盖层也一个字没动（还写着 dorm-b）', scene.labels.leng
 /* 切过去：不用等新数据，立刻画出它那条的样子 */
 selectNode('dorm-a');
 check('★ 切到已有数据的节点，立刻画出它的状态', lastStatus(), '偏热');
-check('★ 覆盖层写明是哪个宿舍的哪个状态',
-  lastLabel().includes('dorm-a') && lastLabel().includes('偏热'), true);
-check('覆盖层把读数也带上（标签上不必再回头找卡片）',
-  lastLabel().includes('31℃') && lastLabel().includes('60%'), true);
+/* ★ 8-3 起标签上**只有宿舍名**。
+   原来这里还写着状态和温湿度，那是把卡片上的信息又抄了一遍 ——
+   而这一行落在画面正中间，看的人分不清哪个是「场景」哪个是「文字面板」。
+   分工：宿舍名是画面答不出来的（画里只有一间屋，不说不知道是哪个），
+   所以留在这儿；「这间怎么了」交给画面自己说（地板颜色、窗户开合、风扇转不转）；
+   温湿度是卡片的事。 */
+check('★ 覆盖层只写宿舍名', lastLabel(), '当前宿舍：dorm-a');
+check('★ 状态不再抄进标签（交给画面自己表达）', lastLabel().includes('偏热'), false);
+check('★ 温湿度也不再抄进标签（那是卡片的信息）',
+  [lastLabel().includes('31℃'), lastLabel().includes('60%')], [false, false]);
 
 /* 反方向再来一遍，确认不是「第一次刚好对了」 */
 const n2 = scene.statuses.length;
@@ -676,16 +719,16 @@ console.error = realError;
 check('★ 三条脏数据一条都没改到画面', scene.statuses.length, n5);
 check('画面还是那条干净数据的「正常」', lastStatus(), '正常');
 
-/* ============ N. 优先关注（Step 7-1）============ */
-console.log('\n=== N. 优先关注 ===');
+/* ============ N. 当前重点一行（Step 7-1 挑人 + Step 8-3 那一行）============ */
+console.log('\n=== N. 当前重点一行 ===');
 
 const ids = ['dorm-a', 'dorm-b', 'dorm-c'];
 const T = (hm) => '2026-09-22 ' + hm;   // 三组场景的时间都在这天
-const focusHTML = () => els.priority.innerHTML;
-/* 点一下那条栏。走的是页面真正注册在 #priority 上的那个委托回调，
+const focusHTML = () => els.focus.innerHTML;
+/* 点一下那一行。走的是页面真正注册在 #focus 上的那个委托回调，
    不是直接调 selectNode —— 委托的 selector 写错了这里就该红。 */
 function clickFocus(nodeId) {
-  els.priority._handlers.click.forEach((fn) => fn({
+  els.focus._handlers.click.forEach((fn) => fn({
     target: { closest: (sel) => (sel === '.focus' ? { dataset: { node: nodeId } } : null) },
   }));
 }
@@ -694,22 +737,32 @@ function clickFocus(nodeId) {
 
 check('★ dashboard.js 有两条 import（scene.js 的 3D 工厂 + logic.js 的算法）',
   importCount, 2);
-check('★ logic.js 那条拿的是 7-1 的四个 + 7-4 的四个 + pickPriority',
+check('★ logic.js 那条拿的是 7-1 的四个 + 7-4 的四个 + 8-3 的两个',
   LOGIC_IMPORT.test(dashText), true);
 check('★ logic.js 那个文件真的在（./ 是相对 dashboard.js 自己算的，不是相对页面）',
   fs.existsSync(LOGIC_SRC), true);
-check('index.html 里有 #priority 容器', dashHtml.includes('id="priority"'), true);
+check('index.html 里有 #focus 容器', dashHtml.includes('id="focus"'), true);
+/* ★ 8-1 那两块（B1 总览 + B2 依据）已经撤了 —— 顶部只剩这一行。
+   这一步是**信息分工**：原来有三处在说「谁是重点」，详略不同而已；
+   现在一行留给看板顶部，细节分给 3D / 语音 / report.html。
+   两块里任何一个还在页面上，就是「又加了一块」而不是分工。 */
+check('★ 8-1 的 #overview / #reasons 已经从页面上撤掉了',
+  [dashHtml.includes('id="overview"'), dashHtml.includes('id="reasons"')],
+  [false, false]);
+check('★ 那一行旁边就是「语音提醒」按钮', dashHtml.includes('id="speak"'), true);
+check('按钮的文案就是「语音提醒」', dashHtml.includes('>语音提醒</button>'), true);
+check('★ 念了哪一句写在按钮下面那行说明里', dashHtml.includes('id="speak-note"'), true);
 
 /* --- 启动那一刻（一条数据都没有）--- */
 
-check('★ 启动时就画好了那条栏（不是等第一条消息才出现）',
-  BAR_AT_LOAD.includes('class="focus'), true);
+check('★ 启动时就画好了那一行（不是等第一条消息才出现）',
+  FOCUS_AT_LOAD.includes('class="focus'), true);
 /* 「三个都正常」在一条数据都没收到时是假话：那三个节点是**不知道**，不是正常。
-   这两种情况都由 pickPriority 返回 null，区分在画的地方做。 */
+   这两种情况都由 pickPriority 返回 null，区分在 buildFocus 那侧做。 */
 check('★ 启动时说的是「还没有收到数据」，不是「三个都正常」',
-  [BAR_AT_LOAD.includes('还没有收到任何节点的数据'),
-    BAR_AT_LOAD.includes('三个节点都正常')], [true, false]);
-check('启动时它不是按钮（没东西可点）', BAR_AT_LOAD.includes('<button'), false);
+  [FOCUS_AT_LOAD.includes('还没有收到任何节点的数据'),
+    FOCUS_AT_LOAD.includes('三个宿舍都正常')], [true, false]);
+check('启动时它不是按钮（没东西可点）', FOCUS_AT_LOAD.includes('<button'), false);
 /* 页面里跑的就是真的那份 logic.js（上面 runInContext 喂进去的），
    不是另写一个桩 —— 所以下面每一条都在验同一个函数 */
 check('拿到的 pickPriority 就是 logic.js 里那个', typeof pickPriority, 'function');
@@ -763,14 +816,26 @@ check('★ 不变量：abnormalCount > 0 恰好等价于 latest 不是「正常�
     ? nodes[id].latest.status !== '正常' : false)),
   [true, true, true]);
 
-/* --- 页面顶上那条栏 --- */
+/* --- 看板顶上那一行 --- */
 
 /* 此刻：dorm-a 偏热 20:09 起 1 次（时长 0），dorm-b 偏热 20:04 起 3 次（3 分钟），
    dorm-c 还没收到过。当前看的是 dorm-a（M 段留下的）。 */
-check('★ 顶部那栏挑出了 dorm-b', focusHTML().includes('dorm-b'), true);
-check('★ 那句原因原样摆在栏里',
-  focusHTML().includes('dorm-b 已连续偏热 3 分钟（3 次），持续时间最长'), true);
-check('那条栏是个 button，带着 nodeId（点击委托靠它认人）',
+check('★ 顶部那一行挑出了 dorm-b', focusHTML().includes('dorm-b'), true);
+/* ★ 这一行说的是**宿舍名 + 处理状态 + 趋势**，没有状态两个字，也没有那句原因。
+   这是 8-3 的分工：状态由卡片徽章（颜色 + 形状 + 文字）、3D 场景、语音一起承担；
+   「凭什么先管它」那种来龙去脉归 report.html。一行字里塞四样东西，
+   就又变回 8-1 那种「两句话交代所有事」了，那正是这一步要拆掉的。 */
+check('★ 那一行的内容：宿舍名 + 趋势（没按过按钮，就没有「处理中」那段）',
+  focusHTML().includes('dorm-b｜温度正在上升'), true);
+check('★ 那一行里不写状态（分工：状态由徽章和 3D 承担）',
+  [focusHTML().includes('偏热'), focusHTML().includes('已持续')], [false, false]);
+check('★ 那句原因也不在这一行里（它归 report.html）',
+  focusHTML().includes('持续时间最长'), false);
+/* 颜色不能单独表意：这一行里没有「偏热」两个字，所以状态必须由**形状**再表一次。
+   放进来的就是卡片上那套 ICONS（偏热是太阳、偏冷是雪花）。 */
+check('★ 但状态图标在（颜色永远配着形状出现，不靠颜色单独表意）',
+  [focusHTML().includes('focus-icon'), focusHTML().includes('<svg')], [true, true]);
+check('那一行是个 button，带着 nodeId（点击委托靠它认人）',
   /<button[^>]*data-node="dorm-b"/.test(focusHTML()), true);
 check('颜色跟着状态走（偏热 -> is-critical，和卡片同一套 class）',
   focusHTML().includes('focus is-critical'), true);
@@ -779,34 +844,97 @@ check('当前看的不是它 -> 不带选中描边', /\bis-active\b/.test(focusH
 
 /* --- 点它 = 点对应那张卡片 --- */
 
+/* 切之前先记下那一行的内容。它在切完之后必须**一个字都没变** ——
+   「谁是重点」跟正在看谁无关，变的是右边那两个字。 */
+const lineBefore = buildFocus(nodes);
 clickFocus('dorm-b');
-check('★ 点「优先关注」切到了 dorm-b', current(), 'dorm-b');
+check('★ 点「当前重点」切到了 dorm-b', current(), 'dorm-b');
 check('★ 卡片跟着切（dorm-b 那张变成「查看中」）',
   /data-node="dorm-b"[^>]*aria-pressed="true"/.test(els.cards.innerHTML), true);
 check('★ 趋势图跟着切（画的是 dorm-b 自己的历史）',
   tempChart.data.datasets[0].data, nodes['dorm-b'].history.map((r) => r.temperature));
 check('★ 3D 跟着切（画的是 dorm-b 的状态）', lastStatus(), '偏热');
-check('★ 切过去之后栏里改口说「正在查看」', focusHTML().includes('正在查看'), true);
-check('★ 而且栏本身带上了选中描边',
+check('★ 切过去之后那一行改口说「正在查看」', focusHTML().includes('正在查看'), true);
+check('★ 而且它本身带上了选中描边',
   /class="focus is-critical is-active"/.test(focusHTML()), true);
+check('★ 内容一个字没变（换的只是「正在查看」那两个字）',
+  [buildFocus(nodes) === lineBefore, focusHTML().includes(lineBefore)], [true, true]);
 check('标记变了，挑中的节点没变（只是「正在看」这件事变了）',
   pickPriority(nodes).nodeId, 'dorm-b');
+
+/* --- 3D 上那圈「当前重点」标记（Step 8-3）--- */
+
+/* 这一圈环和「重画场景」的时机**不一样**，所以 dashboard.js 那边是两个函数：
+     场景只跟当前选中的宿舍有关 —— 收到别的节点的报文时一次都不该动；
+     谁是重点却是**全局**的 —— dorm-b 的一条数据就可能让正在看的 dorm-a
+                                不再是重点，那圈环得当场灭掉。
+   下面这几条把这两个时机分别钉住。 */
+const ringAt = () => scene.focus[scene.focus.length - 1];
+const ringCount = () => scene.focus.length;
+
+check('★ 启动那一刻那圈环是灭的（一条数据都没有，没有重点可言）',
+  scene.focus[0], false);
+check('★ 切到重点那个宿舍（dorm-b）之后环亮起来 —— 它正好是当前看的这间',
+  ringAt(), true);
+
+/* ★ 这一条是 renderFocusMark 单独存在的全部理由。
+   当前看的是 dorm-b，也正是重点。现在来两条 **dorm-a** 的报文：
+   画面本身一步都不该动（收到的不是它 —— 上面 M 段已经钉过），
+   但 dorm-a 的异常段比 dorm-b 长，重点当场换人 ——
+   dorm-b 那圈环必须跟着灭掉。
+   两件事捆在一个函数里写的话，这一种情况就只能靠「碰巧也在看那个节点」才更新得过来。 */
+const ringBefore = ringCount();
+const stBefore = scene.statuses.length;
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
+check('（这时 dorm-a 的段是 11 分钟、dorm-b 是 3 分钟，重点换成了 dorm-a）',
+  pickPriority(nodes).nodeId, 'dorm-a');
+check('★ 重点被别的节点抢走：正在看的这间当场摘掉标记', ringAt(), false);
+check('★ 而且确实重新调了一次 setFocus（不是沿用上一次那个值）',
+  ringCount() > ringBefore, true);
+check('★ 与此同时画面一步都没动（收到的不是当前这个节点）',
+  scene.statuses.length, stBefore);
+
+/* 再看一个方向：重点抢回来，环还得亮回去 */
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
+check('★ 正在看的这间重新成为重点：环当场亮回来',
+  [pickPriority(nodes).nodeId, ringAt()], ['dorm-b', true]);
 
 /* --- 清空之后：又回到「一条数据都没有」 --- */
 
 clearAll();
 /* 清空不是「三个都正常」，是「什么都不知道了」—— 和刚打开页面是同一种状态，
-   所以话也该是同一句。这条同时钉住了 clearAll 必须重画那条栏。 */
+   所以话也该是同一句。这条同时钉住了 clearAll 必须重画那一行。 */
 check('★ 清空后说的是「还没有收到数据」，不是「三个都正常」',
   [focusHTML().includes('还没有收到任何节点的数据'),
-    focusHTML().includes('三个节点都正常')], [true, false]);
+    focusHTML().includes('三个宿舍都正常')], [true, false]);
 check('★ 没数据时不是按钮（点不动，也不该看着像能点）',
   focusHTML().includes('<button'), false);
 check('没数据时没有 data-node，点上去什么也不会发生',
   focusHTML().includes('data-node'), false);
+check('★ 清空后那圈环也灭了（连重点都没有了）', ringAt(), false);
 check('pickPriority 在一条数据都没有时返回 null', pickPriority(nodes), null);
 /* 点一个没有 data-node 的东西不能把 currentNodeId 弄坏 */
 check('当前还看在 dorm-b 上（切节点只由真实的点击改）', current(), 'dorm-b');
+
+/* --- 按风扇那一刻，那一行当场补出「处理中」--- */
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+check('按之前那一行里没有「处理中」', focusHTML().includes('处理中'), false);
+check('这时按钮是能点的（不然下面按的是一个灰按钮，模拟的不是真行为）',
+  els['action-fan'].disabled, false);
+check('当前看的正是它（否则按下去作用在别的节点上）', current(), 'dorm-b');
+
+els['action-fan']._handlers.click.forEach((fn) => fn());
+/* ★ 这一条盯的是风扇回调里那句 renderFocus()。漏掉的话，「处理中」三个字
+   要等到**下一条报文进来**才出现 —— 中间那段时间卡片上写着「处理中｜风扇已开启」、
+   上面那一行里却什么都没有，看的人会以为按钮没生效。 */
+check('★ 按了风扇之后那一行**当场**补出处理状态（不用等下一条报文）',
+  focusHTML().includes('dorm-b｜处理中'), true);
+check('★ 只写「处理中」，不写「风扇已开启」—— 开了什么是空间动作，归 3D',
+  focusHTML().includes('风扇已开启'), false);
+/* 只有一条数据，所以没有趋势那段，｜ 后面直接就是「处理中」，不会留个空的 ｜ */
+check('只有一条数据时后面不跟趋势（说不出「往哪走」就不说）',
+  focusHTML().includes('dorm-b｜处理中｜'), false);
 
 /* --- 三组场景：和交给 MQTTX 的那三组是同一份数据 --- */
 
@@ -825,7 +953,10 @@ check('★ 场景一：三段各 2 条，时长 3 / 7 / 5 分钟',
 check('★ 场景一：时长最长的 dorm-b 胜出', pickPriority(nodes).nodeId, 'dorm-b');
 check('★ 场景一：原因',
   pickPriority(nodes).reason, 'dorm-b 已连续偏热 7 分钟（2 次），持续时间最长');
-check('场景一：栏里也这么说', focusHTML().includes('持续时间最长'), true);
+/* 那一行只说「是它」，不说「凭什么」。原因仍然算得出来（上面那条），
+   但它去的地方是事件记录和 report.html —— 那才是要交代来龙去脉的出口。 */
+check('★ 场景一：那一行说的是 dorm-b，但不含那句原因',
+  [focusHTML().includes('dorm-b｜'), focusHTML().includes('持续时间最长')], [true, false]);
 
 console.log('  -- 场景二：时长相同，按次数决出 --');
 clearAll();
@@ -855,7 +986,9 @@ check('★ 场景三：数据都收下了（不是被拦掉才显得「全正常
   ['1 / 正常', '1 / 正常', '1 / 正常']);
 check('★ 场景三：三个节点的异常计数都是 0', ids.map((id) => nodes[id].abnormalCount), [0, 0, 0]);
 check('★ 场景三：pickPriority 返回 null', pickPriority(nodes), null);
-check('★ 场景三：栏里说三个都正常', focusHTML().includes('三个节点都正常'), true);
+check('★ 场景三：那一行说三个都正常', focusHTML().includes('3 个宿舍都正常'), true);
+/* 平静时那一行不是按钮：没有重点，就没有可点过去的地方 */
+check('★ 场景三：没有重点时它不是按钮', focusHTML().includes('<button'), false);
 
 /* 三组跑完，让后面的 O 段从一个干净的、当前节点确定的状态开始 */
 clearAll();
@@ -935,9 +1068,13 @@ check('★ 详情区那行字把「记在哪条数据上」说清楚',
   '处理中｜风扇已开启（记在 2026-09-22 20:05:00 这条数据上） · 还没收到动作之后的数据');
 
 check('★ 按下去调了 setFanOn(true)，风扇转起来', scene.fans.slice(fansBefore), [true]);
-check('★ 而且顺序是「先 updateScene 再 setFanOn」—— scene.js 里写着后调用的那次为准，'
-  + '反过来的话这次 setFanOn 会被 updateScene 自己那次盖掉（偏湿的 fan 是 false）',
-  scene.ops.slice(opsBefore), ['updateScene', 'setFanOn']);
+/* ★ 顺序是刻意的：scene.js 里写着「后调用的那次为准」，setFanOn 必须在
+   updateScene **之后** —— 反过来的话这次 setFanOn 会被 updateScene 自己那次
+   盖掉（偏湿的 fan 是 false，风扇就转不起来了）。
+   末尾那个 setFocus 是 8-3 加的：renderScene 收尾时要顺手按新的重点重算
+   那圈环。它排在最后，上面那两步的先后不受影响。 */
+check('★ 顺序是「先 updateScene、再 setFanOn」，最后才收尾重算那圈环',
+  scene.ops.slice(opsBefore), ['updateScene', 'setFanOn', 'setFocus']);
 
 /* --- 来了一条比动作还早的：不许改写「处理好了没有」--- */
 
@@ -1074,10 +1211,10 @@ selectNode('dorm-a');
 console.log('\n=== L. 没加载 mqtt.js ===');
 const els2 = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
+  'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
   /* 这几个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
-  'event-body', 'event-count', 'export-events', 'overview', 'reasons']
+  'event-body', 'event-count', 'export-events', 'focus', 'speak', 'speak-note']
   .forEach((id) => { els2[id] = makeEl(id); });
 /* 这一段故意**不**补 Blob / URL / setTimeout：导出按钮在这里不会被点，
    而「缺依赖时页面照样起得来」正是这一段要验的 —— 补得越全，
@@ -1101,6 +1238,9 @@ const ctx2 = {
   location: { hostname: 'localhost' },
   /* 故意不给 mqtt —— 模拟 vendor/mqtt.min.js 没下载到 */
   getComputedStyle: () => ({ getPropertyValue: () => '' }),
+  /* 这一段故意**不**给 speechSynthesis：和 mqtt、WebGL 一起，
+     凑成「三个依赖同时缺」。speakAlert 只在点按钮时才走那条分支，
+     页面起来这一步碰不到它 —— 但「缺东西时页面照样起得来」正是这一段要验的。 */
   window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
   /* 只把 error 静音：initScene3D 捕到异常后会 console.error 一行，
      那是**预期行为**，不是测试失败。log 留着，方便排查。 */
@@ -1114,11 +1254,11 @@ let src2 = dashText;
 src2 = src2.replace(SCENE_IMPORT, '/* import 已摘除，理由同上 */\n');
 src2 = src2.replace(LOGIC_IMPORT, '/* import 已摘除：下面跑的是真的 logic.js */\n');
 src2 += ';globalThis.__simulate = simulate;\nglobalThis.__renderScene = renderScene;\n'
-  + 'globalThis.__renderPriority = renderPriority;\n';
+  + 'globalThis.__renderFocus = renderFocus;\nglobalThis.__speakAlert = speakAlert;\n';
 
 vm.createContext(ctx2);
 vm.runInContext(fs.readFileSync(RULES_SRC, 'utf8'), ctx2);
-/* 这里也得喂真的 logic.js：simulate() 会走到 renderPriority，
+/* 这里也得喂真的 logic.js：simulate() 会走到 renderFocus，
    没有它的话这一段测的就不是「没网时页面能不能起来」，
    而是「pickPriority is not defined」—— 一个跟本节无关的错。 */
 vm.runInContext(fs.readFileSync(LOGIC_SRC, 'utf8').replace(/^export\s+/gm, ''),
@@ -1141,10 +1281,16 @@ ctx2.__renderScene();
 check('★ 没有 WebGL 时 renderScene 直接跳过，不抛异常', true, true);
 check('3D 建不起来不影响数据照常进（卡片还是三张）', els2['cards'].innerHTML.includes('dorm-c'), true);
 
-/* 「优先关注」不依赖任何外部东西（3D 和 mqtt 都缺着，它照样得算出来）——
+/* 「当前重点」不依赖任何外部东西（3D 和 mqtt 都缺着，它照样得算出来）——
    它是三个模块里唯一一个纯计算，没网没显卡的时候正好靠它撑住现场演示。 */
-check('★ 没网没显卡时「优先关注」照样算得出来（挑出异常的那个节点）',
-  els2.priority.innerHTML.includes('优先关注') && els2.priority.innerHTML.includes('dorm-b'), true);
+check('★ 没网没显卡时「当前重点」照样算得出来（挑出异常的那个节点）',
+  els2.focus.innerHTML.includes('当前重点')
+  && els2.focus.innerHTML.includes('dorm-b'), true);
+/* 语音也缺着，但按钮点下去不能抛未捕获异常 —— 它得把那句话写出来。
+   （这一段没给 window.speechSynthesis，走的正是「不支持」那条分支。） */
+ctx2.__speakAlert();
+check('★ 没网没显卡、浏览器也不支持语音时，点下去仍然只是写一行字，不抛异常',
+  els2['speak-note'].textContent.includes('不支持语音合成'), true);
 
 /* ============ P. 事件记录与导出（Step 7-4）============ */
 console.log('\n=== P. 事件记录与导出 ===');
@@ -1217,10 +1363,17 @@ check('★ 有事件之后按钮能点了', exportBtn.disabled, false);
 
 /* 第一次被选为「优先关注」就记上那一刻 —— 这时候它是唯一的异常节点 */
 check('★ 第一次被选中，就把那一刻记上了', ev0.priorityTime, T('20:30:00'));
-/* 记下的原因和顶上那条栏里说的是**同一句**。栏是每条报文都重画的，
-   所以要在刚记下的这一刻比 —— 后面它还会变，而事件上那句已经冻住了。 */
-check('★ 记下的原因和栏里那句一字不差',
-  els.priority.innerHTML.includes(ev0.priorityReason), true);
+/* 记下的原因和「谁是重点」那套算法现算的是**同一句**。
+   要在刚记下的这一刻比 —— 后面它还会变，而事件上那句已经冻住了。
+
+   8-3 之后这句原因不再贴到页面上（顶上只剩那一行，细节给了 report.html），
+   所以断言的对象从 DOM 换成了 pickPriority。盯的东西没变：
+   「为什么是它」全项目只有一处拼得出来，事件里记的就是那一处。 */
+check('★ 记下的原因和 pickPriority 现算的那句一字不差',
+  ev0.priorityReason, pickPriority(nodes).reason);
+check('而且这句原因不会出现在顶部那一行里（分工：那一行只管「是它」）',
+  [els.focus.innerHTML.includes(ev0.priorityReason),
+    ev0.priorityReason.length > 0], [false, true]);
 
 /* --- 段内继续异常：不另开一条 --- */
 
@@ -1427,145 +1580,200 @@ check('★ 到点了才 revoke，revoke 的就是那个 URL', revokedUrls, [anch
 /* 一条事件都没有时按钮是 disabled 的。真浏览器里点灰按钮不会触发回调，
    所以这里不模拟「点了会怎样」—— 上面 EVENTS_AT_LOAD 那条断言盯的就是它。 */
 
-/* ============ Q. 当前总览 + 判断依据（Step 8-1）============ */
-console.log('\n=== Q. 当前总览 + 判断依据 ===');
+/* ============ Q. 语音提醒（Step 8-3）============ */
+console.log('\n=== Q. 语音提醒 ===');
 
-const ovText = () => els.overview.textContent;
-const rsText = () => els.reasons.textContent;
+/* 这是四个出口里唯一一个「说给人听」的，约束也来自那里：声音是线性的，
+   说过就过去了，没人能回头翻 —— 所以**只念一句**，而且每次都现算。
+   念的那句话由 logic.js 的 buildAlert 拼（那边有单独的词句测试），
+   这一段盯的是页面这一侧：点一下到底做了什么、按什么顺序做、失败了怎么办。 */
+const speakBtn = els.speak;
+/* 走页面真正注册在 #speak 上的那个回调，不直接调 speakAlert ——
+   回调要是挂错了元素，这里就该红。 */
+const clickSpeak = () => speakBtn._handlers.click.forEach((fn) => fn());
+const noteText = () => els['speak-note'].textContent;
+const lastSpoken = () => spoken[spoken.length - 1];
 
 /* --- 接线本身 --- */
 
-check('index.html 里有 #overview', dashHtml.includes('id="overview"'), true);
-check('index.html 里有 #reasons', dashHtml.includes('id="reasons"'), true);
-check('两块的标题就是「当前总览」和「判断依据」',
-  [dashHtml.includes('当前总览'), dashHtml.includes('判断依据')], [true, true]);
+check('index.html 里有 #speak 按钮', dashHtml.includes('id="speak"'), true);
+check('index.html 里有 #speak-note（念了哪一句写在这儿）',
+  dashHtml.includes('id="speak-note"'), true);
+check('★ 按钮上就挂着 speakAlert 这一个回调', speakBtn._handlers.click.length, 1);
+/* 按钮下面那行说明是**唯一**能确认「它到底念了什么」的地方 ——
+   静音、没音箱、声音太小的时候，声音这条出口整个是空白的。
+   它是一行说明，不是第二个按钮：写成按钮的话，看的人会以为按它能重念。 */
+check('★ 那行说明在页面上是个 <p>', /<p[^>]*id="speak-note"/.test(dashHtml), true);
+check('★ 它是 textContent 贴上去的（那句话里夹着节点名，不走 innerHTML）',
+  els['speak-note'].innerHTML, '');
 
-/* --- 启动那一刻（一条数据都没有）--- */
-
-check('★ 启动时这两句就画好了，而且说的是「还没有收到数据」而不是「都正常」',
-  INSIGHT_AT_LOAD.overview, '还没有收到任何节点的数据。');
-check('★ 启动时依据也说不出——不硬编一句糊弄过去',
-  INSIGHT_AT_LOAD.reasons, '还没有收到任何节点的数据，说不出依据。');
-
-/* --- 每收到一条消息都重算（这是这一步的要害：不许缓存）--- */
-
-clearAll();
-check('清空之后回到「还没有收到」', ovText(), '还没有收到任何节点的数据。');
-
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-check('★ 收到第一条数据就重算了：不再是「还没有收到」',
-  ovText(), '当前 3 个宿舍中，1 个正常，另有 2 个还没有收到数据。');
-
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
-check('★ 三个都正常之后改口说「都正常」，不硬凑「0 个需要关注」',
-  ovText(), '当前 3 个宿舍都正常。');
-check('依据跟着改口', rsText(), '当前 3 个宿舍都正常，没有要优先处理的宿舍。');
-
-/* --- 一个宿舍变异常 --- */
-
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-check('★ 一个宿舍变异常：总览立刻改口并点出重点（不用等别的事件触发）',
-  ovText(),
-  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 不到 1 分钟，是当前重点。');
-check('★ 依据同时跟上，说的是「目前唯一的异常节点」',
-  rsText(),
-  '优先关注 dorm-b：已连续偏热 不到 1 分钟（1 次），是目前唯一的异常节点；'
-  + 'dorm-a 当前正常；dorm-c 当前正常。');
-
-/* 又来一条 —— 时长跟着变。这一条专门盯「有没有缓存」：
-   要是两句只在第一条消息时算过一次，这里的数字会停在「不到 1 分钟」。 */
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 33, 60, undefined, T('20:20:00')));
-check('★ 再来一条：时长当场跟着变（没有缓存住第一条时的数字）',
-  ovText(),
-  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点。');
-check('依据里的时长和次数也一起变了',
-  rsText(),
-  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），是目前唯一的异常节点；'
-  + 'dorm-a 当前正常；dorm-c 当前正常。');
-
-/* --- 两个宿舍同时异常：总览多出一笔，依据开始逐个对比 --- */
-
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 80, undefined, T('20:15:00')));
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 26, 82, undefined, T('20:20:00')));
-check('★ 两个异常：总览多出一笔「dorm-c 出现偏湿」',
-  ovText(),
-  '当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点；'
-  + 'dorm-c 出现偏湿。');
-check('★ 两个异常：依据逐个对比，输的那个说清输在哪一步',
-  rsText(),
-  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），持续时间最长；'
-  + 'dorm-c 虽然偏湿，但只持续 5 分钟；dorm-a 当前正常。');
-
-/* --- 重点那个恢复了：两句话一起改口 --- */
-
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:30:00')));
-check('★ 重点恢复之后，总览和依据一起换人（不会只改一处）',
-  [ovText(),
-    rsText()],
-  ['当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-c 已持续偏湿 5 分钟，是当前重点。',
-    '优先关注 dorm-c：已连续偏湿 5 分钟（2 次），是目前唯一的异常节点；'
-    + 'dorm-a 当前正常；dorm-b 当前正常。']);
-
-/* --- 脏数据不许动这两句 --- */
-
-const ovBeforeBad = ovText();
-const rsBeforeBad = rsText();
-handleMessage('dormmate/dorm-d/env', mk('dorm-d', 31, 60));
-handleMessage('dormmate/dorm-a/env', '{ 这不是 JSON');
-check('★ 被拦下的报文（未知节点 / 解析失败）不会改写这两句话',
-  [ovText() === ovBeforeBad, rsText() === rsBeforeBad], [true, true]);
-
-/* --- 处理状态 --- */
+/* --- 念的是「当前最重要的那一句」 --- */
 
 clearAll();
 handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
 handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-check('按风扇之前总览里没有那半句',
-  ovText().includes('处理中'), false);
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
+check('（此刻重点是 dorm-b：段从 20:00 起，10 分钟）',
+  pickPriority(nodes).nodeId, 'dorm-b');
+
+const cancelledBefore = speechStub.cancelled;
+const spokenBefore = spoken.length;
+clickSpeak();
+
+check('★ 点一下只念**一句**（不是把三个宿舍从头到尾念一遍）',
+  spoken.length - spokenBefore, 1);
+check('★ 念的就是 buildAlert 现算的那一句，逐字对得上',
+  lastSpoken().text, 'dorm-b 偏热已持续 10 分钟，温度持平。');
+check('★ 念的这句开头就是 pickPriority 挑出来的那个宿舍',
+  lastSpoken().text.indexOf(pickPriority(nodes).nodeId), 0);
+check('★ 交给 speak 的就是造出来的那个 utterance（不是造一个念另一个）',
+  speechStub.uttered[speechStub.uttered.length - 1] === lastSpoken(), true);
+/* 顺序是刻意的：不先 cancel 的话，连点两次第二句会老老实实排在队列里
+   等第一句念完（好几秒）才开口 —— 而那时候念的是按下按钮那一刻算出来的话。 */
+check('★ 先 cancel 再 speak（不然连点两次，第二句要排队等第一句念完）',
+  [speechStub.cancelled - cancelledBefore, speechLog.slice(-2)],
+  [1, ['cancel', 'speak']]);
+check('★ lang 设成了 zh-CN（不设的话按系统语言挑嗓音，中文会被念成字母）',
+  lastSpoken().lang, 'zh-CN');
+check('★ 念了哪一句写在那行说明里（静音时唯一能确认它念了什么的地方）',
+  noteText(), '正在朗读：' + lastSpoken().text);
+
+/* --- 处理状态也念出来 --- */
 
 selectNode('dorm-b');
 els['action-fan']._handlers.click.forEach((fn) => fn());
-/* 这一条盯的是风扇回调里那句 renderInsight()。漏掉的话，
-   「（风扇已开启，处理中）」要等到下一条报文进来才出现 ——
-   中间那段时间卡片上写着「处理中｜风扇已开启」、总览里却什么都没有。 */
-check('★ 按了风扇之后总览**当场**补出处理状态（不用等下一条报文）',
-  ovText(),
-  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 不到 1 分钟，是当前重点'
-  + '（风扇已开启，处理中）。');
-check('★ 依据里也带上同一句',
-  rsText().includes('（风扇已开启，处理中）'), true);
-check('★ 处理状态不参与排序：按了风扇重点还是同一个',
-  ovText().includes('dorm-b 已持续'), true);
+clickSpeak();
+/* handlingNote() 是全项目唯一拼得出「风扇已开启，处理中」的地方，
+   7-1 那条栏、B2 依据、这一句读的都是它。 */
+check('★ 按过风扇之后念的那句带上「（风扇已开启，处理中）」',
+  lastSpoken().text.includes('（风扇已开启，处理中）'), true);
+check('而且念的是 dorm-b（重点没换人）',
+  lastSpoken().text.indexOf('dorm-b'), 0);
 
-/* --- 用 textContent，不走 innerHTML --- */
-/* 这两句里夹着节点名，而节点名是从 topic / 报文里读来的，不是我们写的常量。
-   走 innerHTML 的话，哪天混进一个 < 就把版面撕了。makeEl 把两个字段分开记，
-   所以这里能直接看出走的是哪条路。 */
-check('★ 两句都是 textContent 贴上去的，innerHTML 一直是空的',
-  [els.overview.innerHTML, els.reasons.innerHTML], ['', '']);
+/* --- ★ 每次都现算，一个字都不缓存 --- */
 
-/* --- 和顶上那条栏必须指向同一个人 --- */
+/* 念一句旧的比不念更糟：听的人以为现在还是那样。 */
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 15, 60, undefined, T('20:30:00')));
+check('这时重点已经换人了（dorm-a 的段 30 分钟，比 dorm-b 的 10 分钟长）',
+  pickPriority(nodes).nodeId, 'dorm-a');
+check('上一句确实说的是别人（不然下面那条可能只是恰好相等）',
+  lastSpoken().text.includes('dorm-b'), true);
 
-const pickNow = pickPriority(nodes);
-check('★ 总览点的重点和优先关注栏是同一个人',
-  ovText().includes(pickNow.nodeId + ' 已持续'), true);
-check('★ 依据开头那半句和栏里的原因逐字相同（去掉开头的节点名）',
-  rsText().indexOf('优先关注 ' + pickNow.nodeId + '：'
-    + pickNow.reason.slice(pickNow.nodeId.length + 1)), 0);
+clickSpeak();
+check('★ 数据变了：再点一次念的是新算的那句，不是上一次那句',
+  lastSpoken().text, 'dorm-a 偏冷已持续 30 分钟，温度正在下降。');
+check('趋势也跟着念出来了（不是每次都念同一套词）',
+  lastSpoken().text.includes('温度正在下降'), true);
 
-/* --- 直接调 renderInsight 也幂等（清空 / 启动那两处就是这么调的）--- */
-const ovIdem = ovText();
-const rsIdem = rsText();
-renderInsight();
-check('★ 数据没变时重画一遍，两句话一字不差（幂等）',
-  [ovText() === ovIdem, rsText() === rsIdem], [true, true]);
+/* --- 没有重点可念的时候，念的也得是实话 --- */
 
 clearAll();
-check('★ 清空之后这两句也回到起点，不留上一次的账',
-  [ovText(), rsText()],
-  ['还没有收到任何节点的数据。', '还没有收到任何节点的数据，说不出依据。']);
+clickSpeak();
+check('★ 一条数据都没有：念的是「还没有收到数据」，不是「都正常」',
+  lastSpoken().text, '还没有收到任何节点的数据。');
+/* 再点一次也得重算，不能因为「上一次算过了」就跳过 cancel/speak */
+const cancelledIdle = speechStub.cancelled;
+clickSpeak();
+check('平静时照样每次都真的念（不是「没重点就什么都不做」）',
+  [spoken.length > 0, speechStub.cancelled - cancelledIdle], [true, 1]);
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
+clickSpeak();
+check('★ 三个都正常：念的是「都正常」，句号收尾',
+  lastSpoken().text, '当前 3 个宿舍都正常。');
+
+/* --- 浏览器不支持语音合成 --- */
+
+/* 两个都要查：Chrome 上 speechSynthesis 一直在，缺的是 SpeechSynthesisUtterance
+   那个构造函数。少查一个的话，点一下就是一条未捕获的 TypeError ——
+   按钮看着能用，按下去什么也没有。 */
+const savedSynth = speechStub;
+const savedCtor = context.window.SpeechSynthesisUtterance;
+const spokenBeforeUnsupported = spoken.length;
+
+context.window.speechSynthesis = undefined;
+clickSpeak();
+check('★ 不支持时一个 utterance 都不造（不是造出来再失败）',
+  spoken.length, spokenBeforeUnsupported);
+check('★ 不支持时把那句话写出来，而不是静悄悄地什么都不做',
+  [noteText().includes('不支持语音合成'), noteText().includes('要念的是：')], [true, true]);
+check('说明里带着本来要念的那句（不然还是不知道它想说什么）',
+  noteText().includes(buildAlert(nodes)), true);
+
+/* 只缺构造函数这一半 —— 单独再走一遍，因为两个条件是分开写的 */
+context.window.speechSynthesis = savedSynth;
+context.window.SpeechSynthesisUtterance = undefined;
+clickSpeak();
+check('★ 只缺 SpeechSynthesisUtterance 也算不支持（它是构造函数，typeof 不是 function）',
+  spoken.length, spokenBeforeUnsupported);
+context.window.SpeechSynthesisUtterance = savedCtor;
+
+/* --- 朗读失败：原始错误码要写出来 --- */
+
+clickSpeak();
+const failedUtterance = lastSpoken();
+check('★ 挂上了 onerror（不挂的话朗读失败是静悄悄的，那行说明会一直写着「正在朗读」）',
+  typeof failedUtterance.onerror, 'function');
+failedUtterance.onerror({ error: 'not-allowed' });
+/* 原始错误码写在最前面 —— 解释文案可能对不上，错误码不会骗人
+   （和 3-2 那张 VOICE_ERRORS 表同一条原则）。 */
+check('★ 失败时把原始错误码写在那行说明里',
+  [noteText().includes('朗读失败'), noteText().includes('not-allowed')], [true, true]);
+check('也把本来要念的那句带上', noteText().includes(failedUtterance.text), true);
+failedUtterance.onerror(null);
+check('连事件对象都没有时退回 unknown，不崩', noteText().includes('unknown'), true);
+
+/* --- 清空之后那行说明也要清掉 --- */
+
+clickSpeak();
+check('念过之后那行说明里有字', noteText().length > 0, true);
+clearAll();
+/* 那行字是「上一次念的内容」。清空之后它一直挂在那儿，看着像是刚刚念过 ——
+   而那时要念的那句已经变回「还没有收到任何节点的数据」了。 */
+check('★ 清空之后那行说明也清了', noteText(), '');
+check('清空之后顶部那一行也回到了起点',
+  els.focus.innerHTML.includes('还没有收到任何节点的数据'), true);
+
+/* --- 语音和顶部那一行必须指向同一个人 --- */
+
+/* 这是这一步最容易出的错：两个出口各拼一份，页面上那一行说的是 dorm-b、
+   语音念的是 dorm-c。逻辑上防它的办法是「两边都从 pickPriority 出发」，
+   这里从页面上再验一次。 */
+clearAll();
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:05:00')));
+
+const pickNow = pickPriority(nodes);
+clickSpeak();
+check('★ 顶部那一行里就是 buildFocus 那句话（页面不自己另拼一份）',
+  els.focus.innerHTML.includes(buildFocus(nodes)), true);
+check('★ 语音念的就是 buildAlert 那句话',
+  lastSpoken().text, buildAlert(nodes));
+check('★ 两个出口说的是同一个宿舍',
+  [buildFocus(nodes).indexOf(pickNow.nodeId), lastSpoken().text.indexOf(pickNow.nodeId)],
+  [0, 0]);
+check('（这时重点确实是 dorm-b：它 10 分钟，dorm-a 只有 0 分钟）',
+  pickNow.nodeId, 'dorm-b');
+
+/* --- 直接调 speakAlert 也走同一条路（上一段里点按钮走的就是它）--- */
+
+const spokenBeforeDirect = spoken.length;
+speakAlert();
+check('★ 直接调 speakAlert 和点按钮效果一样（就一个实现，没有第二条路）',
+  [spoken.length - spokenBeforeDirect, lastSpoken().text], [1, buildAlert(nodes)]);
+
+const lineIdem = els.focus.innerHTML;
+renderFocus();
+check('★ 数据没变时重画那一行，内容一字不差（幂等）',
+  els.focus.innerHTML, lineIdem);
+
+clearAll();
+check('★ 清空之后顶部那一行回到起点，不留上一次的账',
+  els.focus.innerHTML.includes('还没有收到任何节点的数据'), true);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

@@ -24,37 +24,32 @@
     </div>
   </header>
 
-  <!-- 优先关注。整个栏的内容由 dashboard.js 的 renderPriority() 填进来，
-       这里只留一个空容器。
+  <!-- 当前重点（Step 8-3｜B4）。看板顶部只有这一行：谁、在不在处理、温度往哪走。
 
-       为什么不用 aria-live：这一栏每收到一条报文都要重画（时长和次数都在变），
+       这一步是**信息分工**，不是又加一块。8-1 之前这里有一条「优先关注」栏和
+       一块「当前总览 + 判断依据」，它们说的都是「谁是重点」，只是详略不同。
+       8-3 把它们并成这一行，剩下的细节分给另外三个出口：
+
+         看板顶部   这一行        谁 / 在不在处理 / 往哪走（扫一眼就够）
+         3D 场景    哪个空间、风扇转没转、窗开没开（不堆文字）
+         语音提醒   把同一件事念成一句人话（声音是线性的，只能听一遍）
+         report.html 开始 / 处理 / 恢复 / 持续了多久（完整的账）
+
+       内容由 dashboard.js 的 renderFocus() 现算现贴，容器里一开始什么都不放。
+       它做成**按钮**是因为它可以点 —— 点它等于点对应那张卡片（两边走的都是
+       selectNode），卡片、趋势图、3D 一起切过去。
+
+       为什么不用 aria-live：这一行每收到一条报文都要重画（时长、趋势都在变），
        现场演示时几秒一条，读屏软件会跟着念个不停，反而把真正要看的东西盖住。
-       它是个可以随时主动 Tab 过去看的地方，不是「必须立刻播报」的警报。 -->
-  <section id="priority" class="priority" aria-label="优先关注"></section>
-
-  <!-- 当前总览 + 判断依据（Step 8-1）。这两句都由 dashboard.js 的 renderInsight()
-       现算现贴，容器里一开始什么都不放。
-
-       B1 说整体（几个正常、几个需要关注、谁是当前重点），B2 说为什么是它、
-       别人为什么不是。两块放在同一个面板里，是因为它们是连着读的：
-       先看「现在什么样」，再看「凭什么这么判断」。
-
-       两句话里没有一个字是写死的 —— 节点名、数字、状态、时长全从当前数据
-       算出来，所以换成四个宿舍、或者节点名不叫 dorm-x，这里说的还是实话。
-
-       为什么用 <p> 而不是 aria-live：和上面那条优先关注栏同理，每收到一条
-       报文这两句都会重画（时长和计数一直在变），加 aria-live 的话读屏软件
-       会跟着念个不停，反而把真正要看的东西盖住。 -->
-  <section class="panel">
-    <div class="panel-head">
-      <h2>当前总览</h2>
+       要听就按旁边那个「语音提醒」—— 那是个明确的动作，念的也是完整的一句。 -->
+  <section class="panel focus-panel">
+    <div class="focus-row">
+      <div id="focus" class="focus-slot"></div>
+      <button id="speak" class="ghost" type="button">语音提醒</button>
     </div>
-    <p id="overview" class="insight"></p>
-
-    <div class="panel-head panel-head--sub">
-      <h2>判断依据</h2>
-    </div>
-    <p id="reasons" class="insight"></p>
+    <!-- 念的是哪一句，写在这里。声音放不出来（没音箱、静音、浏览器不支持）
+       的时候，这一行就是唯一能确认「它到底念了什么」的地方。 -->
+    <p id="speak-note" class="note speak-note"></p>
   </section>
 
   <section id="cards" class="cards"></section>
