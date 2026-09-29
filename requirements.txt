@@ -1,7 +1,7 @@
 # 装的时候要用 64 位解释器：
 #     py -3.14 -m pip install -r requirements.txt
 #
-# 为什么强调 64 位：pandas 和 matplotlib 早就不发布 32 位 Windows 包了。
+# 为什么强调 64 位：pandas / matplotlib / scikit-learn 都不发布 32 位 Windows 包。
 # PATH 上的 python 是 32 位的，在它上面 pip install pandas 会去找源码包，
 # 然后因为缺少 MSVC 编译环境失败。64 位的那个解释器（C:\Program Files\Python314）
 # 有现成的 wheel，直接装就行。
@@ -9,3 +9,7 @@
 paho-mqtt>=2.0
 pandas>=2.2
 matplotlib>=3.8
+# Step 9-2 的 Isolation Forest。scikit-learn 依赖 scipy 和 joblib，会一起装上。
+# 没装的话 analysis/ml.py 会打印一句「没装 scikit-learn」并告诉你这条命令，
+# 不会甩一串 traceback —— 其余功能（报表、摘要、看图）也都不受影响。
+scikit-learn>=1.5

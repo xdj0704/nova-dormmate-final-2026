@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import html
 import math
+import numbers
 import sys
 import unicodedata
 from datetime import datetime, timedelta
@@ -70,6 +71,11 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # 导出的 CSV 必须有的列，缺了就是文件不对，别让它一路 KeyError 下去
 REQUIRED_COLUMNS = ["time", "temperature", "humidity", "status"]
+
+# 必须有列、而且每个值都得真是一个数字的两列（空着可以，空值另有含义 —— 见 MISSING）。
+# 判据是「交给 rules.judge_status 之后能直接比大小」，所以 '25' 这种带引号的也不行：
+# 它在 Python 里是字符串，一样会在那一行 str < float 上崩掉。
+NUMERIC_COLUMNS = ["temperature", "humidity"]
 
 # 状态统计的固定顺序：按统一规则的判断顺序排（先判的先列）。
 # 不用出现次数排序 —— 报告每次跑出来的行序要一样，才好前后对比。
@@ -207,8 +213,21 @@ def resolve_csv(raw: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _parses_as_number(value: object) -> bool:
+    """这格读出来的东西，本身是不是就能当一个数用。
+
+    给 load() 挑「该报哪一格」用的：pandas 遇到一格文字会把整列都读成字符串，
+    那时候列里每一格类型都不对，得看内容才知道是谁写坏了。
+    """
+    try:
+        float(str(value))
+    except ValueError:
+        return False
+    return True
+
+
 def load(csv_path: Path) -> pd.DataFrame:
-    """读 CSV。文件不存在或表头不对时，抛 SystemExit 并给一句人话。"""
+    """读 CSV。文件不存在、表头不对、温湿度不是数字，都抛 SystemExit 并给一句人话。"""
     if not csv_path.exists():
         raise SystemExit(
             f"找不到 CSV：{csv_path}\n"
@@ -227,6 +246,37 @@ def load(csv_path: Path) -> pd.DataFrame:
             f"CSV 缺少列：{'、'.join(missing)}\n"
             f"表头应该是：{','.join(REQUIRED_COLUMNS)}\n"
             f"实际读到：{','.join(map(str, df.columns))}"
+        )
+
+    # 温湿度是不是数字，在这里一次查完。这是全项目唯一读 CSV 的地方，查在这里，
+    # analysis / daily_summary / ml 三条路都不用各查一遍（各查一遍的话，
+    # 迟早有一条忘了查）。
+    #
+    # 不查的话，'不热' 这种值会一路走到 rules.judge_status，在那一行
+    # `temperature < 18` 上崩成一个 TypeError —— 看得出类型不对，看不出是哪一行
+    # 哪一列，而这是人手改过 CSV 之后最容易留下的东西。
+    # 行号按位置数（表头之下第几条），不用 df.index 里的标签：索引不一定是
+    # 0,1,2 那种整数 —— CSV 某一行多写一个逗号，pandas 就会把第一列拿去当索引，
+    # 标签变成元组，标签加 2 会在报错的路上再崩一次（报错时报错，比原来的错更难查）。
+    #
+    # 这里不用再单独放行空格子：实测（README 的 Step 9-2 那张表）这两列从 CSV 读出来
+    # 只有三种东西 —— 数字、str、空值，而空值就是 float('nan')，nan 本身就是
+    # numbers.Number，下面这个 isinstance 自己就把「空着」排除掉了。
+    for name in NUMERIC_COLUMNS:
+        bad = [(offset, value) for offset, value in enumerate(df[name].tolist())
+               if not isinstance(value, numbers.Number)]
+        if not bad:
+            continue
+
+        # 报哪一格：优先报连数都算不出来的那一格（'不热'、'abc'）——
+        # pandas 遇到一格文字会把【整列】都读成文本（连本该是数字的 25 也变成
+        # '25'），只按类型挑的话，报出来的是列里第一格，而那一格往往看着没问题。
+        offset, value = next(((o, v) for o, v in bad if not _parses_as_number(v)), bad[0])
+        raise SystemExit(
+            f"CSV 的 {name} 列里有不是数字的值：{value!r}"
+            f"（第 {offset + 2} 行，{df['time'].iloc[offset]}）\n"
+            f"温湿度要能直接比大小，一格文字就让整列都没法算："
+            f"空着可以（缺失单独算一档），但 '25' 这种带引号的、'不热' 这种文字都不行。"
         )
 
     return df

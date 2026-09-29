@@ -127,6 +127,31 @@ class TestResolveCsv(unittest.TestCase):
         self.assertTrue((analysis.ROOT / "web").is_dir())
 
 
+class TestParsesAsNumber(unittest.TestCase):
+    """挑「该报哪一格」用的那道判断。
+
+    它和 isinstance 不是一回事，差的正是关键的那一格：pandas 遇到一格文字会把
+    整列都读成字符串，于是本来好好的 25 也成了 '25' —— 那种格子按类型判是不对
+    的，按内容判才是对的。
+    """
+
+    def test_数字算(self):
+        for value in (25, 25.5, -5):
+            self.assertTrue(analysis._parses_as_number(value), value)
+
+    def test_看着像数字的字符串也算(self):
+        # 这一条是关键：改回 isinstance 的话它会红，而红的原因就是「报错了行」
+        self.assertTrue(analysis._parses_as_number("25"))
+        self.assertTrue(analysis._parses_as_number(" 25 "))
+
+    def test_文字不算(self):
+        for value in ("不热", "abc", "", "25℃"):
+            self.assertFalse(analysis._parses_as_number(value), value)
+
+    def test_带着引号的数字不算(self):
+        self.assertFalse(analysis._parses_as_number("'25'"))
+
+
 class TestLoad(unittest.TestCase):
     def test_utf8sig_吃掉了BOM_列名是干净的(self):
         path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,31,78,偏热\r\n")
@@ -174,6 +199,92 @@ class TestLoad(unittest.TestCase):
         path = write_csv(f"{HEADER}\r\n")
         df = analysis.load(path)
         self.assertEqual(len(df), 0)
+
+    # 温湿度必须是数字。查在这里而不是查在各处用它的地方：这是全项目唯一读 CSV
+    # 的函数，查一遍三条路（analysis / daily_summary / ml）都干净。
+    # 不查的话，'不热' 会一路走到 rules.judge_status 里，在 `temperature < 18`
+    # 那一行崩成一个 TypeError —— 看得出类型不对，看不出是哪一行哪一列。
+
+    def test_温度是文字时给一句人话(self):
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,不热,60,正常\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        message = str(ctx.exception)
+        self.assertIn("temperature", message)
+        self.assertIn("不是数字的值", message)
+        self.assertIn("不热", message)
+
+    def test_湿度是文字时也报(self):
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,25,很干,正常\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        self.assertIn("humidity", str(ctx.exception))
+
+    def test_报出是第几行的哪一刻(self):
+        # 表头占第 1 行，所以第一条数据是第 2 行 —— 行号按文本的行数数，
+        # 这样用记事本打开就能直接跳过去
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,不热,60,正常\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        message = str(ctx.exception)
+        self.assertIn("第 2 行", message)
+        self.assertIn("2026-09-22 20:30:00", message)
+
+    def test_坏值在第几条就说第几行(self):
+        # 报的必须是写坏的那一格（abc，第 5 行），不是列里第一格：
+        # 一列里混进一格文字时，pandas 会把整列都读成字符串（前面的 25 也成了
+        # '25'），按类型挑的话会指着第 2 行的 25 说「这不是数字」，而它明明没事。
+        path = write_csv(f"{HEADER}\r\n"
+                         "2026-09-22 20:30:00,25,60,正常\r\n"
+                         "2026-09-22 21:00:00,26,61,正常\r\n"
+                         "2026-09-22 21:30:00,27,62,正常\r\n"
+                         "2026-09-22 22:00:00,abc,63,正常\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        message = str(ctx.exception)
+        self.assertIn("第 5 行", message)
+        self.assertIn("'abc'", message)
+        # 时刻也得是这一条的：行号对上了、时刻指着头一条的话，等于把用户往上面
+        # 几行引，手改 CSV 的人照着找还是找不到那一格。
+        self.assertIn("2026-09-22 22:00:00", message)
+
+    def test_空格子在前面时报的还是后面那格文字(self):
+        # 空格子读出来是 nan，而 nan 本身是 numbers.Number，所以它压根进不了
+        # 「不是数字」那一堆 —— 它属于「空着」（缺失单独算一档），不属于「写坏了」。
+        # 报它没用：用户按报出来的行号去改第 2 行那个空格子，文件还是不认，
+        # 因为写字的是第 3 行。
+        path = write_csv(f"{HEADER}\r\n"
+                         "2026-09-22 20:30:00,,60,正常\r\n"
+                         "2026-09-22 21:00:00,不热,61,正常\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        message = str(ctx.exception)
+        self.assertIn("'不热'", message)
+        self.assertIn("第 3 行", message)
+        self.assertNotIn("第 2 行", message)
+
+    def test_带引号的数字也不行(self):
+        # '25' 在 Python 里是字符串，一样会在 str < float 上崩 —— 所以判据是
+        # 「能不能直接比大小」，不是「看起来像不像数字」
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,'25',60,正常\r\n")
+        with self.assertRaises(SystemExit) as ctx:
+            analysis.load(path)
+        message = str(ctx.exception)
+        self.assertIn("'25'", message)
+        self.assertIn("带引号", message)
+
+    def test_空着的值不算不是数字(self):
+        # 空格子是有含义的：算不出状态，会单独记成「(缺失)」。
+        # 它和「写了个不能比大小的东西」是两回事，不能一起拦掉。
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,,60,正常\r\n")
+        df = analysis.load(path)
+        self.assertEqual(len(df), 1)
+        self.assertEqual(analysis.add_rule_status(df)["rule_status"][0], analysis.MISSING)
+
+    def test_小数和负数都是数字(self):
+        path = write_csv(f"{HEADER}\r\n2026-09-22 20:30:00,-5.5,27.5,偏冷\r\n")
+        df = analysis.load(path)
+        self.assertEqual(df["temperature"][0], -5.5)
 
 
 class TestDescribe(unittest.TestCase):
