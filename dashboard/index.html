@@ -126,6 +126,28 @@
     </div>
   </section>
 
+  <!-- ML 辅助判断（Step 9-3 的进阶项）。这一块和上面几块**不是一路数据**：
+       上面全是刚收到的报文算出来的，这一块是 analysis/analysis.py 上一次跑完
+       写在 report/ml_result.json 里的快照，页面只是取过来摆在这儿。
+
+       所以 #ml-note 里那句「判的不是看板上这些实时读数……不是实时数据」
+       必须留着。看板上别的数字都在动、这一块不动，少了那句话，
+       看的人会以为它是刚算出来的。
+
+       三段字全部由 dashboard.js 的 renderMl() 摆上去，说什么由 logic.js 的
+       buildMlNote / mlFetchFailed 决定（纯函数，单独测）。这份文件读不到时
+       （没跑过脚本、或者页面不是从项目根目录起的服务器），这一段降级成
+       一句「这一段没跑：……」—— 看板其余部分照常。 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>ML 辅助判断 <span id="ml-count" class="count"></span></h2>
+    </div>
+    <!-- 占位那句话是**读回来之前**显示的东西。fetch 是异步的，中间那一小段
+         时间空着的话，看起来跟「这一段本来就没有内容」一样。 -->
+    <p id="ml-text" class="ml-text">正在读取 report/ml_result.json …</p>
+    <p id="ml-note" class="note"></p>
+  </section>
+
   <section class="panel">
     <div class="panel-head">
       <h2>消息日志 <span id="log-count" class="count"></span></h2>

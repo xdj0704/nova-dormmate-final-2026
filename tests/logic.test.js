@@ -40,11 +40,12 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十六个（多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十八个（多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,'
   + 'beginEvent,markPriority,markAction,closeEvent,pickPriority,'
-  + 'buildOverview,buildReasons,tempTrend,buildFocus,buildAlert');
+  + 'buildOverview,buildReasons,tempTrend,buildFocus,buildAlert,'
+  + 'buildMlNote,mlFetchFailed');
 /* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
    只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
    自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
@@ -104,15 +105,18 @@ vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
   nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority,
-  buildOverview, buildReasons, tempTrend, buildFocus, buildAlert } = context;
+  buildOverview, buildReasons, tempTrend, buildFocus, buildAlert,
+  buildMlNote, mlFetchFailed } = context;
 
-check('十六个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
+check('十八个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
   beginHandling, nextHandling, beginEvent, markPriority, markAction, closeEvent,
-  pickPriority, buildOverview, buildReasons, tempTrend, buildFocus, buildAlert]
+  pickPriority, buildOverview, buildReasons, tempTrend, buildFocus, buildAlert,
+  buildMlNote, mlFetchFailed]
   .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function', 'function', 'function']);
+  'function', 'function', 'function', 'function', 'function',
+  'function', 'function']);
 
 /* ---------- 小工具 ---------- */
 
@@ -1150,6 +1154,137 @@ check('★ 三个函数都不改传进来的 nodes（页面那边读的是同一
    而下面的卡片一直在涨 —— 看着像数据不更新了。 */
 check('★ 同样的输入连着算两遍，那一行一字不差',
   [buildFocus(BUSY) === buildFocus(BUSY), buildAlert(BUSY) === buildAlert(BUSY)],
+  [true, true]);
+
+/* ---------- K. Step 9-3 进阶项：看板读 ML 结果 ---------- */
+console.log('\n=== K. ML 辅助判断（看板这一侧）===');
+
+/* 一份「像 analysis.py 写出来的」JSON。字段名照 report/ml_result.json 抄。
+   这里够用就行 —— 那份真文件由 tests/dashboard.test.js 整份读进来跑一遍，
+   两处合起来才说明「这函数认得真文件」。 */
+function mlJson(over) {
+  return Object.assign({
+    generatedAt: '2026-09-29 19:45:12',
+    historyFile: 'dorm-a_history_sim.csv',
+    historyRows: 40,
+    historyFlagged: 18,
+    newFile: 'new_samples.csv',
+    newRows: 6,
+    mismatchForward: 2,
+    mismatchReverse: 0,
+    mismatchTotal: 2,
+    text: '历史 40 条里有 18 条被判成「与平时明显不同」；新数据 6 条里，'
+      + '固定规则说正常、ML 说不同的有 2 条。',
+  }, over);
+}
+/* 三样东西的键就这三个。页面那边是照着这三个名字取的 ——
+   哪天改成 note.sentence 之类，dashboard.js 会静悄悄写上去一个 undefined，
+   只有这条能挡住。 */
+const KEYS = ['count', 'note', 'text'];
+
+/* ---- 正常那份 ---- */
+
+const note = buildMlNote(mlJson());
+check('★ 返回的就是那三样（count / text / note）', Object.keys(note).sort(), KEYS);
+check('★ 条数报的是「规则说正常、ML 说不同」那个数',
+  note.count, '规则说正常、ML 说不同：2 条');
+check('★ 结论那句是从 JSON 里原样搬的（看板不另写一份结论）',
+  note.text, mlJson().text);
+check('★ 说明里点明了判的是哪一份新数据', note.note.includes('new_samples.csv（6 条）'), true);
+check('★ 说明里点明了模型是拿哪一份训练的',
+  note.note.includes('dorm-a_history_sim.csv（40 条）'), true);
+check('★ 说明里写清了不是实时数据', note.note.includes('不是实时数据'), true);
+check('★ 说明里带着那份 JSON 记的时刻',
+  note.note.includes('2026-09-29 19:45:12'), true);
+/* 这一条是这一段存在的理由：看板上别的数字都在动，这一段不动。
+   少了那句「判的不是看板上这些读数」，看的人会把它安到刚收到的温湿度上。 */
+check('★ 而且说清了判的不是看板上的实时读数',
+  note.note.includes('判的不是看板上这些实时读数'), true);
+
+/* ---- 两个方向分开报 ---- */
+
+check('两个方向都是 0 时说的是「一条都没差」',
+  buildMlNote(mlJson({ mismatchForward: 0, mismatchReverse: 0 })).count,
+  '规则和 ML 一条都没差');
+/* 反向那条不能顺着前一句说成「一条都没差」—— 那是句假话，
+   两个方向说的根本不是一回事。 */
+check('★ 只有反向时不说「一条都没差」，说的是反向那句',
+  buildMlNote(mlJson({ mismatchForward: 0, mismatchReverse: 1 })).count,
+  '规则说异常、ML 说正常：1 条');
+check('两个方向都有时两句都在，中间分开',
+  buildMlNote(mlJson({ mismatchForward: 2, mismatchReverse: 1 })).count,
+  '规则说正常、ML 说不同：2 条；规则说异常、ML 说正常：1 条');
+
+/* ---- 只留文件名 ---- */
+
+const longPath = buildMlNote(mlJson({
+  historyFile: 'C:\\Users\\xdj\\Desktop\\ml\\dorm-a_history_sim.csv',
+  newFile: '/tmp/ml/new_samples.csv',
+}));
+check('★ 路径只留文件名（那份 JSON 里本来就只有名字，这里再挡一道）',
+  [longPath.note.includes('C:\\Users'), longPath.note.includes('/tmp/'),
+    longPath.note.includes('dorm-a_history_sim.csv'),
+    longPath.note.includes('new_samples.csv')],
+  [false, false, true, true]);
+check('文件名给空了就说「那两份文件」，不留一个空括号',
+  buildMlNote(mlJson({ newFile: '', historyFile: null })).note
+    .includes('那两份文件（6 条）'), true);
+/* 条数写不出来时说「若干」—— 不能写 0，0 是「一条都没有」的意思。 */
+check('条数缺了说「若干」，不说 0',
+  buildMlNote(mlJson({ newRows: undefined })).note.includes('（若干 条）'), true);
+
+/* ---- 时刻缺了 ---- */
+
+const noStamp = buildMlNote(mlJson({ generatedAt: '' }));
+check('★ 没记时刻时不写「undefined 那次」，说「上一次」',
+  [noStamp.note.includes('undefined'), noStamp.note.includes('上一次跑 analysis.py 留下的')],
+  [false, true]);
+
+/* ---- 坏数据：一句都不许往外抛 ---- */
+
+const BROKEN = [
+  ['null', null], ['undefined', undefined], ['空对象', {}],
+  ['少了结论那句', mlJson({ text: '' })], ['结论不是字符串', mlJson({ text: 123 })],
+  ['少了那个数', mlJson({ mismatchForward: undefined })],
+  ['数是个字符串', mlJson({ mismatchForward: '2' })],
+  ['整个是字符串', '{"text":"x"}'], ['整个是数组', [1, 2, 3]],
+];
+BROKEN.forEach(function (item) {
+  let got;
+  try { got = buildMlNote(item[1]); } catch (err) { got = 'THREW: ' + err.message; }
+  const ok = got && typeof got === 'object' && got.count === '' && typeof got.text === 'string'
+    && got.text.indexOf('这一段没跑：') === 0 && got.note === '';
+  check('★ [' + item[0] + '] 降级成一句「这一段没跑」，不抛', ok, true);
+});
+/* 降级那句话里必须是**这三样**都齐的形状，页面才只有一条渲染路径 */
+check('降级时三样东西照样齐（页面那边不用分情况）',
+  Object.keys(buildMlNote(null)).sort(), KEYS);
+
+/* ---- 读不到那份文件 ---- */
+
+const missing = mlFetchFailed('HTTP 404');
+check('★ 读不到时说的话里带着原始原因', missing.text.includes('HTTP 404'), true);
+check('★ 也带着「这一段没跑」这个前缀（和报告里那句同一个口径）',
+  missing.text.indexOf('这一段没跑：') === 0, true);
+check('说明里告诉人怎么办（跑哪个脚本）',
+  missing.note.includes('py -3.14 analysis/analysis.py'), true);
+check('读不到时条数是空的（不写「0 条」，那看着像「一条都没差」）', missing.count, '');
+check('原因取不到时也有句实话，不留个 undefined 在页面上',
+  [mlFetchFailed(undefined).text.includes('undefined'),
+    mlFetchFailed('   ').text.includes('不知道什么原因')],
+  [false, true]);
+
+/* ---- 纯函数：不改输入、同样输入同样输出 ---- */
+
+const K_SNAPSHOT = JSON.stringify(mlJson());
+buildMlNote(mlJson());
+buildMlNote(mlJson({ text: '' }));
+check('★ 两个函数都不改传进来的东西', JSON.stringify(mlJson()), K_SNAPSHOT);
+/* 页面只在启动时算一次，但这一条和上面那些一样：纯函数是它的硬约束。
+   带上任何时间/随机成分，「这一块是上一次跑脚本的快照」这个说法就不成立了。 */
+check('★ 同样输入连着算两遍，三样东西一字不差',
+  [JSON.stringify(buildMlNote(mlJson())) === JSON.stringify(buildMlNote(mlJson())),
+    mlFetchFailed('x').text === mlFetchFailed('x').text],
   [true, true]);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);

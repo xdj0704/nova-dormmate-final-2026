@@ -786,3 +786,103 @@ export function buildAlert(nodes) {
 
   return text + '。';
 }
+
+/* ---------- Step 9-3 的进阶项：看板读 report/ml_result.json ---------- */
+
+/* 看板这一侧**不复算** ML、也不重念一遍规则：它只是把 analysis.py 上一次跑完
+   写下的那份 JSON 摆到页面上。所以这一段里没有阈值、没有模型、不读 CSV，
+   只干一件事 —— 把那份 JSON 说成几句人话。
+
+   为什么不让看板自己判一遍：Isolation Forest 要装 scikit-learn、要读训练数据，
+   浏览器里两样都没有。分开跑、结果落成一份文件、看板取过来显示，是这件事
+   唯一能落地的做法；代价是那份 JSON 里记的是**上一次跑脚本时**的快照，
+   不是实时数据。这个代价必须写在页面上（见下面 note）——
+   不然看板上一堆刚收到的数字旁边摆着一段 ML 结论，谁都会以为它判的是
+   刚刚那几个读数。
+
+   这里返回的永远是**同样三样东西**，成功也好、读坏了也好、压根读不到也好。
+   页面那边因此只有一条渲染路径，不用为「出错了」再写第二套摆放方式；
+   返回 null 让调用方去分情况，反而多出一条没人测得住的分支。 */
+
+/** 那份 JSON 里该有的字段缺了时（不是 analysis.py 写的、或者版本对不上）说的话。 */
+const ML_BAD_SHAPE =
+  '这一段没跑：report/ml_result.json 里没有 analysis.py 该写的字段'
+  + '（可能不是它写的，或者版本对不上）。';
+
+/** 只留文件名。那份 JSON 里存的就是文件名（见 analysis.py 的 write_ml_result），
+    这里再挡一道，免得哪天有人把本机全路径写进去，页面上就露出一条 C:\... */
+function fileName(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '那两份文件';
+  return /[\\/]/.test(text) ? text.split(/[\\/]/).pop() : text;
+}
+
+/** 条数。写不出来就说「若干」—— 不写 0，0 是「一条都没有」的意思，是另一回事。 */
+function rowCount(value) {
+  return Number.isFinite(value) ? String(value) : '若干';
+}
+
+/**
+ * 「ML 辅助判断」这一段要显示的三样东西：标题旁的条数、结论那句、来源说明。
+ *
+ *   { count: '规则说正常、ML 说不同：2 条',
+ *     text:  '……',                       // 结论那一句
+ *     note:  '……' }                      // 判的是哪两份文件、什么时候跑的
+ *
+ * 【text 一定是从 JSON 里原样搬过来的】不在看板上另写一句结论 ——
+ * 报告里那句和这里这句必须是同一串字（analysis.py 那边算一次、渲染两次），
+ * 看板自己拼一份就等于埋下第二个说法，两处迟早不一样。
+ *
+ * @param {*} data report/ml_result.json 解析出来的东西（坏的也认，不抛）
+ * @returns {{count: string, text: string, note: string}}
+ */
+export function buildMlNote(data) {
+  const text = data && typeof data.text === 'string' ? data.text.trim() : '';
+  const forward = data && Number.isFinite(data.mismatchForward)
+    ? data.mismatchForward : null;
+  if (!text || forward === null) return { count: '', text: ML_BAD_SHAPE, note: '' };
+
+  /* 两个方向分开报，和报告里那三个数（正向 / 反向 / 合计）是同一个口径：
+     合成一个数的话，「规则说正常、ML 说不同」和「规则说异常、ML 说正常」
+     会被加在一起，而那两句说的根本不是一回事。 */
+  const reverse = Number.isFinite(data.mismatchReverse) ? data.mismatchReverse : 0;
+  const parts = [];
+  if (forward > 0) parts.push('规则说正常、ML 说不同：' + forward + ' 条');
+  if (reverse > 0) parts.push('规则说异常、ML 说正常：' + reverse + ' 条');
+  const count = parts.length ? parts.join('；') : '规则和 ML 一条都没差';
+
+  const stamp = data.generatedAt && typeof data.generatedAt === 'string'
+    ? data.generatedAt.trim() : '';
+
+  /* 这一句是这一段的地基：它判的是**别的数据**，而且是**上一次**的。
+     两件事都得说，少哪一件都会让人把这张表的结论安到看板上刚收到的读数上。 */
+  const note = '这一段判的不是看板上这些实时读数，是 ' + fileName(data.newFile)
+    + '（' + rowCount(data.newRows) + ' 条）；模型是拿 ' + fileName(data.historyFile)
+    + '（' + rowCount(data.historyRows) + ' 条）训练的。它是 '
+    + (stamp ? stamp + ' 那次' : '上一次')
+    + '跑 analysis.py 留下的，不是实时数据。';
+
+  return { count, text, note };
+}
+
+/**
+ * 那份 JSON 压根读不到时说的话（404 / 打不开 / 回来不是 JSON）。
+ *
+ * 和报告里那句「这一段没跑：{原因}」是同一个口径：降级要说清楚**是哪一段**
+ * 没跑、为什么，而不是让这块空着或者把整页拖垮。reason 由调用方从异常里取，
+ * 这里不翻译也不加工 —— 原样贴出来最有用（「HTTP 404」和「读不到」是两回事，
+ * 一个要检查服务器目录，一个要看脚本有没有跑）。
+ *
+ * @param {string} reason
+ * @returns {{count: string, text: string, note: string}}
+ */
+export function mlFetchFailed(reason) {
+  const why = typeof reason === 'string' && reason.trim()
+    ? reason.trim() : '不知道什么原因';
+  return {
+    count: '',
+    text: '这一段没跑：读不到 report/ml_result.json —— ' + why,
+    note: '先跑一次 py -3.14 analysis/analysis.py，它会把这份文件写在 report/ 下；'
+      + '看板其余部分不受影响。',
+  };
+}

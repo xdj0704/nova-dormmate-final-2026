@@ -493,6 +493,27 @@ button.focus:hover { border-color: var(--text-muted); }
   color: var(--text-muted);
 }
 
+/* 「ML 辅助判断」那段结论（Step 9-3 进阶项）。比 .note 大一号：它是那一块的
+   正话，读的是那一句，下面那行小字才说明它打哪儿来。
+   左边那道竖线是「这一句是别处算的」的记号 —— 同一段字 report.html 里也有
+   一份，两个地方长得像一点，看的人更容易认出是同一句话。 */
+.ml-text {
+  margin: 0 0 8px;
+  padding-left: 12px;
+  border-left: 3px solid var(--hairline);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+/* 紧跟结论那行说明。`.note` 只管字号和颜色，`<p>` 自己的上下边距还留着，
+   这里去掉 —— 上面那句和它是同一段话的两半，不该被一段空白隔开。
+   （空着的时候不留高度，和 `.speak-note` 一个处理。） */
+.ml-text + .note {
+  margin: 0;
+}
+
+.ml-text + .note:empty { display: none; }
+
 .chart-note:empty { display: none; }
 
 .chart-note.is-error {

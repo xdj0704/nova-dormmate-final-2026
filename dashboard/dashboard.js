@@ -38,7 +38,8 @@ import { createDorm3D } from '../3d/scene.js';
    而且 pickPriority 记进事件、跟着导出的 CSV 走的 reason 也在那儿。 */
 import { pickPriority, nextAbnormal, beginHandling, nextHandling,
   beginEvent, markPriority, markAction, closeEvent,
-  buildFocus, buildAlert } from './logic.js';
+  buildFocus, buildAlert,
+  buildMlNote, mlFetchFailed } from './logic.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -191,6 +192,10 @@ const el = {
   conn: document.getElementById('conn'),
   connText: document.getElementById('conn-text'),
   toggle: document.getElementById('toggle'),
+  /* Step 9-3 进阶项的三件：条数、结论那句、来源说明 */
+  mlCount: document.getElementById('ml-count'),
+  mlText: document.getElementById('ml-text'),
+  mlNote: document.getElementById('ml-note'),
 };
 
 /* ---------- 消息日志 ---------- */
@@ -1221,6 +1226,57 @@ function connect() {
   updateToggle();
 }
 
+/* ---------- ML 辅助判断（Step 9-3 的进阶项）---------- */
+
+/* 这一段和上面所有东西都不一样：它**不来自 MQTT**。
+   那份 JSON 是 analysis/analysis.py 上一次跑完写下的（见那个文件的
+   write_ml_result），页面只是取过来摆在这儿。两件事跟着来：
+
+     1) 它是个静态文件 —— 页面开一次读一次，读完就不再变。看板上别的数字
+        都在跟着报文动，只有这一块不动。所以 #ml-note 里那句「不是实时数据」
+        得留在页面上（由 buildMlNote 给），不能嫌啰嗦删掉。
+     2) 跟 Broker 没关系 —— 现场没网、mqtt.js 没加载、broker 没起，
+        这一段照样显示（当然，前提是页面本身是从 http 服务器打开的）。
+
+   路径相对**本页面**算：页面在 dashboard/ 下，所以是 ../report/ml_result.json。
+   这个路径只在下面这一处写，fetch 的 stub 也是照它对的。 */
+const ML_JSON_URL = '../report/ml_result.json';
+
+/* 把三段字摆到页面上。**这里一个字都不拼** —— 说什么全由 logic.js 的
+   buildMlNote / mlFetchFailed 决定，那两个是纯函数，单独测得住。
+
+   成功、读坏了、读不到三条路都走这一个函数：它们拿回来的都是同样那三样
+   （条数 / 结论 / 说明），所以页面上只有一条摆放方式，不用为出错再写一套。 */
+function renderMl(note) {
+  el.mlCount.textContent = note.count;
+  el.mlText.textContent = note.text;
+  el.mlNote.textContent = note.note;
+}
+
+/* 读一次那份 JSON。
+
+   ⚠ 这里必须用 fetch 而不是把 JSON 直接 import 进来。
+   import 一个 .json 在浏览器里要么得加 import attributes（Safari 还不认），
+   要么得改后缀，而且**打不开就是整页白屏** —— 一份辅助结论读不到，
+   不该把看板拖垮。fetch 失败还能 catch 住，降级成一行字。
+
+   三种失败都要落到同一句降级话上，所以 catch 放在链子最后：
+     404（没跑过脚本）/ 打不开（页面不是从项目根目录起的服务器）/
+     回来不是 JSON（文件被别的程序占着写了一半）。
+   reason 取异常自己的话，不翻译 —— 「HTTP 404」和「Unexpected token <」
+   指向的是两个完全不同的排查方向。 */
+function loadMlResult() {
+  return fetch(ML_JSON_URL)
+    .then(function (resp) {
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return resp.json();
+    })
+    .then(function (data) { renderMl(buildMlNote(data)); })
+    .catch(function (err) {
+      renderMl(mlFetchFailed(err && err.message ? err.message : String(err)));
+    });
+}
+
 /* ---------- 启动 ---------- */
 
 el.simulate.addEventListener('click', simulate);
@@ -1297,6 +1353,12 @@ renderCharts();
 renderFocus();
 renderEvents();
 renderLog();
+
+/* ML 那一段是**异步**的（要等 fetch 回来），所以它不在这串 render 里 ——
+   放在这里只是「启动时读一次」这个动作的位置，真正的渲染在 fetch 回来
+   之后由 renderMl 做。没等它也是对的：那一段读不到不影响别的任何一块，
+   页面该显示的东西开头那几行就已经显示完了。 */
+loadMlResult();
 
 /* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，
    现场没网的时候正好用来演示界面。 */

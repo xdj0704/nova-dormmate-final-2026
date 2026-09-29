@@ -51,7 +51,9 @@ const els = {};
      那样断言里读到的 els['event-body'] 和页面里那个就不是同一个对象了。 */
   'event-body', 'event-count', 'export-events',
   /* Step 8-3 的三件：顶上那一行、语音按钮、按钮下面那行说明。同理必须登记。 */
-  'focus', 'speak', 'speak-note']
+  'focus', 'speak', 'speak-note',
+  /* Step 9-3 进阶项的三件：条数、结论那句、来源说明。同理必须登记。 */
+  'ml-count', 'ml-text', 'ml-note']
   .forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
@@ -200,10 +202,25 @@ const speechStub = {
   speak(u) { this.uttered.push(u); speechLog.push('speak'); },
 };
 
+/* ---------- fetch 打桩（Step 9-3 的进阶项）----------
+   看板打开时会 fetch('../report/ml_result.json')，把 C 部分那份 ML 结果读来显示。
+   vm 里没有 fetch，不打桩就是 ReferenceError —— 而这一段的验收点
+   （读到了摆什么、404 摆什么、回来不是 JSON 又摆什么）全都发生在
+   promise 回来**之后**，所以桩不能直接把结果给出去：
+   它把 resolve / reject 存起来，让测试自己挑时候放行（R 段），
+   放行之后还要等一轮微任务才读得到页面 —— 见 R 段那个 settle()。 */
+const fetchCalls = [];
+const fetchPending = [];
+function fetchStub(url) {
+  fetchCalls.push(url);
+  return new Promise((resolve, reject) => { fetchPending.push({ resolve, reject }); });
+}
+
 const context = {
   document: documentStub,
   Chart: ChartStub,
   mqtt: mqttStub,
+  fetch: fetchStub,
   createDorm3D: createDorm3DStub,
   location: { hostname: 'localhost' },
   getComputedStyle: () => ({ getPropertyValue: (n) => PALETTE[n] || '' }),
@@ -245,7 +262,7 @@ const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene
    所以分隔符一律写 \s —— 它能匹配换行，折行处那几个空格加换行才过得去。
    写成 [ ] 或字面空格的话，摘不掉 import，下一句 vm 会抛
    「Cannot use import statement outside a module」。 */
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildFocus\s*,\s*buildAlert\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildFocus\s*,\s*buildAlert\s*,\s*buildMlNote\s*,\s*mlFetchFailed\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
 const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
 const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
@@ -286,6 +303,7 @@ globalThis.__events = events;
 globalThis.__renderEvents = renderEvents;
 globalThis.__buildEventsCSV = buildEventsCSV;
 globalThis.__exportEventsCSV = exportEventsCSV;
+globalThis.__loadMlResult = loadMlResult;
 `;
 vm.runInContext(src, context, { filename: DASH_SRC });
 
@@ -318,11 +336,21 @@ const EVENTS_AT_LOAD = {
   body: els['event-body'].innerHTML,
 };
 
+/* ML 那一块刚加载完的样子。这一份和上面几份不一样：它不是「别的段会把它改掉」，
+   而是**测试自己**在 R 段会把 fetch 放行、让页面重画它。到那时候再读，
+   拿到的就是「读回来之后」的样子了 —— 要验「读回来之前不是一片空白」
+   只能靠这一份快照。 */
+const ML_AT_LOAD = {
+  count: els['ml-count'].textContent,
+  text: els['ml-text'].textContent,
+};
+
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
   __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
   __renderScene: renderScene, __renderFocus: renderFocus, __speakAlert: speakAlert,
   __events: events, __buildEventsCSV: buildEventsCSV,
+  __loadMlResult: loadMlResult, buildMlNote, mlFetchFailed,
   pickPriority, beginHandling, nextHandling,
   buildFocus, buildAlert } = context;
 
@@ -1214,7 +1242,9 @@ const els2 = {};
   'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
   /* 这几个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
-  'event-body', 'event-count', 'export-events', 'focus', 'speak', 'speak-note']
+  'event-body', 'event-count', 'export-events', 'focus', 'speak', 'speak-note',
+  /* ML 那三件同理。R 段要在这一段里读它降级之后写了什么 */
+  'ml-count', 'ml-text', 'ml-note']
   .forEach((id) => { els2[id] = makeEl(id); });
 /* 这一段故意**不**补 Blob / URL / setTimeout：导出按钮在这里不会被点，
    而「缺依赖时页面照样起得来」正是这一段要验的 —— 补得越全，
@@ -1231,6 +1261,12 @@ const doc2 = {
 const ctx2 = {
   document: doc2,
   Chart: ChartStub,
+  /* 这里的 fetch 是**故意**让它失败的：这个上下文模拟的是「现场什么依赖都缺」，
+     离线时浏览器的 fetch 就是这个反应（fetch 本身在，请求发不出去）。
+     不能不给：不给的话 dashboard.js 一开头的 loadMlResult() 会抛
+     ReferenceError，那这一段测的就成了「少给一个桩会怎样」，
+     而不是「什么都缺时页面还能不能起来」。 */
+  fetch: () => Promise.reject(new Error('Failed to fetch')),
   /* 这里故意让 3D 建不起来（模拟这台设备没有 WebGL）：
      和 mqtt 那条一起，凑成「两个依赖同时缺」的最坏情况 ——
      页面照样得起来。initScene3D 的 try/catch 就是为这个写的。 */
@@ -1775,5 +1811,151 @@ clearAll();
 check('★ 清空之后顶部那一行回到起点，不留上一次的账',
   els.focus.innerHTML.includes('还没有收到任何节点的数据'), true);
 
-console.log(`\n结果：${pass} 通过，${fail} 不通过`);
-process.exit(fail === 0 ? 0 : 1);
+/* ============ R. ML 辅助判断（Step 9-3 的进阶项）============
+   这一段和上面每一段都不同：它的数据不来自 MQTT，而是页面自己去 fetch
+   一份**静态文件**（analysis/analysis.py 上一次跑完写的 report/ml_result.json）。
+   要验的有三件：
+
+     1) 打开页面就去读，而且只读一次
+     2) 读回来了 —— 摆的就是文件里那句结论，不是页面另写的一份
+     3) 读不到（404 / 服务器没起 / 回来不是 JSON / 文件不是那个文件）
+        都得降级成一行**说清原因**的字，不能空着、不能把页面拖垮
+
+   第 3 条是这个文件里最容易漏的：那些路径平时跑不到，出事的时候正好在现场演示。 */
+console.log('\n=== R. ML 辅助判断（看板读 report/ml_result.json）===');
+
+const mlCount = () => els['ml-count'].textContent;
+const mlText = () => els['ml-text'].textContent;
+const mlNote = () => els['ml-note'].textContent;
+
+/* --- 接线本身 --- */
+
+check('index.html 里有 #ml-text', dashHtml.includes('id="ml-text"'), true);
+check('index.html 里有 #ml-count', dashHtml.includes('id="ml-count"'), true);
+check('index.html 里有 #ml-note', dashHtml.includes('id="ml-note"'), true);
+check('面板标题就是「ML 辅助判断」', dashHtml.includes('ML 辅助判断'), true);
+
+/* 启动时读，就一次 —— 这一段是静态文件，没有「再读一遍」的理由，
+   多读几次不但没用，还会把「它跟实时数据没关系」这件事说糊。 */
+check('★ 打开页面就去读那份 JSON（就一次）', fetchCalls, ['../report/ml_result.json']);
+
+/* --- 读回来之前 --- */
+
+/* 占位那句话写在 index.html 里（假 DOM 读不到它，所以对着**文件**查），
+   它必须落在 #ml-text 这个 <p> 里头 —— 落到别处就白写了。
+   fetch 是异步的，那几百毫秒里那一块空着的话，看着跟「这一段没有内容」一样。 */
+check('★ 读回来之前那一块写着「正在读取」而不是空白（fetch 是异步的）',
+  /id="ml-text"[^>]*>正在读取[^<]*</.test(dashHtml), true);
+check('（占位那句里点明了读的是哪份文件）',
+  /id="ml-text"[^>]*>[^<]*report\/ml_result\.json/.test(dashHtml), true);
+/* 条数那一格是 JS 填的，所以这一条看的是真跑起来之后的那个元素：
+   它只能是空的 —— 先摆一个「0 条」的话，读回来之前看着就像「一条都没差」。 */
+check('★ 读回来之前条数那格是空的（不先摆一个「0 条」）', ML_AT_LOAD.count, '');
+
+/* --- 真的把仓库里那份读了 --- */
+
+/* 下面每一跳都拿**它自己**跟真文件里的数对，不写死 2 条 / 40 条 ——
+   data/ 一改或脚本重跑一遍，那些数就会变，写死的断言会红得莫名其妙。
+   读的是仓库里那份真文件，也不自己手写一份假 JSON：手写的桩在
+   analysis.py 改了字段名之后照样全绿，而真页面上会写「这一段没跑」。 */
+const ML_REAL = JSON.parse(
+  fs.readFileSync(path.join(ROOT, 'report', 'ml_result.json'), 'utf8'));
+
+/* fetch 回来之后还要过两个 then 才轮到页面 —— 那些排在微任务里。
+   setTimeout(0) 是宏任务，排在所有微任务后面，等它一轮就够了。 */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/* 这一段读不到那份文件时，一个节点、一条事件都不该被动过 ——
+   它是**另一条数据线**，跟 MQTT 那条没有任何关系。 */
+const ML_BEFORE = JSON.stringify(nodes) + '|' + events.length;
+
+(async function () {
+  fetchPending[0].resolve({ ok: true, status: 200, json: () => Promise.resolve(ML_REAL) });
+  await settle();
+
+  const want = buildMlNote(ML_REAL);
+  check('★ 页面上摆的三样就是那个纯函数算出来的三样（页面一个字都不自己拼）',
+    [mlCount(), mlText(), mlNote()], [want.count, want.text, want.note]);
+  check('★ 结论那句就是真文件里那一句（看板和报告说的是同一句话）',
+    mlText(), ML_REAL.text);
+  check('★ 条数就是真文件里「规则说正常、ML 说不同」那个数',
+    mlCount().includes('：' + ML_REAL.mismatchForward + ' 条'), ML_REAL.mismatchForward > 0);
+  check('★ 说明里写着不是实时数据（看板上别的数字都在动，这一段不动）',
+    mlNote().includes('不是实时数据'), true);
+  check('★ 说明里那两份文件名和真文件对得上',
+    [mlNote().includes(ML_REAL.newFile), mlNote().includes(ML_REAL.historyFile)],
+    [true, true]);
+  check('★ 说明里带着那份 JSON 记的时刻', mlNote().includes(ML_REAL.generatedAt), true);
+
+  /* --- 读不到：先是一个「文件根本打不开」 --- */
+
+  loadMlResult();
+  fetchPending[1].reject(new Error('Failed to fetch'));
+  await settle();
+
+  check('★ 打不开时降级成一句「这一段没跑：……」，不抛也不空着',
+    [mlText().indexOf('这一段没跑：') === 0, mlText().includes('Failed to fetch')],
+    [true, true]);
+  check('★ 打不开时条数那格是空的（不写「0 条」，那看着像「一条都没差」）',
+    mlCount(), '');
+  check('★ 打不开时告诉人先跑哪个脚本',
+    mlNote().includes('py -3.14 analysis/analysis.py'), true);
+
+  /* --- 404：页面不是从项目根目录起的服务器时就是这样 --- */
+
+  loadMlResult();
+  fetchPending[2].resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+  await settle();
+  check('★ 404 说的是「HTTP 404」，不是拿一句「读不到」糊过去',
+    mlText().includes('HTTP 404'), true);
+
+  /* --- 回来不是 JSON：文件被人占着写了一半，或者服务器给了个 404 页面 --- */
+
+  loadMlResult();
+  fetchPending[3].resolve({
+    ok: true, status: 200,
+    json: () => Promise.reject(new Error('Unexpected token < in JSON at position 0')),
+  });
+  await settle();
+  check('★ 回来不是 JSON 时也说得出为什么',
+    mlText().includes('Unexpected token'), true);
+
+  /* --- 是 JSON，但不是 analysis.py 写的那份 --- */
+
+  loadMlResult();
+  fetchPending[4].resolve({ ok: true, status: 200, json: () => Promise.resolve({ hi: 1 }) });
+  await settle();
+  check('★ 文件在那儿但不是那一份：照样说「这一段没跑」',
+    [mlText().indexOf('这一段没跑：') === 0, mlText().includes('该写的字段')],
+    [true, true]);
+
+  /* --- 这四条路走下来，别的任何一块都不该动过 --- */
+
+  check('★ ML 那一段读不到，一个节点、一条事件都不动（它不走 MQTT 那条线）',
+    JSON.stringify(nodes) + '|' + events.length, ML_BEFORE);
+
+  /* --- 再读到一次能恢复：降级是一时的，不是把这一块写死 --- */
+
+  loadMlResult();
+  fetchPending[5].resolve({ ok: true, status: 200, json: () => Promise.resolve(ML_REAL) });
+  await settle();
+  check('★ 再读到时又能摆回来（降级不留痕）', mlText(), ML_REAL.text);
+
+  /* --- 直接调 loadMlResult 也走同一条路（上面每一次都是它）--- */
+
+  check('★ 跑在页面上的就是 dashboard.js 里那个函数（不是测试另造的一条路）',
+    typeof loadMlResult, 'function');
+
+  /* --- L 段那个「什么都没有」的上下文 --- */
+
+  /* 那边没有 mqtt、没有 WebGL、也没有能用的 fetch（模拟离线 / 服务器没起）。
+     页面照样得起来，ML 那一段降级成一行字 —— 它的 promise 是在那边加载时
+     发出的，刚刚这几轮微任务里已经跑完了。 */
+  check('★ L 段那个「要什么没什么」的上下文里，ML 那一段也降级成一行字',
+    els2['ml-text'].textContent.indexOf('这一段没跑：') === 0, true);
+  check('（那边连 fetch 都用不了，原因写的就是打不开）',
+    els2['ml-text'].textContent.includes('Failed to fetch'), true);
+
+  console.log(`\n结果：${pass} 通过，${fail} 不通过`);
+  process.exit(fail === 0 ? 0 : 1);
+})();
