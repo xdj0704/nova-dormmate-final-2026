@@ -49,7 +49,9 @@ const els = {};
   /* Step 7-4 的三件：事件表、条数、导出按钮。
      必须列在这里 —— getElementById 对没登记的 id 会现场造一个新的，
      那样断言里读到的 els['event-body'] 和页面里那个就不是同一个对象了。 */
-  'event-body', 'event-count', 'export-events']
+  'event-body', 'event-count', 'export-events',
+  /* Step 8-1 的两句：B1 总览、B2 依据。同理必须登记。 */
+  'overview', 'reasons']
   .forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
@@ -210,7 +212,7 @@ const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene
    所以分隔符一律写 \s —— 它能匹配换行，折行处那几个空格加换行才过得去。
    写成 [ ] 或字面空格的话，摘不掉 import，下一句 vm 会抛
    「Cannot use import statement outside a module」。 */
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildOverview\s*,\s*buildReasons\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
 const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
 const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
@@ -250,6 +252,7 @@ globalThis.__events = events;
 globalThis.__renderEvents = renderEvents;
 globalThis.__buildEventsCSV = buildEventsCSV;
 globalThis.__exportEventsCSV = exportEventsCSV;
+globalThis.__renderInsight = renderInsight;
 `;
 vm.runInContext(src, context, { filename: DASH_SRC });
 
@@ -277,11 +280,20 @@ const EVENTS_AT_LOAD = {
   body: els['event-body'].innerHTML,
 };
 
+/* B1 / B2 那两句刚加载完的样子。同样的道理，Q 段一上来就灌数据。
+   少了这一份，把文件末尾那次 renderInsight() 删掉也不会有人发现 ——
+   <p> 本来就是空的，看着跟「渲染过了、只是没有数据」一模一样。 */
+const INSIGHT_AT_LOAD = {
+  overview: els.overview.textContent,
+  reasons: els.reasons.textContent,
+};
+
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
   __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
   __renderScene: renderScene, __renderPriority: renderPriority,
   __events: events, __buildEventsCSV: buildEventsCSV,
+  __renderInsight: renderInsight,
   pickPriority, beginHandling, nextHandling } = context;
 
 /* ---------- 断言 ---------- */
@@ -1064,8 +1076,8 @@ const els2 = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
-  /* 这三个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
-  'event-body', 'event-count', 'export-events']
+  /* 这几个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
+  'event-body', 'event-count', 'export-events', 'overview', 'reasons']
   .forEach((id) => { els2[id] = makeEl(id); });
 /* 这一段故意**不**补 Blob / URL / setTimeout：导出按钮在这里不会被点，
    而「缺依赖时页面照样起得来」正是这一段要验的 —— 补得越全，
@@ -1414,6 +1426,146 @@ check('★ 到点了才 revoke，revoke 的就是那个 URL', revokedUrls, [anch
 
 /* 一条事件都没有时按钮是 disabled 的。真浏览器里点灰按钮不会触发回调，
    所以这里不模拟「点了会怎样」—— 上面 EVENTS_AT_LOAD 那条断言盯的就是它。 */
+
+/* ============ Q. 当前总览 + 判断依据（Step 8-1）============ */
+console.log('\n=== Q. 当前总览 + 判断依据 ===');
+
+const ovText = () => els.overview.textContent;
+const rsText = () => els.reasons.textContent;
+
+/* --- 接线本身 --- */
+
+check('index.html 里有 #overview', dashHtml.includes('id="overview"'), true);
+check('index.html 里有 #reasons', dashHtml.includes('id="reasons"'), true);
+check('两块的标题就是「当前总览」和「判断依据」',
+  [dashHtml.includes('当前总览'), dashHtml.includes('判断依据')], [true, true]);
+
+/* --- 启动那一刻（一条数据都没有）--- */
+
+check('★ 启动时这两句就画好了，而且说的是「还没有收到数据」而不是「都正常」',
+  INSIGHT_AT_LOAD.overview, '还没有收到任何节点的数据。');
+check('★ 启动时依据也说不出——不硬编一句糊弄过去',
+  INSIGHT_AT_LOAD.reasons, '还没有收到任何节点的数据，说不出依据。');
+
+/* --- 每收到一条消息都重算（这是这一步的要害：不许缓存）--- */
+
+clearAll();
+check('清空之后回到「还没有收到」', ovText(), '还没有收到任何节点的数据。');
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+check('★ 收到第一条数据就重算了：不再是「还没有收到」',
+  ovText(), '当前 3 个宿舍中，1 个正常，另有 2 个还没有收到数据。');
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
+check('★ 三个都正常之后改口说「都正常」，不硬凑「0 个需要关注」',
+  ovText(), '当前 3 个宿舍都正常。');
+check('依据跟着改口', rsText(), '当前 3 个宿舍都正常，没有要优先处理的宿舍。');
+
+/* --- 一个宿舍变异常 --- */
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+check('★ 一个宿舍变异常：总览立刻改口并点出重点（不用等别的事件触发）',
+  ovText(),
+  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 不到 1 分钟，是当前重点。');
+check('★ 依据同时跟上，说的是「目前唯一的异常节点」',
+  rsText(),
+  '优先关注 dorm-b：已连续偏热 不到 1 分钟（1 次），是目前唯一的异常节点；'
+  + 'dorm-a 当前正常；dorm-c 当前正常。');
+
+/* 又来一条 —— 时长跟着变。这一条专门盯「有没有缓存」：
+   要是两句只在第一条消息时算过一次，这里的数字会停在「不到 1 分钟」。 */
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 33, 60, undefined, T('20:20:00')));
+check('★ 再来一条：时长当场跟着变（没有缓存住第一条时的数字）',
+  ovText(),
+  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点。');
+check('依据里的时长和次数也一起变了',
+  rsText(),
+  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），是目前唯一的异常节点；'
+  + 'dorm-a 当前正常；dorm-c 当前正常。');
+
+/* --- 两个宿舍同时异常：总览多出一笔，依据开始逐个对比 --- */
+
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 80, undefined, T('20:15:00')));
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 26, 82, undefined, T('20:20:00')));
+check('★ 两个异常：总览多出一笔「dorm-c 出现偏湿」',
+  ovText(),
+  '当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点；'
+  + 'dorm-c 出现偏湿。');
+check('★ 两个异常：依据逐个对比，输的那个说清输在哪一步',
+  rsText(),
+  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），持续时间最长；'
+  + 'dorm-c 虽然偏湿，但只持续 5 分钟；dorm-a 当前正常。');
+
+/* --- 重点那个恢复了：两句话一起改口 --- */
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:30:00')));
+check('★ 重点恢复之后，总览和依据一起换人（不会只改一处）',
+  [ovText(),
+    rsText()],
+  ['当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-c 已持续偏湿 5 分钟，是当前重点。',
+    '优先关注 dorm-c：已连续偏湿 5 分钟（2 次），是目前唯一的异常节点；'
+    + 'dorm-a 当前正常；dorm-b 当前正常。']);
+
+/* --- 脏数据不许动这两句 --- */
+
+const ovBeforeBad = ovText();
+const rsBeforeBad = rsText();
+handleMessage('dormmate/dorm-d/env', mk('dorm-d', 31, 60));
+handleMessage('dormmate/dorm-a/env', '{ 这不是 JSON');
+check('★ 被拦下的报文（未知节点 / 解析失败）不会改写这两句话',
+  [ovText() === ovBeforeBad, rsText() === rsBeforeBad], [true, true]);
+
+/* --- 处理状态 --- */
+
+clearAll();
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+check('按风扇之前总览里没有那半句',
+  ovText().includes('处理中'), false);
+
+selectNode('dorm-b');
+els['action-fan']._handlers.click.forEach((fn) => fn());
+/* 这一条盯的是风扇回调里那句 renderInsight()。漏掉的话，
+   「（风扇已开启，处理中）」要等到下一条报文进来才出现 ——
+   中间那段时间卡片上写着「处理中｜风扇已开启」、总览里却什么都没有。 */
+check('★ 按了风扇之后总览**当场**补出处理状态（不用等下一条报文）',
+  ovText(),
+  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 不到 1 分钟，是当前重点'
+  + '（风扇已开启，处理中）。');
+check('★ 依据里也带上同一句',
+  rsText().includes('（风扇已开启，处理中）'), true);
+check('★ 处理状态不参与排序：按了风扇重点还是同一个',
+  ovText().includes('dorm-b 已持续'), true);
+
+/* --- 用 textContent，不走 innerHTML --- */
+/* 这两句里夹着节点名，而节点名是从 topic / 报文里读来的，不是我们写的常量。
+   走 innerHTML 的话，哪天混进一个 < 就把版面撕了。makeEl 把两个字段分开记，
+   所以这里能直接看出走的是哪条路。 */
+check('★ 两句都是 textContent 贴上去的，innerHTML 一直是空的',
+  [els.overview.innerHTML, els.reasons.innerHTML], ['', '']);
+
+/* --- 和顶上那条栏必须指向同一个人 --- */
+
+const pickNow = pickPriority(nodes);
+check('★ 总览点的重点和优先关注栏是同一个人',
+  ovText().includes(pickNow.nodeId + ' 已持续'), true);
+check('★ 依据开头那半句和栏里的原因逐字相同（去掉开头的节点名）',
+  rsText().indexOf('优先关注 ' + pickNow.nodeId + '：'
+    + pickNow.reason.slice(pickNow.nodeId.length + 1)), 0);
+
+/* --- 直接调 renderInsight 也幂等（清空 / 启动那两处就是这么调的）--- */
+const ovIdem = ovText();
+const rsIdem = rsText();
+renderInsight();
+check('★ 数据没变时重画一遍，两句话一字不差（幂等）',
+  [ovText() === ovIdem, rsText() === rsIdem], [true, true]);
+
+clearAll();
+check('★ 清空之后这两句也回到起点，不留上一次的账',
+  [ovText(), rsText()],
+  ['还没有收到任何节点的数据。', '还没有收到任何节点的数据，说不出依据。']);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

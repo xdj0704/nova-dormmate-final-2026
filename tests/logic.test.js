@@ -40,15 +40,27 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十一个（多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十三个（多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,'
-  + 'beginEvent,markPriority,markAction,closeEvent,pickPriority');
+  + 'beginEvent,markPriority,markAction,closeEvent,pickPriority,'
+  + 'buildOverview,buildReasons');
 /* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
    只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
    自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
 check('★ ACTION_FAN 不导出（那串字只该从 logic.js 里出来一份）',
   EXPORTS.includes('ACTION_FAN'), false);
+
+/* 8-1 的内部件同理不导出。ranked() 是「谁是重点」的唯一一份排序，
+   basisFor() 是「赢在哪一步」的唯一一份说法 —— 导出的话，页面那边就能
+   绕开 pickPriority 自己排一遍，页面上两句话指着不同的宿舍而没人报错。
+   （basisFor 在 8-1 之前叫 reasonFor，那时它是私有的；拆成两半之后
+   仍然都留在模块里，只有 buildReasons / pickPriority 是对外的口。） */
+['ranked', 'basisFor', 'reasonFor', 'survey', 'handlingNote', 'lostTo']
+  .forEach(function (name) {
+    check('★ ' + name + ' 不导出（内部件：排序和说法各只留一份）',
+      EXPORTS.includes(name), false);
+  });
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
@@ -81,13 +93,15 @@ vm.createContext(context);
 vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
-  nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority } = context;
+  nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority,
+  buildOverview, buildReasons } = context;
 
-check('十一个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
+check('十三个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
   beginHandling, nextHandling, beginEvent, markPriority, markAction, closeEvent,
-  pickPriority].map((f) => typeof f),
+  pickPriority, buildOverview, buildReasons].map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function', 'function', 'function']);
+  'function', 'function', 'function', 'function', 'function',
+  'function', 'function']);
 
 /* ---------- 小工具 ---------- */
 
@@ -651,6 +665,250 @@ check('★ 没有任何函数会去改 problem（markPriority / markAction / clo
     closeEvent(worsen, '2026-09-22 20:55:00')]
     .map((p) => Object.prototype.hasOwnProperty.call(p, 'problem')),
   [false, false, false]);
+
+/* ---------- I. Step 8-1：B1 当前总览 + B2 判断依据 ---------- */
+
+console.log('\n=== I. Step 8-1：当前总览 + 判断依据 ===');
+
+/* 三个节点的三份数据。时间全部写死成固定时刻 —— 和 7-1 算时长同一个道理：
+   两端都取报文里的 time，所以 20:00 到 20:20 永远是 20 分钟，
+   跟什么时候跑、在哪台机器上跑都没关系，断言才能写定值。 */
+function trio(a, b, c) {
+  return { 'dorm-a': a, 'dorm-b': b, 'dorm-c': c };
+}
+/* 正常节点：abnormalCount 是 0，abnormalStart 按约定也是 null */
+function calm(time) { return node(time, null, 0, '正常'); }
+/* 一条数据都还没收到的节点。页面刚打开、还没连上 broker 的那几秒就是这个样子 */
+function silent() { return { latest: null, abnormalStart: null, abnormalCount: 0 }; }
+
+const ALL_CALM = trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'),
+  calm('2026-09-22 20:00:00'));
+const NOBODY = trio(silent(), silent(), silent());
+
+check('★ 一条数据都没有时不说「都正常」——那是**不知道**，不是正常',
+  buildOverview(NOBODY), '还没有收到任何节点的数据。');
+check('★ 一条数据都没有时，依据也说不出——不硬编一句糊弄过去',
+  buildReasons(NOBODY), '还没有收到任何节点的数据，说不出依据。');
+check('★ nodes 是空对象也不炸',
+  buildOverview({}), '还没有收到任何节点的数据。');
+check('★ nodes 是 undefined 也不炸',
+  typeof buildReasons(undefined), 'string');
+check('★ 都正常：总览不硬凑「0 个需要关注」',
+  buildOverview(ALL_CALM), '当前 3 个宿舍都正常。');
+check('★ 都正常：依据说清「没有要优先处理的」',
+  buildReasons(ALL_CALM), '当前 3 个宿舍都正常，没有要优先处理的宿舍。');
+check('★ 都正常时总览里不出现「是当前重点」（没有重点就别造一个）',
+  /当前重点/.test(buildOverview(ALL_CALM)), false);
+check('★ 只收到 2 个节点的数据时，「都正常」要改口——第 3 个是不知道',
+  buildOverview(trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'), silent())),
+  '当前 3 个宿舍中，2 个正常，另有 1 个还没有收到数据。');
+
+/* ---- 一个异常 ---- */
+
+const ONE = trio(calm('2026-09-22 20:00:00'),
+  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+  calm('2026-09-22 20:00:00'));
+
+check('★ 一个异常：总览先说计数，再点出重点',
+  buildOverview(ONE),
+  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点。');
+check('★ 一个异常：依据里正常的两个直说「当前正常」，不硬拉来比较',
+  buildReasons(ONE),
+  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），是目前唯一的异常节点；'
+  + 'dorm-a 当前正常；dorm-c 当前正常。');
+
+/* ---- 两个异常：靠时长决出（就是需求里给的那两句）---- */
+
+const TWO = trio(calm('2026-09-22 20:00:00'),
+  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+  node('2026-09-22 20:20:00', '2026-09-22 20:15:00', 2, '偏湿'));
+
+check('★ 两个异常：总览多出一笔「dorm-c 出现偏湿」',
+  buildOverview(TWO),
+  '当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点；'
+  + 'dorm-c 出现偏湿。');
+check('★ 两个异常：依据逐个对比，输的那个说清输在哪一步',
+  buildReasons(TWO),
+  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），持续时间最长；'
+  + 'dorm-c 虽然偏湿，但只持续 5 分钟；dorm-a 当前正常。');
+
+/* ---- 时长打平、靠次数决出 ---- */
+
+const TIE = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏冷'),
+  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 4, '偏热'),
+  calm('2026-09-22 20:00:00'));
+
+check('★ 时长打平时，输的那个不能写成「只持续 20 分钟」——它并没有更短',
+  buildReasons(TIE),
+  '优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间和 dorm-a 一样长，异常次数最多；'
+  + 'dorm-a 也偏冷，持续时间和它一样长，但只有 2 条异常数据；dorm-c 当前正常。');
+
+/* ---- 完全并列、只能按节点名定序 ---- */
+
+const DEAD = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏冷'),
+  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+  calm('2026-09-22 20:00:00'));
+
+check('★ 完全并列时明说是靠节点名排的，不装作赢了',
+  buildReasons(DEAD),
+  '优先关注 dorm-a：已连续偏冷 20 分钟（2 次），和 dorm-b 完全并列，按节点名顺序排在前面；'
+  + 'dorm-b 也偏热，时长和次数都跟它一样，按节点名顺序排在后面；dorm-c 当前正常。');
+
+/* ---- 处理状态 ---- */
+
+const HANDLING = trio(calm('2026-09-22 20:00:00'),
+  Object.assign(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+    { handling: '处理中', action: '风扇已开启' }),
+  node('2026-09-22 20:20:00', '2026-09-22 20:15:00', 2, '偏湿'));
+
+check('★ 正在处理的节点，总览里如实补一句；计数口径不变，仍算「需要关注」',
+  buildOverview(HANDLING),
+  '当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点'
+  + '（风扇已开启，处理中）；dorm-c 出现偏湿。');
+check('★ 依据里也带上处理状态',
+  buildReasons(HANDLING).indexOf('（风扇已开启，处理中）') >= 0, true);
+/* 处理状态只是如实报出来，不参与排序 —— 真按「有没有人管」排是另一套规则。
+   这里用同一份数据（只差 handling 那几个字段）验证：重点和原因一字不变。 */
+check('★ 处理状态不参与排序：同一份数据按不按风扇，「谁是重点、因为什么」都一样',
+  pickPriority(HANDLING).reason, pickPriority(TWO).reason);
+/* 一个**已经正常**、handling 却还停在「处理中」的节点：风扇是按在旧数据上的，
+   之后来的那条正常数据比动作还早（见 nextHandling 的时间判断），所以状态回来了
+   但处理状态没跟上。这时候写「（风扇已开启，处理中）」是自相矛盾的
+   —— 都正常了还处理什么。 */
+check('★ 状态已经正常、处理状态却还停在「处理中」的节点，不带那个括号',
+  buildReasons(trio(
+    Object.assign(calm('2026-09-22 20:00:00'),
+      { handling: '处理中', action: '风扇已开启' }),
+    node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+    calm('2026-09-22 20:00:00'))).indexOf('处理中'), -1);
+
+/* ---- 有节点还没收到数据 ---- */
+
+const MIXED = trio(silent(),
+  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+  calm('2026-09-22 20:00:00'));
+
+check('★ 没收到数据的节点单独说，不算进「正常」里（三个数加起来正好是宿舍数）',
+  buildOverview(MIXED),
+  '当前 3 个宿舍中，1 个正常，1 个需要关注，另有 1 个还没有收到数据；'
+  + 'dorm-b 已持续偏热 20 分钟，是当前重点。');
+check('★ 依据里没数据的那个也说成「还没有收到数据」，不冒充正常',
+  buildReasons(MIXED),
+  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），是目前唯一的异常节点；'
+  + 'dorm-a 还没有收到数据；dorm-c 当前正常。');
+
+/* ---- 一个数字、一个名字都不许写死 ---- */
+
+const FOUR = {
+  'dorm-a': calm('2026-09-22 20:00:00'),
+  'dorm-b': node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
+  'dorm-c': node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 2, '偏湿'),
+  'dorm-d': node('2026-09-22 20:30:00', '2026-09-22 20:20:00', 1, '偏冷'),
+};
+
+check('★ 换成四个宿舍照样说得对：宿舍数是数出来的，不是写死的 3',
+  buildOverview(FOUR),
+  '当前 4 个宿舍中，1 个正常，3 个需要关注；dorm-b 已持续偏热 30 分钟，是当前重点；'
+  + 'dorm-c 出现偏湿、dorm-d 出现偏冷。');
+check('★ 四个节点时依据也跟着走：三个异常各自一句，正常的那个照实说',
+  buildReasons(FOUR),
+  '优先关注 dorm-b：已连续偏热 30 分钟（3 次），持续时间最长；'
+  + 'dorm-c 虽然偏湿，但只持续 20 分钟；dorm-d 虽然偏冷，但只持续 10 分钟；'
+  + 'dorm-a 当前正常。');
+
+/* 三个都不正常：为 0 的那一档不写出来（「0 个正常」又长又没信息）。
+   和上面「都正常时不写 0 个需要关注」是同一个口径。 */
+const ALL_BAD = trio(
+  node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 2, '偏冷'),
+  node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
+  node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 1, '偏湿'));
+
+check('★ 三个都不正常时，不写「0 个正常」那一档',
+  buildOverview(ALL_BAD),
+  '当前 3 个宿舍中，3 个需要关注；dorm-b 已持续偏热 30 分钟，是当前重点；'
+  + 'dorm-a 出现偏冷、dorm-c 出现偏湿。');
+check('★ 三个都不正常时也单独说了没数据的那个（只收了 1 条消息）',
+  buildOverview(trio(silent(),
+    node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
+    node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 1, '偏湿'))),
+  '当前 3 个宿舍中，2 个需要关注，另有 1 个还没有收到数据；'
+  + 'dorm-b 已持续偏热 30 分钟，是当前重点；dorm-c 出现偏湿。');
+
+/* 节点名的字典序和严重程度**不一致**的一组。
+   上面每一组的 dorm-a/b/c 恰好都按 a < b < c 排，正好和「越靠前越严重」
+   重合 —— 那样即使把「还有谁异常」写成按 nodes 键顺序遍历，结果也一模一样，
+   测不出区别。这一组故意把最严重的放在中间：
+   dorm-a 只异常 5 分钟，dorm-b 异常 30 分钟（重点），dorm-c 异常 20 分钟。
+   键顺序是 a/b/c，严重程度是 b/c/a，两者必须分得开。 */
+const OUT_OF_ORDER = {
+  'dorm-a': node('2026-09-22 20:05:00', '2026-09-22 20:00:00', 1, '偏冷'),
+  'dorm-b': node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
+  'dorm-c': node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 2, '偏湿'),
+  'dorm-d': calm('2026-09-22 20:00:00'),
+};
+
+check('★ 「还有谁异常」按严重程度排，不是按 nodes 的键顺序',
+  buildOverview(OUT_OF_ORDER),
+  '当前 4 个宿舍中，1 个正常，3 个需要关注；dorm-b 已持续偏热 30 分钟，是当前重点；'
+  + 'dorm-c 出现偏湿、dorm-a 出现偏冷。');
+check('★ 依据里也是先重点、再按严重程度一路排下来',
+  buildReasons(OUT_OF_ORDER),
+  '优先关注 dorm-b：已连续偏热 30 分钟（3 次），持续时间最长；'
+  + 'dorm-c 虽然偏湿，但只持续 20 分钟；dorm-a 虽然偏冷，但只持续 5 分钟；'
+  + 'dorm-d 当前正常。');
+
+const RENAMED = {
+  'north-1': calm('2026-09-22 20:00:00'),
+  'south-2': node('2026-09-22 20:10:00', '2026-09-22 20:00:00', 1, '偏冷'),
+};
+
+check('★ 节点名换掉、状态换掉、宿舍数换掉，同一份代码说的还是实话',
+  buildOverview(RENAMED),
+  '当前 2 个宿舍中，1 个正常，1 个需要关注；south-2 已持续偏冷 10 分钟，是当前重点。');
+check('★ 依据里的节点名和状态也全都来自数据',
+  buildReasons(RENAMED),
+  '优先关注 south-2：已连续偏冷 10 分钟（1 次），是目前唯一的异常节点；'
+  + 'north-1 当前正常。');
+
+/* ---- 和顶部那条栏的一致性：这是这两句存在的意义 ---- */
+
+[[TWO, '两个异常'], [FOUR, '四个节点'], [TIE, '时长打平'], [DEAD, '完全并列'],
+  [MIXED, '有节点没数据'], [ONE, '一个异常'], [RENAMED, '换过名字']]
+  .forEach(function (item) {
+    const nodes = item[0];
+    const label = item[1];
+    const pick = pickPriority(nodes);
+    const overview = buildOverview(nodes);
+    const reasons = buildReasons(nodes);
+
+    check('★ [' + label + '] 总览点的重点和优先关注栏是同一个人',
+      overview.indexOf(pick.nodeId + ' 已持续') >= 0, true);
+    /* 栏里是「dorm-b 已连续…」，依据是「优先关注 dorm-b：已连续…」——
+       去掉开头那个节点名之后必须逐字相同。各拼一份的话，两处对
+       「赢在哪一步」的说法迟早会不一样。 */
+    check('★ [' + label + '] 依据开头那半句和栏里的原因逐字相同',
+      reasons.indexOf('优先关注 ' + pick.nodeId + '：'
+        + pick.reason.slice(pick.nodeId.length + 1)), 0);
+    check('★ [' + label + '] 重点在依据里只说一遍（不在后面那拨对比里再出现一次）',
+      reasons.split(pick.nodeId).length - 1, 1);
+    check('★ [' + label + '] 两句话都以句号收尾',
+      [/。$/.test(overview), /。$/.test(reasons)], [true, true]);
+  });
+
+/* ---- 纯函数 ---- */
+
+const SNAPSHOT = JSON.stringify(FOUR);
+buildOverview(FOUR);
+buildReasons(FOUR);
+pickPriority(FOUR);
+check('★ 总览和依据都不改传进来的 nodes（页面那边读的是同一份对象）',
+  JSON.stringify(FOUR), SNAPSHOT);
+
+/* 同一个输入永远同一个输出 —— 这两句会被反复重画，带上任何「当前时间」
+   或随机成分，页面上就会出现两句对不上的话。 */
+check('★ 同样的输入连着算两遍，两句话一字不差',
+  [buildOverview(TWO) === buildOverview(TWO), buildReasons(TWO) === buildReasons(TWO)],
+  [true, true]);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

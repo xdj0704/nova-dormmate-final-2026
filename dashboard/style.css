@@ -464,6 +464,35 @@ button.focus:hover { border-color: var(--text-muted); }
   color: var(--status-critical);
 }
 
+/* ---------- 当前总览 + 判断依据（Step 8-1） ---------- */
+
+/* 这两句是整段话，不是标签也不是数字，所以行高给得比正文松一点 ——
+   句子里混着中文和「20 分钟」这种数字，行距紧了会挤成一团。
+   用 text-secondary 而不是 text-primary：它们是**解释**，
+   要读的时候读得到、不读也不挡着卡片和图表。 */
+.insight {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--text-secondary);
+}
+
+/* 同一张面板里的第二块（判断依据）。比 .panel-head h2 小一号、淡一档，
+   靠一条细线和上面那句总览分开 —— 两块内容连着读，但不是一个标题下的
+   两个子项，所以给的是分隔线而不是缩进。 */
+.panel-head--sub {
+  padding-top: 16px;
+  margin-top: 18px;
+  margin-bottom: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.panel-head--sub h2 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
 /* ---------- 3D 视图 ---------- */
 
 .scene-box { margin: 0 0 20px; }

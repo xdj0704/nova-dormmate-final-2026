@@ -25,11 +25,13 @@
    路径相对**本文件**算：本文件在 dashboard/ 下，所以是 ../3d/scene.js。 */
 import { createDorm3D } from '../3d/scene.js';
 
-/* 优先关注的算法。只有两个函数被这里用到，其余（parseTime / fmtDuration /
-   abnormalDuration）是给测试单独钉的，页面不直接调。
-   nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个。 */
+/* 看板的判断逻辑。只有这几个函数被这里用到，其余（parseTime / fmtDuration /
+   abnormalDuration / ranked 那一套）是给测试单独钉的，页面不直接调。
+   nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个，
+   buildOverview / buildReasons 把它说成人话（8-1）。 */
 import { pickPriority, nextAbnormal, beginHandling, nextHandling,
-  beginEvent, markPriority, markAction, closeEvent } from './logic.js';
+  beginEvent, markPriority, markAction, closeEvent,
+  buildOverview, buildReasons } from './logic.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -172,6 +174,8 @@ const el = {
   chartNote: document.getElementById('chart-note'),
   scene3d: document.getElementById('scene3d'),
   priority: document.getElementById('priority'),
+  overview: document.getElementById('overview'),
+  reasons: document.getElementById('reasons'),
   evBody: document.getElementById('event-body'),
   evCount: document.getElementById('event-count'),
   exportEvents: document.getElementById('export-events'),
@@ -360,6 +364,28 @@ function renderPriority(pick) {
     + '<span class="focus-text">' + esc(chosen.reason) + '</span>'
     + '<span class="focus-state">' + (current ? '正在查看' : '查看详情') + '</span>'
     + '</button>';
+}
+
+/* ---------- 当前总览 + 判断依据（Step 8-1） ---------- */
+
+/**
+ * 重画 B1 总览和 B2 依据这两句话。
+ *
+ * 两句都由 logic.js 现算，这里只负责贴上去，一个字都不拼 —— 拼的话就得
+ * 先知道什么是「需要关注」、谁算「重点」，而那些规矩在 logic.js 里
+ * 有单独的测试。这里再拼一份，页面上迟早会出现「上面说 2 个需要关注、
+ * 下面只列出 1 个」这种自相矛盾。
+ *
+ * 用 textContent 而不是 innerHTML：这两句是纯文字，没有任何标签要解析，
+ * 过一遍 innerHTML 只会多一个「哪天节点名里混进一个 < 就把版面撕了」的口子
+ * （节点名是从 topic/报文里读来的，不是我们写的常量）。
+ *
+ * 它不跟着 currentNodeId 变（说的是三个节点的整体，不是当前选中的那个），
+ * 所以切节点时不必重画，只有数据变了才要。
+ */
+function renderInsight() {
+  el.overview.textContent = buildOverview(nodes);
+  el.reasons.textContent = buildReasons(nodes);
 }
 
 /* ---------- 事件记录 ---------- */
@@ -912,6 +938,10 @@ function handleMessage(topic, payloadText) {
 
   renderEvents();
   renderPriority(pick);
+  /* B1 / B2 每次收到报文都重算。这两句里全是数字和节点名（「已持续 20 分钟」
+     「2 个需要关注」），缓存下来的话，页面上的总览会停在某一刻不再动，
+     而下面的卡片和栏里的数字一直在涨 —— 看着像数据不更新了。 */
+  renderInsight();
   return true;
 }
 
@@ -988,6 +1018,7 @@ function clearAll() {
   renderCharts();
   renderPriority();
   renderEvents();
+  renderInsight();
   renderLog();
 }
 
@@ -1160,6 +1191,11 @@ el.actionFan.addEventListener('click', function () {
   renderAction();
   renderScene();
   renderEvents();
+  /* B1 总览里会如实报出「（风扇已开启，处理中）」，所以按了按钮就得重画一次。
+     漏掉这一句的话，那句状态要等到**下一条报文进来**才出现 —— 中间那段时间
+     卡片上写着「处理中｜风扇已开启」、上面的总览里却什么都没有，
+     看的人会以为按钮没生效。 */
+  renderInsight();
 });
 
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1172,6 +1208,7 @@ renderScene();
 renderCharts();
 renderPriority();
 renderEvents();
+renderInsight();
 renderLog();
 
 /* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，

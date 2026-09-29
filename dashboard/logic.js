@@ -1,5 +1,6 @@
 // dashboard/logic.js
-// Step 7-1：优先关注的算法。**纯函数**——不碰 DOM，不读全局变量，不调 Date.now()。
+// 看板的判断逻辑：7-1 优先关注、7-2 处理动作、7-4 事件记录、8-1 总览与依据。
+// **纯函数**——不碰 DOM，不读全局变量，不调 Date.now()。
 //
 // 单独拆一个文件出来，是因为这一整套判断（先比时长、再比次数、最后比名字）
 // 是「看一眼就知道该先管哪个宿舍」的全部依据，而它跟页面长什么样毫无关系。
@@ -307,14 +308,63 @@ export function closeEvent(event, time) {
 }
 
 /**
- * 拼一句人话，说清楚为什么是它。
+ * 把「当前在异常中的节点」按那三步排好序，交给调用方。
+ *
+ * 抽出来是因为有三个地方要用这份排序：顶上的优先关注栏（pickPriority）、
+ * B1 总览里那句「是当前重点」、B2 依据。各写一份的话，「谁是重点」
+ * 就有了三个出处 —— 而且三份都「看着挺对」，对不上的时候没有任何地方会报错，
+ * 只是页面上两句话指着不同的宿舍。
+ *
+ * 排序的三步和判据见 pickPriority 的注释。
+ *
+ * @param {Object} nodes
+ * @returns {Array<{nodeId: string, status: string, count: number, duration: number}>}
+ *          全是异常节点，最该先看的排在第一个；都在正常时是空数组
+ */
+function ranked(nodes) {
+  const list = [];
+
+  Object.keys(nodes || {}).forEach(function (nodeId) {
+    const node = nodes[nodeId];
+    if (!node || !node.latest) return;
+    /* 用 > 0 而不是 !== 0：abnormalCount 是 NaN 或负数时，同样按「不在异常中」处理 */
+    if (!(node.abnormalCount > 0)) return;
+
+    list.push({
+      nodeId: nodeId,
+      status: node.latest.status,
+      count: node.abnormalCount,
+      duration: abnormalDuration(node),
+    });
+  });
+
+  list.sort(function (a, b) {
+    if (a.duration !== b.duration) return b.duration - a.duration;
+    if (a.count !== b.count) return b.count - a.count;
+    if (a.nodeId === b.nodeId) return 0;
+    /* 不用 localeCompare：它跟着运行环境的区域设置走，同一个数组在不同机器上
+       可能排出不同结果。这里要的是固定的字典序。 */
+    return a.nodeId < b.nodeId ? -1 : 1;
+  });
+
+  return list;
+}
+
+/**
+ * 拼出「凭什么」那半句 —— 不含节点名。
+ *
+ * 不含节点名是因为有两个地方要它，而那两处节点名的位置不一样：
+ * 顶上那条栏写「dorm-b 已连续偏热 20 分钟（4 次），持续时间最长」，
+ * B2 的依据写「优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间最长」
+ * —— 节点名在「优先关注 …：」那里已经说过了，再说一遍就成了
+ * 「优先关注 dorm-b：dorm-b 已连续…」。各拼一份的话，两处对「赢在哪一步」
+ * 的说法迟早会不一样，而这一栏存在的意义正是让人相信这个排序。
  *
  * 尾巴必须如实说明**赢在哪一步**。一律写「持续时间最长」是不行的：
- * 时长打平、靠次数赢的那次，说它「持续时间最长」就是假话，而这一栏
- * 存在的意义正是让人相信这个排序。
+ * 时长打平、靠次数赢的那次，说它「持续时间最长」就是假话。
  */
-function reasonFor(winner, list) {
-  const head = winner.nodeId + ' 已连续' + winner.status + ' '
+function basisFor(winner, list) {
+  const head = '已连续' + winner.status + ' '
     + fmtDuration(winner.duration) + '（' + winner.count + ' 次）';
 
   /* 只有一个异常节点时，下面那三步一步都没比过。写「持续时间最长」
@@ -338,6 +388,13 @@ function reasonFor(winner, list) {
 }
 
 /**
+ * 顶上那条「优先关注」栏用的一整句 —— 比 basisFor 多一个开头的节点名。
+ */
+function reasonFor(winner, list) {
+  return winner.nodeId + ' ' + basisFor(winner, list);
+}
+
+/**
  * 从三个节点里挑出最该先看的那一个。
  *
  * 只在异常节点里挑。「异常」的判据就是 abnormalCount > 0 这一个字段 ——
@@ -355,32 +412,209 @@ function reasonFor(winner, list) {
  * @returns {{nodeId: string, reason: string}|null} 全部正常时返回 null
  */
 export function pickPriority(nodes) {
-  const list = [];
-
-  Object.keys(nodes || {}).forEach(function (nodeId) {
-    const node = nodes[nodeId];
-    if (!node || !node.latest) return;
-    /* 用 > 0 而不是 !== 0：abnormalCount 是 NaN 或负数时，同样按「不在异常中」处理 */
-    if (!(node.abnormalCount > 0)) return;
-
-    list.push({
-      nodeId: nodeId,
-      status: node.latest.status,
-      count: node.abnormalCount,
-      duration: abnormalDuration(node),
-    });
-  });
-
+  const list = ranked(nodes);
   if (list.length === 0) return null;
 
-  list.sort(function (a, b) {
-    if (a.duration !== b.duration) return b.duration - a.duration;
-    if (a.count !== b.count) return b.count - a.count;
-    if (a.nodeId === b.nodeId) return 0;
-    /* 不用 localeCompare：它跟着运行环境的区域设置走，同一个数组在不同机器上
-       可能排出不同结果。这里要的是固定的字典序。 */
-    return a.nodeId < b.nodeId ? -1 : 1;
+  return { nodeId: list[0].nodeId, reason: reasonFor(list[0], list) };
+}
+
+/* ---------- Step 8-1：B1 当前总览 + B2 判断依据 ---------- */
+
+/* 这两句都是**现算**的，一个字都不缓存：每收到一条报文，时长、次数、
+   状态都可能变，缓存下来的话，页面上就会出现一句「dorm-b 已持续偏热
+   5 分钟」挂在那里不再动 —— 而下面的卡片和栏里的数字一直在涨。
+   它们也**不读浏览器当前时间**，理由和 7-1 算时长完全一样。 */
+
+/**
+ * 数一遍三个节点现在各是什么情况。
+ *
+ * 这里按 `latest.status` 数，不按 `abnormalCount > 0` 数 —— 两处口径
+ * 本来应当一致（由 dashboard 那边的测试钉住），但「需要关注」这四个字
+ * 是对着**卡片上那个状态徽章**说的，所以分母就用徽章读的那个字段：
+ * 看的人一抬头就能对上，不用先知道还有另一套计数。
+ *
+ * @param {Object} nodes
+ * @returns {{ids: string[], withData: string[], noData: string[],
+ *            normal: string[], abnormal: string[]}}
+ */
+function survey(nodes) {
+  const ids = Object.keys(nodes || {});
+  const withData = [];
+  const noData = [];
+
+  ids.forEach(function (nodeId) {
+    const node = nodes[nodeId];
+    if (node && node.latest) withData.push(nodeId);
+    else noData.push(nodeId);
   });
 
-  return { nodeId: list[0].nodeId, reason: reasonFor(list[0], list) };
+  return {
+    ids: ids,
+    withData: withData,
+    noData: noData,
+    normal: withData.filter(function (id) { return nodes[id].latest.status === '正常'; }),
+    abnormal: withData.filter(function (id) { return nodes[id].latest.status !== '正常'; }),
+  };
+}
+
+/**
+ * 一个节点正在被处理时，跟在句子后面的那个括号。
+ *
+ * **处理状态不参与排序**，一个节点的「处理中」既不会让它更容易被选中，
+ * 也不会让它落选（pickPriority 连这个字段都不读）。这里只是把当前状态
+ * 如实报出来 —— 所以它写成一个括号，不写成「因为…所以…」。
+ * 写成「虽然已经开了风扇，但还是先管 dorm-b」那种因果句就是在编：
+ * 真要按「有没有人管」排，那是另一套规则，得先定下来。
+ *
+ * 状态已经正常的不写这个括号：那说明风扇是按在旧数据上、之后来的
+ * 那条正常数据比动作还早（见 nextHandling），此时「处理中」没有任何意义。
+ *
+ * @param {Object} node
+ * @returns {string} 例如 '（风扇已开启，处理中）'，不需要时是空串
+ */
+function handlingNote(node) {
+  if (!node || !node.latest || node.latest.status === '正常') return '';
+  if (node.handling !== '处理中') return '';
+  return '（' + (node.action ? node.action + '，' : '') + '处理中）';
+}
+
+/**
+ * B1：一句说清三个宿舍现在什么样。
+ *
+ *   「当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，
+ *     是当前重点；dorm-c 出现偏湿。」
+ *
+ * 四段：有多少 / 谁最要紧 / 还有谁不正常。除了重点之外的异常节点只报
+ * 「谁还异常、异常成什么样」，为什么先不它们是 B2 的事 —— 两句都做对比的话，
+ * 摆在一起读就是车轱辘话。
+ *
+ * 数字、节点名、状态一个都没写死：宿舍数取自 nodes 的键，正常/需要关注
+ * 是按当前状态数出来的，重点来自 ranked()，时长来自 fmtDuration()。
+ * 换个宿舍数、换成四个节点，同一份代码说的还是实话。
+ *
+ * 「还没有收到数据」的节点单独说，不算进「正常」里 —— 页面刚打开那几秒
+ * 那三个节点是**不知道**，不是正常。这一点和 renderPriority 是同一个口径。
+ *
+ * @param {Object} nodes
+ * @returns {string}
+ */
+export function buildOverview(nodes) {
+  const s = survey(nodes);
+  const total = s.ids.length;
+
+  if (s.withData.length === 0) return '还没有收到任何节点的数据。';
+
+  /* 都在正常。没收到数据的那些要单独说 —— 「3 个宿舍都正常」在只收到
+     2 条消息时是句假话，第 3 个是不知道。 */
+  if (s.abnormal.length === 0) {
+    return s.noData.length === 0
+      ? '当前 ' + total + ' 个宿舍都正常。'
+      : '当前 ' + total + ' 个宿舍中，' + s.normal.length + ' 个正常，另有 '
+        + s.noData.length + ' 个还没有收到数据。';
+  }
+
+  /* 三个数字（正常 / 需要关注 / 没数据）加起来正好是宿舍数 —— 挪走一个
+     都会让这句话自相矛盾。**为 0 的那一档不写**：「0 个正常」是一句
+     又长又没信息的话，而且和上面「都正常时不写 0 个需要关注」是同一个口径。
+
+     三个都不正常时，前两档一起塌成「3 个需要关注」，读起来反而更顺。 */
+  const bits = [];
+  if (s.normal.length > 0) bits.push(s.normal.length + ' 个正常');
+  bits.push(s.abnormal.length + ' 个需要关注');
+  if (s.noData.length > 0) bits.push('另有 ' + s.noData.length + ' 个还没有收到数据');
+
+  const head = '当前 ' + total + ' 个宿舍中，' + bits.join('，');
+
+  const list = ranked(nodes);
+  /* 到不了：abnormal 非空时 ranked 也非空。留着是为了不让一个 undefined
+     的 top 把整句拼成「undefined 已持续…」——那还不如少说一句。 */
+  if (list.length === 0) return head + '。';
+
+  const top = list[0];
+  const others = list.slice(1).map(function (o) { return o.nodeId + ' 出现' + o.status; });
+
+  return head + '；' + top.nodeId + ' 已持续' + top.status + ' '
+    + fmtDuration(top.duration) + '，是当前重点' + handlingNote(nodes[top.nodeId])
+    + (others.length > 0 ? '；' + others.join('、') : '')
+    + '。';
+}
+
+/**
+ * 一个落后于重点的异常节点，为什么排在后面。
+ *
+ * 尾巴同样要如实说**输在哪一步**：挨个字比过去、该第几步倒下就写第几步。
+ * 一律写「但只持续 X 分钟」是错的 —— 时长打平、靠次数赢的那一轮，
+ * 那个节点根本没有「只持续」这回事，这么写会让看的人以为排序是乱的。
+ *
+ * @param {{nodeId: string, status: string, count: number, duration: number}} other
+ * @param {{duration: number, count: number}} top
+ * @returns {string} 例如 '虽然偏湿，但只持续 5 分钟'
+ */
+function lostTo(other, top) {
+  if (other.duration < top.duration) {
+    return '虽然' + other.status + '，但只持续 ' + fmtDuration(other.duration);
+  }
+  if (other.count < top.count) {
+    return '也' + other.status + '，持续时间和它一样长，但只有 ' + other.count + ' 条异常数据';
+  }
+  return '也' + other.status + '，时长和次数都跟它一样，按节点名顺序排在后面';
+}
+
+/**
+ * B2：说清为什么是它，别人为什么不是。
+ *
+ *   「优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间最长；
+ *     dorm-c 虽然偏湿，但只持续 5 分钟；dorm-a 当前正常。」
+ *
+ * 开头那半句直接复用 basisFor —— 和顶上那条栏里显示的是同一份文字，
+ * 连「赢在哪一步」的说法都逐字相同。两处对不上的话，看的人第一反应
+ * 是「到底哪个算数」。
+ *
+ * 其余节点分两拨：**还在异常的**用对比的说法（它们是输给了重点的那些，
+ * 排在重点后面），**正常和没收到数据的**直说各自现在什么样、不比较 ——
+ * 拿一个正常的节点去跟重点比「谁更久」是没有意义的。
+ *
+ * @param {Object} nodes
+ * @returns {string}
+ */
+export function buildReasons(nodes) {
+  const s = survey(nodes);
+
+  if (s.withData.length === 0) return '还没有收到任何节点的数据，说不出依据。';
+
+  const list = ranked(nodes);
+
+  if (list.length === 0) {
+    /* abnormal 非空却挑不出人，只可能是 abnormalCount 和 status 打架了
+       （那个不变量由 dashboard 那边的测试钉住）。这时候照实说，不装作没事。 */
+    if (s.abnormal.length > 0) return '当前有异常节点，但还算不出优先关注的是谁。';
+
+    return s.noData.length === 0
+      ? '当前 ' + s.ids.length + ' 个宿舍都正常，没有要优先处理的宿舍。'
+      : '当前 ' + s.normal.length + ' 个宿舍正常，另有 ' + s.noData.length
+        + ' 个还没有收到数据，没有要优先处理的宿舍。';
+  }
+
+  const top = list[0];
+  const parts = ['优先关注 ' + top.nodeId + '：' + basisFor(top, list)
+    + handlingNote(nodes[top.nodeId])];
+
+  /* 重点自己不再重复一遍 */
+  const shown = {};
+  shown[top.nodeId] = true;
+
+  list.slice(1).forEach(function (o) {
+    shown[o.nodeId] = true;
+    parts.push(o.nodeId + ' ' + lostTo(o, top) + handlingNote(nodes[o.nodeId]));
+  });
+
+  /* 剩下的（正常 / 没收到数据）按 nodes 的键顺序说。到这一步还没被说过的，
+     只可能是这两类 —— 异常的那些在上面那一拨里已经全说完了。 */
+  s.ids.forEach(function (nodeId) {
+    if (shown[nodeId]) return;
+    const node = nodes[nodeId] || {};
+    parts.push(nodeId + (node.latest ? ' 当前' + node.latest.status : ' 还没有收到数据'));
+  });
+
+  return parts.join('；') + '。';
 }

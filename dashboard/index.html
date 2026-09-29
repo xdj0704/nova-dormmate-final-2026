@@ -32,6 +32,31 @@
        它是个可以随时主动 Tab 过去看的地方，不是「必须立刻播报」的警报。 -->
   <section id="priority" class="priority" aria-label="优先关注"></section>
 
+  <!-- 当前总览 + 判断依据（Step 8-1）。这两句都由 dashboard.js 的 renderInsight()
+       现算现贴，容器里一开始什么都不放。
+
+       B1 说整体（几个正常、几个需要关注、谁是当前重点），B2 说为什么是它、
+       别人为什么不是。两块放在同一个面板里，是因为它们是连着读的：
+       先看「现在什么样」，再看「凭什么这么判断」。
+
+       两句话里没有一个字是写死的 —— 节点名、数字、状态、时长全从当前数据
+       算出来，所以换成四个宿舍、或者节点名不叫 dorm-x，这里说的还是实话。
+
+       为什么用 <p> 而不是 aria-live：和上面那条优先关注栏同理，每收到一条
+       报文这两句都会重画（时长和计数一直在变），加 aria-live 的话读屏软件
+       会跟着念个不停，反而把真正要看的东西盖住。 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>当前总览</h2>
+    </div>
+    <p id="overview" class="insight"></p>
+
+    <div class="panel-head panel-head--sub">
+      <h2>判断依据</h2>
+    </div>
+    <p id="reasons" class="insight"></p>
+  </section>
+
   <section id="cards" class="cards"></section>
 
   <section class="panel">
