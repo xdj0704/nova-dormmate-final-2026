@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import math
+import re
 import tempfile
 import unittest
 import warnings
@@ -21,7 +22,7 @@ from pathlib import Path
 import pandas as pd
 
 import status_rules
-from analysis import analysis, rules
+from analysis import analysis, ml, rules
 
 # 画图那几只用 matplotlib 的测试要跳过而不是报错：matplotlib 是 Step 2-4
 # 才引进来的依赖，没装的时候"读 CSV + 统计"这套仍然该能跑能测。
@@ -31,6 +32,15 @@ try:
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
+
+# scikit-learn 是 Step 9-2 才引进来的（ML 那一段）。同理：没装的时候只是
+# ML 那一段降级，读 CSV + 统计 + 出报告这条路仍然该能跑能测。
+try:
+    import sklearn  # noqa: F401
+
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -346,12 +356,17 @@ class TestMain(unittest.TestCase):
 
         folder = Path(tempfile.mkdtemp())
         trend, report = folder / "trend.png", folder / "report.html"
-        original = analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML
-        analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = trend, report
+        # 三个产出路径都要挪走：ML 那份 JSON 不挪的话，跑一次测试就往
+        # report/ 里重写一遍（generatedAt 跟着变），仓库里那份就成了「跑过测试的」
+        original = (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+                    analysis.DEFAULT_ML_JSON)
+        (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+         analysis.DEFAULT_ML_JSON) = trend, report, folder / "ml_result.json"
         try:
             text = capture(analysis.main, [str(analysis.DEFAULT_CSV)])
         finally:
-            analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = original
+            (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+             analysis.DEFAULT_ML_JSON) = original
 
         self.assertTrue(trend.is_file())
         self.assertTrue(report.is_file())
@@ -378,6 +393,71 @@ class TestMain(unittest.TestCase):
         # 不传参数时用的是 data/dormmate.csv，路径解析成项目根下那个
         parser_default = analysis.resolve_csv(str(analysis.DEFAULT_CSV))
         self.assertEqual(parser_default, analysis.DEFAULT_CSV)
+
+    def test_报告里有ML区块_json也在(self):
+        if not (ml.DEFAULT_HISTORY.is_file() and ml.DEFAULT_NEW.is_file()):
+            self.skipTest("C 部分那两份文件不在（演示数据，可以没有）")
+        if not HAS_SKLEARN:
+            self.skipTest("需要 scikit-learn")
+
+        folder = Path(tempfile.mkdtemp())
+        report, ml_json = folder / "report.html", folder / "ml_result.json"
+        original = analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON
+        analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON = report, ml_json
+        try:
+            text = capture(analysis.main, [str(analysis.DEFAULT_CSV), "--no-plot"])
+        finally:
+            analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON = original
+
+        html = report.read_text(encoding="utf-8")
+        self.assertIn("ML 异常分析", html)
+        self.assertIn('class="mismatch"', html)      # 两种口径不一致的那两行亮着
+
+        # 命令行上那句和报告里那句是同一句（算一次、渲染两次）
+        self.assertIn("ML 辅助判断", text)
+        self.assertIn("ML 结果 JSON：", text)
+
+        data = json.loads(ml_json.read_text(encoding="utf-8"))
+        self.assertEqual(data["newRows"], 6)
+        self.assertEqual(data["newFile"], ml.DEFAULT_NEW.name)
+        self.assertIn(data["text"], text)
+
+    def test_降级时报告照常出(self):
+        # 把 C 部分那两份指到不存在的地方：ML 那一段降级成一句话，
+        # 报告的其余部分（这一份 CSV 的统计）照常出
+        folder = Path(tempfile.mkdtemp())
+        report, ml_json = folder / "report.html", folder / "ml_result.json"
+        originals = (analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON,
+                     ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+        analysis.DEFAULT_REPORT_HTML = report
+        analysis.DEFAULT_ML_JSON = ml_json
+        ml.DEFAULT_HISTORY = folder / "没有这份历史.csv"
+        ml.DEFAULT_NEW = folder / "也没有这份新数据.csv"
+        try:
+            text = capture(analysis.main, [str(analysis.DEFAULT_CSV), "--no-plot"])
+        finally:
+            (analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON,
+             ml.DEFAULT_HISTORY, ml.DEFAULT_NEW) = originals
+
+        html = report.read_text(encoding="utf-8")
+        self.assertIn("这一段没跑", html)
+        self.assertIn("记录数", html)                # 报告其余部分照常
+        self.assertFalse(ml_json.exists())           # 没算出来就不写这份 JSON
+        self.assertIn("ML 辅助判断：这一段没跑", text)
+
+    def test_no_report时ML的json也不写(self):
+        folder = Path(tempfile.mkdtemp())
+        ml_json = folder / "ml_result.json"
+        original = analysis.DEFAULT_ML_JSON
+        analysis.DEFAULT_ML_JSON = ml_json
+        try:
+            text = capture(analysis.main,
+                           [str(analysis.DEFAULT_CSV), "--no-plot", "--no-report"])
+        finally:
+            analysis.DEFAULT_ML_JSON = original
+
+        self.assertFalse(ml_json.exists())
+        self.assertIn("ML 辅助判断", text)           # 文字照打，只是不落文件
 
 
 class TestSampleData(unittest.TestCase):
@@ -965,6 +1045,54 @@ REPORT_ROWS = [
 STAMP = "2026-01-02 03:04:05"
 
 
+# ------------------------------------------------------ ML 区块（Step 9-3）的桩
+
+# 四条对照行，四种组合各占一条：
+#   25/60 两边都说正常 · 26/62 规则说正常而 ML 说不同（题目要找的）
+#   31/60 两边都说异常 · 17/60 规则说异常而 ML 说接近常态（反过来的那一种）
+# 行本身用 ml.py 里那两个【真】函数造 —— 手抄一份字典的话，键名和分数位数
+# 迟早和 run_ml() 给的对不上，而那时候测试还是绿的。
+ML_RECORDS = [
+    ("dorm-a", "2026-09-23 11:20:00", 25.0, 60.0, "正常"),
+    ("dorm-a", "2026-09-23 11:25:00", 26.0, 62.0, "正常"),
+    ("dorm-a", "2026-09-23 11:30:00", 31.0, 60.0, "偏热"),
+    ("dorm-a", "2026-09-23 11:35:00", 17.0, 60.0, "偏冷"),
+]
+ML_LABELS = [ml.ML_INLIER, ml.ML_OUTLIER, ml.ML_OUTLIER, ml.ML_INLIER]
+ML_SCORES = [0.0347, -0.0564, -0.1230, 0.0120]
+
+
+def ml_rows(records=None, labels=None, scores=None) -> list[dict]:
+    return ml.compare_rows(ML_RECORDS if records is None else records,
+                           ML_LABELS if labels is None else labels,
+                           ML_SCORES if scores is None else scores)
+
+
+def ml_result(rows=None, history_rows: int = 40, history_flagged: int = 18,
+              history_file: str = "/tmp/ml/dorm-a_history_sim.csv",
+              new_file: str = "/tmp/ml/new_samples.csv") -> dict:
+    """ml.run_ml() 返回的那个字典。真跑一次要 sklearn，纯渲染的测试不必等它。
+
+    两个路径是【全路径】而不是文件名：报告那一段要把名字截出来（不截的话
+    报告里会印出本机目录），这一层桩就把真实形状给上，免得那个截断没人测。
+    """
+    rows = ml_rows() if rows is None else rows
+    return {
+        "history_file": history_file,
+        "new_file": new_file,
+        "history_rows": history_rows,
+        "new_rows": len(rows),
+        "history_flagged": history_flagged,
+        "features": list(ml.FEATURES),
+        "params": dict(ml.MODEL_PARAMS),
+        "threshold": ml.ML_THRESHOLD,
+        "rows": rows,
+        "mismatches": ml.find_mismatches(rows),
+        "reverse": ml.find_reverse(rows),
+        "text": ml.render_comparison(rows),
+    }
+
+
 class TestEsc(unittest.TestCase):
     """要插进 HTML 的文本一律转义 —— summary 里的字符串全都来自 CSV。"""
 
@@ -1032,6 +1160,37 @@ class TestHtmlTable(unittest.TestCase):
         text = analysis._html_table(["h"], [["<b>粗</b>"]])
         self.assertNotIn("<b>", text)
         self.assertIn("&lt;b&gt;", text)
+
+    def tbody(self, text: str) -> str:
+        """只要数据行那一段 —— <thead><tr> 也含一个 "<tr>"，一起数会多一个。"""
+        return text[text.index("<tbody>"):]
+
+    def test_不给row_classes时行上没有class(self):
+        # 老的那几个调用方都没给这个参数。默认空串 = 不加 class，
+        # 而不是「长度对不上就抛」—— 后者会把每一个老调用方都弄挂。
+        text = analysis._html_table(["a", "b"], [["x", "1"], ["y", "2"]])
+        body = self.tbody(text)
+        self.assertNotIn("<tr class", body)
+        self.assertEqual(body.count("<tr>"), 2)     # 两行都是光秃秃的 <tr>
+
+    def test_row_classes按行加上去(self):
+        text = analysis._html_table(["a", "b"], [["x", "1"], ["y", "2"], ["z", "3"]],
+                                    row_classes=["warn", "", "warn"])
+        body = self.tbody(text)
+        self.assertEqual(body.count('<tr class="warn">'), 2)
+        self.assertEqual(body.count("<tr>"), 1)     # 中间那行还是不加
+
+    def test_空串就是不加class(self):
+        body = self.tbody(analysis._html_table(["a"], [["x"]], row_classes=[""]))
+        self.assertIn("<tr>", body)
+        self.assertNotIn('class=""', body)          # 别留一个空 class 属性
+
+    def test_row_classes个数对不上就抛(self):
+        # 少给几个的话高亮会落在别的行上，而那种错看报告时根本看不出来
+        with self.assertRaises(ValueError):
+            analysis._html_table(["a"], [["x"], ["y"]], row_classes=["warn"])
+        with self.assertRaises(ValueError):
+            analysis._html_table(["a"], [["x"]], row_classes=["a", "b"])
 
 
 class TestTableSection(unittest.TestCase):
@@ -1269,6 +1428,295 @@ class TestPrintHelpers(unittest.TestCase):
     def test_空单元格转成空串而不是nan(self):
         self.assertEqual(analysis._clean(float("nan")), "")
         self.assertEqual(analysis._clean("  偏热  "), "偏热")
+
+
+class TestMlSection(unittest.TestCase):
+    """「ML 异常分析」区块（Step 9-3）。
+
+    行不是手抄的字典，是 ml.compare_rows() 照着桩数据算出来的 —— 键名、布尔值、
+    分数位数都跟 run_ml() 给的一样，测试不会因为抄错一个下划线而空转。
+    """
+
+    def section(self, result=None) -> dict:
+        return analysis.ml_section(ml_result() if result is None else result)
+
+    def html(self, result=None) -> str:
+        return self.section(result)["html"]
+
+    def rows_of(self, html: str) -> list[tuple]:
+        """[(温度那一格, 有没有高亮), ...]，按表里的顺序。
+
+        只数「有两行带 class」是不够的：高亮错了行也照样是两行 ——
+        而看报告的人只会照着亮的看。
+        """
+        out = []
+        for chunk in html[html.index("<tbody>"):].split("<tr")[1:]:
+            marked = chunk.startswith(f' class="{analysis.MISMATCH_CLASS}"')
+            cell = re.search(r'<td class="num">([^<]*)</td>', chunk)
+            out.append((cell.group(1), marked))
+        return out
+
+    def test_标题就是ML异常分析(self):
+        self.assertEqual(self.section()["title"], "ML 异常分析")
+        self.assertEqual(analysis.ML_TITLE, "ML 异常分析")
+
+    def test_表头就是需求给的那六列(self):
+        self.assertEqual(analysis.ML_HEADER,
+                         ["宿舍", "温度 ℃", "湿度 %", "固定规则", "ML 判断", "分数"])
+
+    def test_六列按这个顺序排(self):
+        # 顺序也钉住：这张表并排看的就是「规则怎么说 / ML 怎么说」，换个位置就说不通了。
+        # 从 <table> 往后找：上面那段说明里也有「固定规则」这几个字（是 <strong>，
+        # 不是表头），在整篇里找的话会先撞上它。
+        table = self.html()
+        table = table[table.index("<table>"):]
+        places = [table.index(f">{name}<") for name in analysis.ML_HEADER]
+        self.assertEqual(places, sorted(places))
+
+    def test_训练数据的来源和条数写出来了(self):
+        html = self.html()
+        self.assertIn("模拟历史", html)
+        self.assertIn("dorm-a_history_sim.csv", html)
+        # 连着说，而不是只找「40 条」：下面那句门槛松紧里也有「40 条历史」，
+        # 光找数字的话，这儿的 40 换成 4 也照样能过
+        self.assertIn("模拟历史，共 40 条", html)
+
+    def test_待判断数据的来源和条数写出来了(self):
+        html = self.html()
+        self.assertIn("待判断数据", html)
+        self.assertIn("new_samples.csv", html)
+        # 同理连着说：结论那句「4 条新数据里…」里有「4 条」，只找它就白测了
+        self.assertIn("new_samples.csv（4 条）", html)
+
+    def test_不印本机的全路径(self):
+        # 桩里给的是 /tmp/ml/... 全路径，报告里只该出现文件名
+        html = self.html()
+        self.assertNotIn("/tmp", html)
+
+    def test_说了这一段判的不是本报告上面那份CSV(self):
+        html = self.html()
+        self.assertIn("不是本报告上面那份 CSV", html)
+        self.assertIn("C 部分", html)
+
+    def test_那几句说明在(self):
+        html = self.html()
+        self.assertIn("提前写好的三条阈值", html)
+        self.assertIn("和这个宿舍平时像不像", html)
+        self.assertIn("ML 只作为辅助判断", html)
+
+    def cells(self, chunk: str) -> list[str]:
+        """一段 <tr> 里的每一格（按顺序）。"""
+        return re.findall(r"<td[^>]*>(.*?)</td>", chunk, re.S)
+
+    def test_两种口径各说各的(self):
+        # 26/62 那一条：固定规则那格是「正常」、ML 那格是「与历史明显不同」。
+        # 两列对调的话，这张表就成了「固定规则说与历史明显不同」—— 意思全反了，
+        # 而两句话都还在表里，只数「有没有出现」是看不出来的。
+        html = self.html()
+        chunk = [c for c in html[html.index("<tbody>"):].split("<tr")[1:]
+                 if f'class="{analysis.MISMATCH_CLASS}"' in c][0]
+        self.assertEqual(self.cells(chunk),
+                         ["dorm-a", "26", "62", "正常", "与历史明显不同", "-0.0564"])
+
+    def test_结论那句话里的尖括号也转义(self):
+        # 那句结论是 ml.render_comparison() 拼的，里面带着从 CSV 读来的时刻 ——
+        # CSV 是外面进来的东西，它不算「自己人写的字符串」。
+        # 时刻凑成 16 个字以上：ml._brief 取的是 [11:16]，那副尖括号正好落在里面。
+        rows = ml_rows([("dorm-a", "2026-09-23 <b>x  ", 26.0, 62.0, "正常")],
+                       [ml.ML_OUTLIER], [-0.06])
+        html = self.html(ml_result(rows))
+        self.assertNotIn("<b>", html)
+        self.assertIn("&lt;b&gt;", html)
+
+    def test_结论就是命令行上那一句(self):
+        result = ml_result()
+        self.assertIn(analysis._esc(result["text"]), self.html(result))
+        # 而且那句话是 ml.render_comparison() 算的，不是这儿另写一句
+        self.assertIn("规则判断为正常、ML 认为与历史明显不同的有", self.html(result))
+
+    def test_门槛松紧跟着结果走(self):
+        html = self.html(ml_result(history_rows=40, history_flagged=18))
+        self.assertIn("40 条历史", html)
+        self.assertIn("18 条也会被判", html)
+
+        other = self.html(ml_result(history_rows=8, history_flagged=3))
+        self.assertIn("8 条历史", other)
+        self.assertIn("3 条也会被判", other)
+        self.assertNotIn("18 条", other)
+
+    def test_高亮的就是两边不一致的那两条(self):
+        # 26/62：规则说正常、ML 说与历史明显不同（题目要找的那一种）
+        # 17/60：反过来的那一种（越过了 18 ℃ 那条线，但这条线在历史里常见）
+        # 25/60 和 31/60：两边说的一样，不该亮
+        self.assertEqual(self.rows_of(self.html()),
+                         [("25", False), ("26", True), ("31", False), ("17", True)])
+
+    def test_读数按数值格式打(self):
+        html = self.html()
+        self.assertIn('<td class="num">25</td>', html)        # 不是 25.0
+        self.assertIn('<td class="num">-0.0564</td>', html)   # 分数保留四位
+
+    def test_分数正好是整数时不拖点0(self):
+        # 桩里那几条分数都是小数，0 这种才分得出「过了一道 _num」和「直接打出来」
+        rows = ml_rows([("dorm-a", "2026-09-23 11:20:00", 25.0, 60.0, "正常")],
+                       [ml.ML_OUTLIER], [0.0])
+        self.assertIn('<td class="num">0</td>', self.html(ml_result(rows)))
+
+    def test_没有nodeId的行给破折号(self):
+        rows = ml_rows([("", "2026-09-23 11:20:00", 25.0, 60.0, "正常")],
+                       [ml.ML_INLIER], [0.031])
+        self.assertIn("<td>—</td>", self.html(ml_result(rows)))
+
+    def test_没有新数据时不摆空表(self):
+        html = self.html(ml_result(rows=[]))
+        self.assertIn(ml.NO_ROWS_TEXT, html)
+        self.assertNotIn("<table>", html)
+
+    def test_nodeId里的尖括号被转义(self):
+        rows = ml_rows([("dorm-<script>", "2026-09-23 11:20:00", 25.0, 60.0, "正常")],
+                       [ml.ML_INLIER], [0.03])
+        html = self.html(ml_result(rows))
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+
+
+class TestMlSkipSection(unittest.TestCase):
+    """ML 那一段跑不起来时的降级区块。"""
+
+    def test_照实说原因并说报告不受影响(self):
+        item = analysis.ml_skip_section("找不到 CSV：data/new_samples.csv")
+        self.assertEqual(item["title"], "ML 异常分析")
+        self.assertIn("这一段没跑", item["html"])
+        self.assertIn("找不到 CSV", item["html"])
+        self.assertIn("报告其余部分不受影响", item["html"])
+
+    def test_原因里的尖括号被转义(self):
+        html = analysis.ml_skip_section("<b>坏的</b>")["html"]
+        self.assertNotIn("<b>", html)
+        self.assertIn("&lt;b&gt;", html)
+
+
+class TestMlResultJson(unittest.TestCase):
+    """report/ml_result.json —— 给看板 fetch 的那份（Step 9-3 的进阶项）。"""
+
+    def setUp(self):
+        self.folder = Path(tempfile.mkdtemp())
+        self.result = ml_result()
+
+    def data(self, result=None) -> dict:
+        return analysis.ml_result_json(ml_result() if result is None else result, STAMP)
+
+    def test_键名跟看板那份统一JSON一个约定(self):
+        row = self.data()["rows"][0]
+        self.assertEqual(row["nodeId"], "dorm-a")
+        self.assertEqual(row["time"], "2026-09-23 11:20:00")
+        for key in ("nodeId", "time", "temperature", "humidity",
+                    "ruleStatus", "mlStatus", "score", "mismatch"):
+            self.assertIn(key, row)
+
+    def test_两个口径各自的说法都在行上(self):
+        row = self.data()["rows"][1]        # 26/62 那一条
+        self.assertEqual(row["ruleStatus"], "正常")
+        self.assertEqual(row["mlStatus"], ml.ML_OUTLIER_TEXT)
+        self.assertTrue(row["mismatch"])
+        self.assertFalse(self.data()["rows"][0]["mismatch"])
+
+    def test_只留文件名不留本机路径(self):
+        data = self.data()
+        self.assertEqual(data["historyFile"], "dorm-a_history_sim.csv")
+        self.assertEqual(data["newFile"], "new_samples.csv")
+        # 这份是要提交进仓库的：整份里都不该出现本机目录
+        raw = json.dumps(data, ensure_ascii=False)
+        self.assertNotIn("/tmp", raw)
+        self.assertNotIn(":", data["newFile"])      # 盘符或目录都会带冒号
+
+    def test_温湿度写成整数不写25点0(self):
+        row = self.data()["rows"][0]
+        self.assertEqual(row["temperature"], 25)
+        self.assertIsInstance(row["temperature"], int)
+
+    def test_该是小数的地方还是小数(self):
+        rows = ml_rows([("dorm-a", "2026-09-23 11:20:00", 25.5, 60.5, "正常")],
+                       [ml.ML_INLIER], [0.25])
+        row = self.data(ml_result(rows))["rows"][0]
+        self.assertEqual(row["temperature"], 25.5)
+        self.assertEqual(row["humidity"], 60.5)
+
+    def test_分数保留四位(self):
+        self.assertEqual(self.data()["rows"][0]["score"], 0.0347)
+
+    def test_三个不一致的计数分开放(self):
+        data = self.data()
+        self.assertEqual(data["mismatchForward"], 1)    # 规则说正常、ML 说不同
+        self.assertEqual(data["mismatchReverse"], 1)    # 反过来那一种
+        self.assertEqual(data["mismatchTotal"], 2)      # 和 text 里那句对得上
+        self.assertIn("不一致的有 2 条", data["text"])
+
+    def test_正向反向的数分开报(self):
+        # 上面那个桩正反各一条，是对称的 —— 两个数对调了也照样绿。
+        # 这里来一个不对称的：正向 2 条、反向 1 条，三个数就各不相同了。
+        rows = ml_rows(
+            [("dorm-a", "2026-09-23 11:20:00", 25.0, 60.0, "正常"),
+             ("dorm-a", "2026-09-23 11:25:00", 26.0, 62.0, "正常"),
+             ("dorm-a", "2026-09-23 11:30:00", 31.0, 60.0, "偏热")],
+            [ml.ML_OUTLIER, ml.ML_OUTLIER, ml.ML_INLIER],
+            [-0.06, -0.05, 0.02])
+        data = self.data(ml_result(rows))
+        self.assertEqual(data["mismatchForward"], 2)
+        self.assertEqual(data["mismatchReverse"], 1)
+        self.assertEqual(data["mismatchTotal"], 3)
+
+    def test_参数门槛和条数都跟着走(self):
+        data = self.data()
+        self.assertEqual(data["params"], ml.MODEL_PARAMS)
+        self.assertEqual(data["threshold"], ml.ML_THRESHOLD)
+        self.assertEqual(data["historyRows"], 40)
+        self.assertEqual(data["newRows"], 4)
+        self.assertEqual(data["historyFlagged"], 18)
+        self.assertEqual(data["generatedAt"], STAMP)
+
+    def test_能被json倒出来(self):
+        # numpy 的标量倒不出来 —— 这一步拦的是「哪一行忘了转成内置类型」
+        self.assertIn("dorm-a", json.dumps(self.data(), ensure_ascii=False))
+
+    def test_写出来能原样读回来(self):
+        out = self.folder / "ml_result.json"
+        self.assertEqual(analysis.write_ml_result(self.result, out, generated_at=STAMP), out)
+        self.assertEqual(json.loads(out.read_text(encoding="utf-8")), self.data())
+
+    def test_目录不存在会自动建(self):
+        out = self.folder / "深" / "几层" / "ml_result.json"
+        analysis.write_ml_result(self.result, out, generated_at=STAMP)
+        self.assertTrue(out.is_file())
+
+    def test_是LF末尾带换行(self):
+        out = analysis.write_ml_result(self.result, self.folder / "ml_result.json",
+                                       generated_at=STAMP)
+        raw = out.read_bytes()
+        self.assertNotIn(b"\r", raw)
+        self.assertTrue(raw.endswith(b"\n"))
+
+    def test_缩进两格给人看(self):
+        # 和 LF、末尾换行一样，这是产物的格式：缩进过才看得出层级，
+        # 挤成一行照样能 json.loads，可它是给人和看板两边看的东西
+        out = analysis.write_ml_result(self.result, self.folder / "ml_result.json",
+                                       generated_at=STAMP)
+        lines = out.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines[1].startswith('  "'), lines[1])
+        self.assertFalse(lines[1].startswith('    "'), lines[1])   # 不是四格
+
+    def test_中文原样写进去(self):
+        out = analysis.write_ml_result(self.result, self.folder / "ml_result.json",
+                                       generated_at=STAMP)
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("与历史明显不同", text)
+        self.assertNotIn("\\u", text)       # ensure_ascii=False，不是一堆 \uXXXX
+
+    def test_默认路径就在报告旁边(self):
+        # 两个产物说的是同一件事（同一对文件、同一次判断），放一个目录里找得着
+        self.assertEqual(analysis.DEFAULT_ML_JSON.name, "ml_result.json")
+        self.assertEqual(analysis.DEFAULT_ML_JSON.parent,
+                         analysis.DEFAULT_REPORT_HTML.parent)
 
 
 if __name__ == "__main__":

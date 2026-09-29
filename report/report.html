@@ -36,6 +36,10 @@ th { background: var(--panel); font-weight: 600; }
 .bar { display: block; height: 8px; min-width: 3px; border-radius: 4px; }
 .warn { padding: 10px 14px; margin: 16px 0; font-size: 14px; background: #fff5f5;
         border-left: 4px solid #C1440E; border-radius: 0 6px 6px 0; }
+/* 两种口径说法不一致的行（ML 区块）。用的就是上面那条横幅的颜色 —— 报告里
+   「要人多看一眼」只有这一个色，读者认色不认字也认得出来。 */
+tr.mismatch td { background: #fff5f5; }
+tr.mismatch td:first-child { box-shadow: inset 3px 0 0 #C1440E; }
 img { max-width: 100%; height: auto; border: 1px solid var(--line);
       border-radius: 8px; }
 @media print { body { max-width: none; } h2 { break-after: avoid; } }
@@ -43,7 +47,7 @@ img { max-width: 100%; height: auto; border: 1px solid var(--line);
 </head>
 <body>
 <h1>DormMate 宿舍环境报告</h1>
-<p class="meta">生成时间：2026-09-29 17:30:52　·　数据来源：dormmate.csv <span class="path">(C:\Users\xdj\Desktop\DormMate Final\nova-dormmate-final-2026\data\dormmate.csv)</span>　·　数据时间范围：2026-09-22 20:30:00 ~ 2026-09-22 20:30:55</p>
+<p class="meta">生成时间：2026-09-29 19:51:44　·　数据来源：dormmate.csv <span class="path">(C:\Users\xdj\Desktop\DormMate Final\nova-dormmate-final-2026\data\dormmate.csv)</span>　·　数据时间范围：2026-09-22 20:30:00 ~ 2026-09-22 20:30:55</p>
 <section>
 <h2>摘要</h2>
 <div class="cards"><div class="card"><span class="label">记录数</span><span class="value">12 <small>条</small></span></div><div class="card"><span class="label">温度最高</span><span class="value">31 <small>℃</small></span></div><div class="card"><span class="label">温度最低</span><span class="value">16 <small>℃</small></span></div><div class="card"><span class="label">湿度最高</span><span class="value">80 <small>%</small></span></div><div class="card"><span class="label">湿度最低</span><span class="value">60 <small>%</small></span></div></div>
@@ -125,6 +129,74 @@ img { max-width: 100%; height: auto; border: 1px solid var(--line);
 <h2>今日摘要</h2>
 <p class="note">数据来源：CSV 里没有 source 列，看不出这份数据是现场采集的还是模拟出来的</p>
 <p class="empty">这份 CSV 里没有 nodeId 列，没法按宿舍分开算今日摘要。先在网页上导出一份带 nodeId 的数据。</p>
+</section>
+<section>
+<h2>ML 异常分析</h2>
+<p class="note">训练数据：dorm-a_history_sim.csv（dorm-a 的模拟历史，共 40 条）　·　待判断数据：new_samples.csv（6 条）</p>
+<p class="note">这一段判的不是本报告上面那份 CSV，是 C 部分这一对文件 —— 两份是不同的数据，别把这张表的结论安到上面的统计上去。</p>
+<p class="note">两种口径回答的不是同一个问题：<strong>固定规则</strong>看的是提前写好的三条阈值（低于 18 ℃ 偏冷、30 ℃ 及以上偏热、湿度 75 % 及以上偏湿），越过了才说话；<strong>ML</strong> 看的是「和这个宿舍平时像不像」——它只在 dorm-a 那段历史上训练，自己不知道什么叫阈值。两边对不上不是谁错了：规则说正常的那条可能已经贴着平时的边了，ML 说不同的那条也可能离三条线都远。<strong>ML 只作为辅助判断</strong>：它多说的那几行值得回头看一眼，但别拿它去改写规则算出来的状态。</p>
+<p>6 条新数据里，规则与 ML 不一致的有 2 条。规则判断为正常、ML 认为与历史明显不同的有 11:25（26 ℃ / 62 %）、11:30（29 ℃ / 72 %）。两种口径本来就会在这类数据上分岔：固定规则只看有没有越过那三条线，ML 比的是跟平时的历史像不像。</p>
+<table>
+<thead><tr>
+<th>宿舍</th>
+<th class="num">温度 ℃</th>
+<th class="num">湿度 %</th>
+<th>固定规则</th>
+<th>ML 判断</th>
+<th class="num">分数</th>
+</tr></thead>
+<tbody>
+<tr>
+<td>dorm-a</td>
+<td class="num">25</td>
+<td class="num">60</td>
+<td>正常</td>
+<td>接近历史常态</td>
+<td class="num">0.0347</td>
+</tr>
+<tr class="mismatch">
+<td>dorm-a</td>
+<td class="num">26</td>
+<td class="num">62</td>
+<td>正常</td>
+<td>与历史明显不同</td>
+<td class="num">-0.0564</td>
+</tr>
+<tr class="mismatch">
+<td>dorm-a</td>
+<td class="num">29</td>
+<td class="num">72</td>
+<td>正常</td>
+<td>与历史明显不同</td>
+<td class="num">-0.123</td>
+</tr>
+<tr>
+<td>dorm-a</td>
+<td class="num">31</td>
+<td class="num">60</td>
+<td>偏热</td>
+<td>与历史明显不同</td>
+<td class="num">-0.0823</td>
+</tr>
+<tr>
+<td>dorm-a</td>
+<td class="num">25</td>
+<td class="num">80</td>
+<td>偏湿</td>
+<td>与历史明显不同</td>
+<td class="num">-0.0933</td>
+</tr>
+<tr>
+<td>dorm-a</td>
+<td class="num">17</td>
+<td class="num">60</td>
+<td>偏冷</td>
+<td>与历史明显不同</td>
+<td class="num">-0.045</td>
+</tr>
+</tbody>
+</table>
+<p class="note">门槛松紧：拿模型回看它学过的 40 条历史，其中 18 条也会被判「与历史明显不同」——contamination='auto' 不指定异常比例，门槛就不落在历史的外沿上。所以那一列要读成「分数落在门槛的另一侧」，不是「这条读数离谱」；表里的分数就是给人看差多少用的（越小越异常）。</p>
 </section>
 </body>
 </html>

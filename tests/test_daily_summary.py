@@ -1237,13 +1237,18 @@ class TestReportSection(unittest.TestCase):
 
         folder = Path(tempfile.mkdtemp())
         trend, report = folder / "trend.png", folder / "report.html"
-        original_trend, original_report = analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML
-        analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = trend, report
+        # Step 9-3 起 main 还会写一份 report/ml_result.json：三个产出路径都得挪走，
+        # 不然跑一次测试就往仓库里那份重写一遍（内容只差一个 generatedAt）
+        original = (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+                    analysis.DEFAULT_ML_JSON)
+        (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+         analysis.DEFAULT_ML_JSON) = trend, report, folder / "ml_result.json"
         try:
             text = capture(analysis.main,
                            [str(analysis.DEFAULT_SIM), "--no-plot"])
         finally:
-            analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = original_trend, original_report
+            (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+             analysis.DEFAULT_ML_JSON) = original
 
         self.assertIn("今日摘要", text)
         html = report.read_text(encoding="utf-8")
@@ -1264,15 +1269,18 @@ class TestReportSection(unittest.TestCase):
             self.skipTest("data/day_sim.csv 不存在（演示数据，可以没有）")
 
         folder = Path(tempfile.mkdtemp())
-        original_trend, original_report = analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML
-        analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = \
-            folder / "trend.png", folder / "report.html"
+        original = (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+                    analysis.DEFAULT_ML_JSON)
+        (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+         analysis.DEFAULT_ML_JSON) = (folder / "trend.png", folder / "report.html",
+                                      folder / "ml_result.json")
         try:
             with mock.patch.object(daily_summary, "build_daily_summary",
                                    side_effect=AssertionError("main 另读了一次文件")):
                 capture(analysis.main, [str(analysis.DEFAULT_SIM), "--no-plot"])
         finally:
-            analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML = original_trend, original_report
+            (analysis.DEFAULT_TREND, analysis.DEFAULT_REPORT_HTML,
+             analysis.DEFAULT_ML_JSON) = original
 
     def test_换一组数据报告里的时刻跟着变(self):
         # 「改了模拟数据，摘要必须跟着变化」——这条是在报告这一层验的

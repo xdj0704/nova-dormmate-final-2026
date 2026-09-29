@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import math
 import numbers
 import sys
@@ -56,7 +57,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from analysis import daily_summary, rules  # noqa: E402  —— 必须在上面调整完 sys.path 之后
+from analysis import daily_summary, ml, rules  # noqa: E402  —— 必须在上面调整完 sys.path 之后
 
 DEFAULT_CSV = ROOT / "data" / "dormmate.csv"
 
@@ -767,6 +768,11 @@ def plot_trend(df: pd.DataFrame, out_path: Path | None = None,
 # 就成断图了。所以默认都在 report/ 下，整个目录拷到哪都能直接打开。
 DEFAULT_REPORT_HTML = ROOT / "report" / "report.html"
 
+# Step 9-3：ML 那一段的结果给看板 fetch 用的一份 JSON，和报告写在一起。
+# 放在 report/ 而不是别处：它和报告说的是同一件事（同一对文件、同一次判断），
+# 分开放的话，看板上那句判断和报告里那张表迟早会对不上。
+DEFAULT_ML_JSON = ROOT / "report" / "ml_result.json"
+
 # 写进 <img src> 的相对文件名。用相对路径而不是绝对路径：报告是要拷走给人看的，
 # 绝对路径到别人机器上必然是断的。
 TREND_FILE = "trend.png"
@@ -818,6 +824,10 @@ th { background: var(--panel); font-weight: 600; }
 .bar { display: block; height: 8px; min-width: 3px; border-radius: 4px; }
 .warn { padding: 10px 14px; margin: 16px 0; font-size: 14px; background: #fff5f5;
         border-left: 4px solid #C1440E; border-radius: 0 6px 6px 0; }
+/* 两种口径说法不一致的行（ML 区块）。用的就是上面那条横幅的颜色 —— 报告里
+   「要人多看一眼」只有这一个色，读者认色不认字也认得出来。 */
+tr.mismatch td { background: #fff5f5; }
+tr.mismatch td:first-child { box-shadow: inset 3px 0 0 #C1440E; }
 img { max-width: 100%; height: auto; border: 1px solid var(--line);
       border-radius: 8px; }
 @media print { body { max-width: none; } h2 { break-after: avoid; } }
@@ -835,11 +845,24 @@ def _esc(value) -> str:
 
 
 def _html_table(header: list, rows: list[list],
-                right: tuple[int, ...] = ()) -> str:
-    """表头 + 数据行 -> HTML 表格。每个单元格都转义。rows 为空时给一句占位。"""
+                right: tuple[int, ...] = (),
+                row_classes: list[str] | None = None) -> str:
+    """表头 + 数据行 -> HTML 表格。每个单元格都转义。rows 为空时给一句占位。
+
+    row_classes 是每行一个 class 名（空串就是不加），长度要和 rows 一样 ——
+    ML 区块靠它把「两种口径说法不一致」的行高亮出来。class 名是本文件写死的
+    常量，不过 _esc 一道也不亏：它从外面进来，将来有人拿它拼数据就晚了。
+    """
     def cell(tag: str, text, index: int) -> str:
         style = ' class="num"' if index in right else ""
         return f"<{tag}{style}>{_esc(text)}</{tag}>"
+
+    marks = [""] * len(rows) if row_classes is None else list(row_classes)
+    if len(marks) != len(rows):
+        raise ValueError(
+            f"row_classes 有 {len(marks)} 个、rows 有 {len(rows)} 行 ——"
+            " 两者必须一一对应（少给几个的话，高亮会落在别的行上）"
+        )
 
     out = ["<table>", "<thead><tr>"]
     out += [cell("th", text, index) for index, text in enumerate(header)]
@@ -850,8 +873,9 @@ def _html_table(header: list, rows: list[list],
                    f"（没有记录）</td></tr></tbody>")
     else:
         out.append("<tbody>")
-        for row in rows:
-            out.append("<tr>")
+        for row, mark in zip(rows, marks):
+            attr = f' class="{_esc(mark)}"' if mark else ""
+            out.append(f"<tr{attr}>")
             out += [cell("td", text, index) for index, text in enumerate(row)]
             out.append("</tr>")
         out.append("</tbody>")
@@ -1045,6 +1069,171 @@ def daily_summary_section(daily: dict) -> dict:
     return {"title": "今日摘要", "html": "\n".join(body)}
 
 
+# ---------------------------------------------------------------- ML 异常分析区块（Step 9-3）
+
+ML_TITLE = "ML 异常分析"
+
+# 表格的列。和 ml.run_ml() 返回的每一行一一对应：读数两列、两种口径各自的说法两列、
+# 分数一列。「分数」右对齐 —— 数字列对不齐的话，一列看着像两列。
+# 「宿舍」这一列的头用中文而不是 nodeId：报告里其它表也是这么写的。
+ML_HEADER = ["宿舍", "温度 ℃", "湿度 %", "固定规则", "ML 判断", "分数"]
+
+# 高亮不一致行用的 class 名。CSS 里那条 tr.mismatch 就是它，改名字要一起改。
+MISMATCH_CLASS = "mismatch"
+
+ML_HELP = (
+    '<p class="note">两种口径回答的不是同一个问题：<strong>固定规则</strong>看的是'
+    "提前写好的三条阈值（低于 18 ℃ 偏冷、30 ℃ 及以上偏热、湿度 75 % 及以上偏湿），"
+    "越过了才说话；<strong>ML</strong> 看的是「和这个宿舍平时像不像」——"
+    "它只在 dorm-a 那段历史上训练，自己不知道什么叫阈值。两边对不上不是谁错了："
+    "规则说正常的那条可能已经贴着平时的边了，ML 说不同的那条也可能离三条线都远。"
+    "<strong>ML 只作为辅助判断</strong>：它多说的那几行值得回头看一眼，"
+    "但别拿它去改写规则算出来的状态。</p>"
+)
+
+
+def ml_section(result: dict) -> dict:
+    """「ML 异常分析」区块（Step 9-3）。返回 sections 里的一项。
+
+    参数是 ml.run_ml() 算好的那个字典，不是两份 CSV —— 命令行上也要把结论打出来
+    （见 main），算一次渲染两次：「今日摘要」就是这么做的，各算一遍会有第二种说法。
+
+    这一段判断的【不是】本报告上面那份 CSV，是 C 部分那一对文件（训练用的历史 +
+    待判断的新数据）。两边的文件名和条数都写在区块里，还专门说一句「不是上面那份」
+    —— 报告开头那个「数据来源」说的是另一份文件，不写清楚的话，读的人会以为
+    这张表判的就是上面那些数据。
+    """
+    history = Path(result["history_file"]).name
+    new = Path(result["new_file"]).name
+
+    body = [
+        f'<p class="note">训练数据：{_esc(history)}'
+        f"（dorm-a 的模拟历史，共 {_esc(result['history_rows'])} 条）"
+        f"　·　待判断数据：{_esc(new)}（{_esc(result['new_rows'])} 条）</p>",
+        '<p class="note">这一段判的不是本报告上面那份 CSV，是 C 部分这一对文件 —— 两份是'
+        "不同的数据，别把这张表的结论安到上面的统计上去。</p>",
+        ML_HELP,
+        # 结论那句话和命令行上打的是同一句（result["text"] 算出来的那一句）
+        f"<p>{_esc(result['text'])}</p>",
+    ]
+
+    if not result["rows"]:
+        # 一条新数据都没有：那句话已经把话说完了，不摆一张空表
+        return {"title": ML_TITLE, "html": "\n".join(body)}
+
+    rows, marks = [], []
+    for row in result["rows"]:
+        rows.append([
+            row["nodeId"] or "—", _num(row["temperature"]), _num(row["humidity"]),
+            row["rule_status"], row["ml_text"], _num(row["score"]),
+        ])
+        # 高亮的判据是「两种口径说法不一致」，两个方向都算：规则说正常而 ML 说不同
+        # （题目要找的那一种），和反过来那一种（越过了线，但这条线在历史里常见）。
+        # 只高亮前一种的话，后一种在表里看着和「两边都同意」一模一样。
+        marks.append(MISMATCH_CLASS
+                     if row["rule_normal"] != row["ml_normal"] else "")
+
+    body.append(_html_table(ML_HEADER, rows, right=(1, 2, 5), row_classes=marks))
+
+    # 门槛松紧必须跟着这段结论一起给出去：contamination="auto" 的门槛不落在历史
+    # 那片云的外沿上，不写这一句的话，「与历史明显不同」会被读成「这条读数离谱」。
+    body.append(
+        f'<p class="note">门槛松紧：拿模型回看它学过的 {_esc(result["history_rows"])} 条历史，'
+        f'其中 {_esc(result["history_flagged"])} 条也会被判「{_esc(ml.ML_OUTLIER_TEXT)}」——'
+        "contamination='auto' 不指定异常比例，门槛就不落在历史的外沿上。"
+        "所以那一列要读成「分数落在门槛的另一侧」，不是「这条读数离谱」；"
+        "表里的分数就是给人看差多少用的（越小越异常）。</p>"
+    )
+    return {"title": ML_TITLE, "html": "\n".join(body)}
+
+
+def ml_skip_section(reason: str) -> dict:
+    """ML 那一段跑不起来时的区块：如实说原因，报告其余部分照常出。
+
+    会有三种情况走到这儿，没有一种是「报告坏了」：C 部分那两份文件被删了、
+    两份里有一份是空的、或者这台机器没装 scikit-learn。这时候降级成一句话就行 ——
+    报告里别的数字都是这次读到的 CSV 算出来的，跟 ML 无关，不该被它拖着一起失败。
+    """
+    return {
+        "title": ML_TITLE,
+        "html": (f'<p class="empty">这一段没跑：{_esc(reason)}</p>\n'
+                 f'<p class="note">报告其余部分不受影响'
+                 f"（那些数字来自本报告读到的 CSV）。</p>"),
+    }
+
+
+def _json_number(value) -> int | float:
+    """JSON 里的温湿度写成 25 而不是 25.0。
+
+    CSV 读出来是 float，哪怕值是整数（25 也是 25.0）；直接 dump 出去就带个 .0。
+    字段名一样、值也一样，只有写法不同 —— 但看板上「环境数据」和「ML 辅助判断」
+    两处并排显示时，一个 25 一个 25.0 看着就像两份数据。
+    """
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
+def ml_result_json(result: dict, generated_at: str) -> dict:
+    """run_ml() 的结果 -> 给看板 fetch 的那份 JSON（Step 9-3）。
+
+    【为什么不直接把 result 倒出来】里面有两个**绝对路径**（history_file /
+    new_file 是 C:\\Users\\... 那种）。report/ 下的东西是要提交进仓库的，
+    倒出去就等于把本机的目录结构一起发了出去，而且换台机器跑出来那份文件里的
+    路径还是别人的。所以这儿只留文件名，完整路径留给报告那一段（报告是本机看的）。
+
+    【键名用 camelCase】和看板那份统一 JSON 一个约定（nodeId / time /
+    temperature / humidity）。ruleStatus 和 mlStatus 是两个口径各自的说法，
+    并排放着，谁都不是结论 —— 上面那句 text 才是把两边对起来的那句话。
+    """
+    return {
+        "generatedAt": generated_at,
+        "historyFile": Path(result["history_file"]).name,
+        "historyRows": int(result["history_rows"]),
+        # 门槛松紧：拿模型回看历史，有多少条也会被判「与历史明显不同」
+        "historyFlagged": int(result["history_flagged"]),
+        "newFile": Path(result["new_file"]).name,
+        "newRows": int(result["new_rows"]),
+        "params": dict(result["params"]),
+        "threshold": float(result["threshold"]),
+        # 三个数分开放：上面那句 text 里说的「不一致 N 条」是两个方向加起来的，
+        # 而 forward 那一种才是题目要找的（规则说正常、ML 说不同）——
+        # 只给一个总数的话，看板那边没法把「最值得看的那几条」单独说出口。
+        "mismatchForward": len(result["mismatches"]),
+        "mismatchReverse": len(result["reverse"]),
+        "mismatchTotal": len(result["mismatches"]) + len(result["reverse"]),
+        "text": result["text"],
+        "rows": [
+            {
+                "nodeId": row["nodeId"],
+                "time": row["time"],
+                "temperature": _json_number(row["temperature"]),
+                "humidity": _json_number(row["humidity"]),
+                "ruleStatus": row["rule_status"],
+                "mlStatus": row["ml_text"],
+                "score": float(row["score"]),
+                "mismatch": bool(row["rule_normal"] != row["ml_normal"]),
+            }
+            for row in result["rows"]
+        ],
+    }
+
+
+def write_ml_result(result: dict, out_path: Path | None = None,
+                    generated_at: str | None = None) -> Path:
+    """把 ml_result_json() 写进文件，返回写出的路径。目录不存在会自动创建。
+
+    编码 UTF-8、换行 LF、缩进两格、ensure_ascii=False：中文原样写进去，
+    看板 fetch 回来就是中文，不用再解一遍 \\uXXXX。
+    """
+    out_path = DEFAULT_ML_JSON if out_path is None else Path(out_path)
+    stamp = generated_at or datetime.now().strftime(TIME_FORMAT)
+    # 末尾补一个换行：没有它的话，git 上会显示「\ No newline at end of file」
+    text = json.dumps(ml_result_json(result, stamp), ensure_ascii=False, indent=2)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text + "\n", encoding="utf-8", newline="\n")
+    return out_path
+
+
 def _document(body: str) -> str:
     """把各个区块包成一份完整的 HTML 文档。
 
@@ -1173,13 +1362,43 @@ def main(argv: list[str] | None = None) -> int:
     print(f"今日摘要（数据来源：{daily['source']}）：")
     print(f"  {daily['text']}")
 
+    # ML 辅助判断（Step 9-3）。判的是 C 部分那一对文件（ml.py 里那两个默认路径），
+    # 不是上面这份 CSV —— 两者是不同的数据，区块里也是这么写的。
+    #
+    # 三种情况都只让这一段降级，不让报告崩：那两份文件被删了（load 抛 SystemExit
+    # 「说一句人话」）、里面是空的（_require_rows 抛 ValueError）、这台机器没装
+    # scikit-learn（build_model 也抛 SystemExit）。报告其余部分的数字跟 ML 无关。
+    try:
+        ml_result = ml.run_ml(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+    except (SystemExit, ValueError) as exc:
+        ml_result, ml_error = None, str(exc)
+
+    print()
+    if ml_result is None:
+        print("ML 辅助判断：这一段没跑")
+        print(f"  {ml_error}")
+    else:
+        print(f"ML 辅助判断（历史 {ml_result['history_rows']} 条 → "
+              f"新数据 {ml_result['new_rows']} 条，"
+              f"门槛松紧 {ml_result['history_flagged']}/{ml_result['history_rows']}）：")
+        print(f"  {ml_result['text']}")
+
+    sections = [daily_summary_section(daily)]
+    sections.append(ml_skip_section(ml_error) if ml_result is None
+                    else ml_section(ml_result))
+
     if args.no_report:
         print(f"跳过 {DEFAULT_REPORT_HTML.name}（--no-report）")
         return 0
 
     print()
-    report_path = write_report(summary, sections=[daily_summary_section(daily)])
+    report_path = write_report(summary, sections=sections)
     print(f"报告：{report_path}")
+
+    if ml_result is not None:
+        # 这份是给看板 fetch 的（report/ml_result.json）。跟报告一起写、也一起跳过：
+        # 两个都是这一步的产物，只写一个的话，看板上那句判断会和报告里那张表对不上。
+        print(f"ML 结果 JSON：{write_ml_result(ml_result)}")
 
     return 0
 

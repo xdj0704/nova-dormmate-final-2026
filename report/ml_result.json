@@ -1,0 +1,80 @@
+{
+  "generatedAt": "2026-09-29 19:51:44",
+  "historyFile": "dorm-a_history_sim.csv",
+  "historyRows": 40,
+  "historyFlagged": 18,
+  "newFile": "new_samples.csv",
+  "newRows": 6,
+  "params": {
+    "n_estimators": 100,
+    "contamination": "auto",
+    "random_state": 42
+  },
+  "threshold": 0.0,
+  "mismatchForward": 2,
+  "mismatchReverse": 0,
+  "mismatchTotal": 2,
+  "text": "6 条新数据里，规则与 ML 不一致的有 2 条。规则判断为正常、ML 认为与历史明显不同的有 11:25（26 ℃ / 62 %）、11:30（29 ℃ / 72 %）。两种口径本来就会在这类数据上分岔：固定规则只看有没有越过那三条线，ML 比的是跟平时的历史像不像。",
+  "rows": [
+    {
+      "nodeId": "dorm-a",
+      "time": "2026-09-23 11:20:00",
+      "temperature": 25,
+      "humidity": 60,
+      "ruleStatus": "正常",
+      "mlStatus": "接近历史常态",
+      "score": 0.0347,
+      "mismatch": false
+    },
+    {
+      "nodeId": "dorm-a",
+      "time": "2026-09-23 11:25:00",
+      "temperature": 26,
+      "humidity": 62,
+      "ruleStatus": "正常",
+      "mlStatus": "与历史明显不同",
+      "score": -0.0564,
+      "mismatch": true
+    },
+    {
+      "nodeId": "dorm-a",
+      "time": "2026-09-23 11:30:00",
+      "temperature": 29,
+      "humidity": 72,
+      "ruleStatus": "正常",
+      "mlStatus": "与历史明显不同",
+      "score": -0.123,
+      "mismatch": true
+    },
+    {
+      "nodeId": "dorm-a",
+      "time": "2026-09-23 11:35:00",
+      "temperature": 31,
+      "humidity": 60,
+      "ruleStatus": "偏热",
+      "mlStatus": "与历史明显不同",
+      "score": -0.0823,
+      "mismatch": false
+    },
+    {
+      "nodeId": "dorm-a",
+      "time": "2026-09-23 11:40:00",
+      "temperature": 25,
+      "humidity": 80,
+      "ruleStatus": "偏湿",
+      "mlStatus": "与历史明显不同",
+      "score": -0.0933,
+      "mismatch": false
+    },
+    {
+      "nodeId": "dorm-a",
+      "time": "2026-09-23 11:45:00",
+      "temperature": 17,
+      "humidity": 60,
+      "ruleStatus": "偏冷",
+      "mlStatus": "与历史明显不同",
+      "score": -0.045,
+      "mismatch": false
+    }
+  ]
+}
