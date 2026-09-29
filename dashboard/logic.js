@@ -189,6 +189,123 @@ export function nextHandling(node, record) {
   };
 }
 
+/* ---------- Step 7-4：事件记录 ---------- */
+
+/**
+ * 一条事件。字段就是导出 CSV 的那 9 列，顺序也一致
+ * （见 dashboard.js 的 EVENT_HEADER）：
+ *
+ *   nodeId         哪个宿舍
+ *   startTime      这段连续异常是从哪条消息开始的
+ *   problem        「连续偏热」这一串，**创建时定死**（见下）
+ *   priorityTime   第一次被选为「优先关注」的那一刻，没有就是 null
+ *   priorityReason 那次选它的原因原话，和页面上那条栏里说的是同一句
+ *   action         按过按钮之后做了什么（「风扇已开启」）
+ *   actionTime     那个动作记在哪条数据上
+ *   recoverTime    这段结束的那条消息的 time，没有就是 null
+ *   result         '已恢复'，或者空串表示还没结束
+ *
+ * 这一整条记录的是**一段连续异常**，和 nextAbnormal 维护的那一段同生共死：
+ * 段开始就开一条，段结束（来了一条正常数据）就结案。中途不会另开一条，
+ * 哪怕段里状态从偏热变成了偏湿 —— 和 7-1 那边「统计的是连续异常、
+ * 不是连续偏热」是同一个口径。
+ */
+
+/**
+ * 段开始了：开一条新事件。
+ *
+ * problem 取**开始那一刻**的状态，之后不再改。理由：它是这条事件的名字，
+ * 在复盘的时间线里就摆在 startTime 旁边，说的是「这件事是从什么开始的」。
+ * 跟着最新状态改的话，一段从偏热恶化成偏湿的经历，事后看起来像是从头
+ * 就是偏湿的 —— 那是另一件事了。
+ *
+ * 返回 null = 不该开：没有这条记录，或者它本身是「正常」。
+ * 后面这条在页面里不会发生（段开始的前提就是这条不正常），
+ * 写在这里是为了不让一个「连续正常」这种自相矛盾的名字有机会被造出来。
+ *
+ * @param {{nodeId: string, status: string, time: string}} record 复核之后的记录
+ * @returns {Object|null}
+ */
+export function beginEvent(record) {
+  if (!record || record.status === '正常') return null;
+  return {
+    nodeId: record.nodeId,
+    startTime: record.time,
+    problem: '连续' + record.status,
+    priorityTime: null,
+    priorityReason: null,
+    action: null,
+    actionTime: null,
+    recoverTime: null,
+    result: '',
+  };
+}
+
+/**
+ * 这个节点被选成「优先关注」了，把那一刻记到事件上。
+ *
+ * **只记第一次**：之后再被选中也不覆盖。复盘想回答的是「这个宿舍是什么
+ * 时候被注意到的、当时是因为什么」，而不是「最后一次看它时长什么样」。
+ * 后者在页面顶上那条栏里一直是最新的，不必再存一份。
+ *
+ * 返回 null = 不用改：没有事件、没有时间，或者早就记过了。
+ *
+ * @param {Object|null} event
+ * @param {string} time 判定它胜出时，**它自己**最新那条消息的 time
+ * @param {string} reason 和页面上那条栏里显示的原因原话
+ * @returns {{priorityTime: string, priorityReason: string}|null}
+ */
+export function markPriority(event, time, reason) {
+  if (!event || !time) return null;
+  if (event.priorityTime) return null;
+  return {
+    priorityTime: time,
+    priorityReason: reason == null ? '' : String(reason),
+  };
+}
+
+/**
+ * 有人在处理这段异常期间按了「开启风扇 / 通风」，把动作记到事件上。
+ *
+ * 同样**只记第一次**。按第二次时 actionTime 会往前挪（按钮那会儿是可点的），
+ * 但复盘要看的是「这件事第一次被动手是什么时候、做了什么」——
+ * 第二次按的是同一件事的重复，不该把第一次的功劳盖掉。
+ *
+ * 返回 null = 不用改：没有事件、没有动作名/时间，或者已经记过了。
+ *
+ * @param {Object|null} event
+ * @param {string} action 动作名（就是按钮按下之后卡片上显示的那串）
+ * @param {string} time 动作记在哪条数据上
+ * @returns {{action: string, actionTime: string}|null}
+ */
+export function markAction(event, action, time) {
+  if (!event || !action || !time) return null;
+  if (event.action) return null;
+  return { action: action, actionTime: time };
+}
+
+/**
+ * 段结束了：结案。
+ *
+ * 触发条件是 nextAbnormal 把 abnormalCount 清零（也就是来了一条正常数据），
+ * 所以这里不做时间比较 —— 该不该结案是那一步说了算的，这边只负责写下来。
+ * （代价和页面上其它地方一样：一条迟到的正常数据同样会把它结掉，
+ * 见 README「报文没有乱序保护」那一条。）
+ *
+ * result 只有一个终态：'已恢复'。没结案的才是空串，两者不会混。
+ *
+ * 返回 null = 不用改：没有事件、没有时间，或者已经结过案了。
+ *
+ * @param {Object|null} event
+ * @param {string} time 让它恢复正常的那条消息的 time
+ * @returns {{recoverTime: string, result: string}|null}
+ */
+export function closeEvent(event, time) {
+  if (!event || !time) return null;
+  if (event.recoverTime) return null;
+  return { recoverTime: time, result: '已恢复' };
+}
+
 /**
  * 拼一句人话，说清楚为什么是它。
  *

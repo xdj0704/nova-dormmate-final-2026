@@ -40,9 +40,10 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这七个（多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十一个（多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
-  'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,pickPriority');
+  'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,'
+  + 'beginEvent,markPriority,markAction,closeEvent,pickPriority');
 /* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
    只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
    自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
@@ -80,11 +81,13 @@ vm.createContext(context);
 vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
-  nextHandling, pickPriority } = context;
+  nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority } = context;
 
-check('七个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
-  beginHandling, nextHandling, pickPriority].map((f) => typeof f),
-['function', 'function', 'function', 'function', 'function', 'function', 'function']);
+check('十一个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
+  beginHandling, nextHandling, beginEvent, markPriority, markAction, closeEvent,
+  pickPriority].map((f) => typeof f),
+['function', 'function', 'function', 'function', 'function', 'function',
+  'function', 'function', 'function', 'function', 'function']);
 
 /* ---------- 小工具 ---------- */
 
@@ -464,6 +467,190 @@ check('★ 已恢复的节点再收到一条更晚的正常数据 -> 仍是「�
   + 'dataAfterAction 往后挪到最新那条',
   nextHandling(hNode('2026-09-22 20:09:00', '已恢复', '2026-09-22 20:05:00'),
     rec('正常', '2026-09-22 20:12:00')).dataAfterAction.time, '2026-09-22 20:12:00');
+
+/* ---------- H. 事件记录（Step 7-4）---------- */
+
+console.log('\n=== H. beginEvent / markPriority / markAction / closeEvent（事件记录）===');
+
+/* 一条事件的字段顺序就是导出 CSV 的列顺序（dashboard.js 的 EVENT_HEADER）。
+   这里钉死顺序，那两处就再也拧不到一起去。 */
+const EVENT_KEYS = ['nodeId', 'startTime', 'problem', 'priorityTime', 'priorityReason',
+  'action', 'actionTime', 'recoverTime', 'result'];
+
+/* --- beginEvent：这段异常开始了 --- */
+
+check('beginEvent(null) -> null，不抛异常', beginEvent(null), null);
+check('beginEvent(undefined) -> null', beginEvent(undefined), null);
+check('★ status 是「正常」-> null（不许造出一个叫「连续正常」的东西）',
+  beginEvent(rec('正常', '2026-09-22 20:30:00')), null);
+
+const ev = beginEvent({ nodeId: 'dorm-b', status: '偏热', time: '2026-09-22 20:30:00' });
+check('★ problem 是「连续」+ 当时的 status', ev.problem, '连续偏热');
+check('★ startTime 就是这条消息的 time', ev.startTime, '2026-09-22 20:30:00');
+check('★ nodeId 照抄', ev.nodeId, 'dorm-b');
+check('★ 字段正好是那九列，而且**顺序**跟 CSV 表头一致',
+  Object.keys(ev), EVENT_KEYS);
+
+/* 还没发生的那几格一律 null / 空串。空串是 result 专用的：
+   它有个明确的「还没结案」含义，而 null 是「这件事压根没发生过」。 */
+check('刚开案时优先关注那两格是 null', [ev.priorityTime, ev.priorityReason], [null, null]);
+check('刚开案时处理动作那两格是 null', [ev.action, ev.actionTime], [null, null]);
+check('刚开案时 recoverTime 是 null', ev.recoverTime, null);
+check('★ 刚开案时 result 是**空字符串**（不是「进行中」也不是 null）', ev.result, '');
+
+/* 三种异常都要能开案，problem 跟着 status 走 */
+['偏冷', '偏热', '偏湿'].forEach((s) => {
+  check('★ ' + s + ' 开出来的 problem 是「连续' + s + '」',
+    beginEvent(rec(s, '2026-09-22 20:30:00')).problem, '连续' + s);
+});
+
+/* beginEvent 只读 record.status，不自己复核 —— 复核是 dashboard 在调它之前做完的。
+   传一条「写着偏热、读数却是 25/60」的记录，这里就该按偏热开案。 */
+check('★ 只认 record.status，不自己重新判断（复核规则的只有 shared/rules.js 一份）',
+  beginEvent({ nodeId: 'dorm-a', status: '偏热', time: '2026-09-22 20:30:00',
+    temperature: 25, humidity: 60 }).problem, '连续偏热');
+
+/* 纯函数 */
+const srcRec = { nodeId: 'dorm-a', status: '偏湿', time: '2026-09-22 20:30:00' };
+const recBefore = JSON.stringify(srcRec);
+const e1 = beginEvent(srcRec);
+const e2 = beginEvent(srcRec);
+check('★ 不改传进来的那条记录', JSON.stringify(srcRec), recBefore);
+check('★ 每次返回新对象（两条事件不能共用一个对象）', e1 === e2, false);
+
+/* --- markPriority：第一次被选成「优先关注」 --- */
+
+check('markPriority(null, ...) -> null', markPriority(null, '2026-09-22 20:35:00', 'x'), null);
+check('★ 没有时间 -> null（不能记一个空时刻）',
+  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), null, 'x'), null);
+check('time 是空串 -> null', markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '', 'x'), null);
+
+const fresh = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
+const pri = markPriority(fresh, '2026-09-22 20:35:00', 'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长');
+check('★ 第一次记下时刻', pri.priorityTime, '2026-09-22 20:35:00');
+check('★ 原因原话照抄（页面上那条栏里显示的就是这一句）',
+  pri.priorityReason, 'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长');
+check('只返回这两个字段', Object.keys(pri).sort(), ['priorityReason', 'priorityTime']);
+
+/* ★ 只记第一次：之后再被选中不覆盖。复盘要回答的是「什么时候被注意到、
+   当时因为什么」，不是「最后一次看它时长什么样」。 */
+const stamped = Object.assign(beginEvent(rec('偏热', '2026-09-22 20:30:00')),
+  { priorityTime: '2026-09-22 20:35:00', priorityReason: '第一次的原因' });
+check('★ 已经记过 -> null，不覆盖（只记第一次）',
+  markPriority(stamped, '2026-09-22 20:50:00', '后来的原因'), null);
+check('★ 那条事件上的时刻和原因都还是第一次的',
+  [stamped.priorityTime, stamped.priorityReason],
+  ['2026-09-22 20:35:00', '第一次的原因']);
+
+/* reason 缺失时写空串，不写字符串 'null' —— 那四个字母会原样进 CSV */
+check('reason 是 null -> 空串（不是字符串 "null"）',
+  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:35:00', null)
+    .priorityReason, '');
+check('reason 是 undefined -> 空串',
+  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:35:00')
+    .priorityReason, '');
+check('reason 是数字 -> 转成字符串，不原样塞进去',
+  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:35:00', 42)
+    .priorityReason, '42');
+
+/* 纯函数：返回局部对象，绝不就地改传进来的那条 */
+const pSrc = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
+const pBefore = JSON.stringify(pSrc);
+markPriority(pSrc, '2026-09-22 20:35:00', 'x');
+check('★ markPriority 不改传进来的事件（要不要写回去是调用方的事）',
+  JSON.stringify(pSrc), pBefore);
+
+/* --- markAction：处理动作 --- */
+
+check('markAction(null, ...) -> null', markAction(null, '风扇已开启', '2026-09-22 20:35:00'), null);
+check('没有动作名 -> null',
+  markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')), null, '2026-09-22 20:35:00'), null);
+check('动作名是空串 -> null',
+  markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '', '2026-09-22 20:35:00'), null);
+check('★ 没有时间 -> null（不能记一个空时刻）',
+  markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '风扇已开启', null), null);
+
+const act = markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')),
+  '风扇已开启', '2026-09-22 20:35:00');
+check('★ 第一次记下动作名', act.action, '风扇已开启');
+check('★ 和动作记在哪条数据上', act.actionTime, '2026-09-22 20:35:00');
+check('只返回这两个字段', Object.keys(act).sort(), ['action', 'actionTime']);
+
+/* ★ 也只记第一次：第二次按的时候 actionTime 会往前挪，但复盘要看的是
+   「这件事第一次被动手是什么时候、做了什么」。 */
+const acted = Object.assign(beginEvent(rec('偏热', '2026-09-22 20:30:00')),
+  { action: '风扇已开启', actionTime: '2026-09-22 20:35:00' });
+check('★ 已经记过 -> null，不覆盖（只记第一次）',
+  markAction(acted, '风扇已开启', '2026-09-22 20:40:00'), null);
+check('★ 那条事件上的动作时刻还是第一次的', acted.actionTime, '2026-09-22 20:35:00');
+
+const aSrc = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
+const aBefore = JSON.stringify(aSrc);
+markAction(aSrc, '风扇已开启', '2026-09-22 20:35:00');
+check('★ markAction 不改传进来的事件', JSON.stringify(aSrc), aBefore);
+
+/* --- closeEvent：结案 --- */
+
+check('closeEvent(null, ...) -> null', closeEvent(null, '2026-09-22 20:55:00'), null);
+check('★ 没有时间 -> null',
+  closeEvent(beginEvent(rec('偏热', '2026-09-22 20:30:00')), null), null);
+
+const closed = closeEvent(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:55:00');
+check('★ recoverTime 是让它恢复正常的那条消息的 time',
+  closed.recoverTime, '2026-09-22 20:55:00');
+check('★ result 是「已恢复」', closed.result, '已恢复');
+check('只返回这两个字段', Object.keys(closed).sort(), ['recoverTime', 'result']);
+
+check('★ 已经结过案 -> null（不重复结案，recoverTime 不会被后来的数据顶掉）',
+  closeEvent({ recoverTime: '2026-09-22 20:55:00', result: '已恢复' },
+    '2026-09-22 21:30:00'), null);
+
+/* 结案不做时间比较：该不该结案是 nextAbnormal 把 abnormalCount 清零说了算的，
+   这边只负责写下来。所以哪怕传一个比 startTime 还早的 time，它也照写 ——
+   这是**故意**的，不是漏了校验（代价见 README「报文没有乱序保护」）。 */
+check('★ 结案不看时间先后（该不该结案由 nextAbnormal 决定，这里只负责写）',
+  closeEvent(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:00:00')
+    .recoverTime, '2026-09-22 20:00:00');
+
+const cSrc = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
+const cBefore = JSON.stringify(cSrc);
+closeEvent(cSrc, '2026-09-22 20:55:00');
+check('★ closeEvent 不改传进来的事件', JSON.stringify(cSrc), cBefore);
+
+/* --- 一个节点走完一整段：开案 -> 被关注 -> 动手 -> 结案 ---
+
+   四个函数拼起来用的样子，就是 dashboard.js 里 handleMessage 那一串。
+   全程只有**一个**对象，就地往上加字段。 */
+const walked = beginEvent({ nodeId: 'dorm-b', status: '偏热', time: '2026-09-22 20:30:00' });
+Object.assign(walked, markPriority(walked, '2026-09-22 20:35:00', 'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长'));
+Object.assign(walked, markAction(walked, '风扇已开启', '2026-09-22 20:35:00'));
+Object.assign(walked, closeEvent(walked, '2026-09-22 20:55:00'));
+
+check('★ 走完一整段之后，九列全填齐（CSV 那一行就是这么来的）',
+  Object.keys(walked).map((k) => walked[k]), [
+    'dorm-b',
+    '2026-09-22 20:30:00',
+    '连续偏热',
+    '2026-09-22 20:35:00',
+    'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长',
+    '风扇已开启',
+    '2026-09-22 20:35:00',
+    '2026-09-22 20:55:00',
+    '已恢复',
+  ]);
+
+/* 段里状态变了也不另开一条 —— problem 是开案时定死的。
+   一段从偏热恶化成偏湿的经历，事后不该看起来像是从头就偏湿的。 */
+const worsen = beginEvent({ nodeId: 'dorm-b', status: '偏热', time: '2026-09-22 20:30:00' });
+worsen.latestStatus = '偏湿';
+check('★ problem 在开案时就定死，中途状态变了也不改名（它是这条事件的名字）',
+  worsen.problem, '连续偏热');
+check('★ 没有任何函数会去改 problem（markPriority / markAction / closeEvent 都只返回自己那几格）',
+  [markPriority(worsen, '2026-09-22 20:35:00', 'x'),
+    markAction(worsen, '风扇已开启', '2026-09-22 20:35:00'),
+    closeEvent(worsen, '2026-09-22 20:55:00')]
+    .map((p) => Object.prototype.hasOwnProperty.call(p, 'problem')),
+  [false, false, false]);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

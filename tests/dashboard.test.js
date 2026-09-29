@@ -45,7 +45,11 @@ function makeEl(id) {
 const els = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state']
+  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
+  /* Step 7-4 的三件：事件表、条数、导出按钮。
+     必须列在这里 —— getElementById 对没登记的 id 会现场造一个新的，
+     那样断言里读到的 els['event-body'] 和页面里那个就不是同一个对象了。 */
+  'event-body', 'event-count', 'export-events']
   .forEach((id) => { els[id] = makeEl(id); });
 
 const chartsBox = makeEl('charts');
@@ -59,12 +63,55 @@ const PALETTE = {
   '--surface-1': '#fcfcfb',
 };
 
+/* 导出 CSV 那条路（Step 7-4）要用到 vm 里没有的三样东西：Blob、URL、
+   以及 document.createElement —— 真实现是临时造一个 <a download> 插进 body
+   再点它一下。不补这三样，点导出按钮就是 ReferenceError，
+   而「导出的字节到底对不对」正是这一步最该测的东西。
+   每一件都把调用记下来，测试才能在没有真浏览器的情况下把那份 CSV 拿到手。 */
+const blobs = [];
+class BlobStub {
+  constructor(parts, options) {
+    this.parts = parts;
+    this.type = options && options.type;
+    /* 真 Blob 是二进制，这里只关心文本，拼起来就够了 */
+    this.text = parts.join('');
+    blobs.push(this);
+  }
+}
+const objectUrls = [];
+const revokedUrls = [];
+const clickedAnchors = [];
+const appendedNodes = [];
+const removedNodes = [];
+/* 只记不执行：setTimeout 在 dashboard.js 里只用于「延迟回收 objectURL」那一处，
+   立刻执行就把「隔了一会儿才 revoke」这个行为测没了。测试自己挑时候触发。 */
+const timers = [];
+
 const documentStub = {
   documentElement: makeEl('html'),
   getElementById: (id) => els[id] || makeEl(id),
   querySelector: (sel) => (sel === '.charts' ? chartsBox : makeEl(sel)),
   querySelectorAll: () => [],
   addEventListener() {},
+  createElement(tag) {
+    const node = makeEl(tag);
+    node.tag = tag;
+    node.click = () => clickedAnchors.push(node);
+    return node;
+  },
+  body: {
+    appendChild: (n) => appendedNodes.push(n),
+    removeChild: (n) => removedNodes.push(n),
+  },
+};
+
+const URLStub = {
+  createObjectURL(blob) {
+    const url = 'blob:stub/' + (objectUrls.length + 1);
+    objectUrls.push({ url, blob });
+    return url;
+  },
+  revokeObjectURL(url) { revokedUrls.push(url); },
 };
 
 /* ---------- Chart.js 打桩 ---------- */
@@ -130,6 +177,9 @@ const context = {
   location: { hostname: 'localhost' },
   getComputedStyle: () => ({ getPropertyValue: (n) => PALETTE[n] || '' }),
   window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
+  Blob: BlobStub,
+  URL: URLStub,
+  setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
   console,
   JSON, Math, Date, Number, Object, Array, String, Set, isNaN, parseInt,
 };
@@ -156,7 +206,11 @@ context.window.document = documentStub;
    注意这只是**跑起来**的方式。原文件里到底怎么写的那两行，
    由下面 M 段的两条静态断言盯着（正则 + 文件真的在）。 */
 const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+/* 这条 import 在源码里折成了两行（Step 7-4 起函数变多，一行放不下），
+   所以分隔符一律写 \s —— 它能匹配换行，折行处那几个空格加换行才过得去。
+   写成 [ ] 或字面空格的话，摘不掉 import，下一句 vm 会抛
+   「Cannot use import statement outside a module」。 */
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
 const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
 const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
@@ -192,6 +246,10 @@ globalThis.__connect = connect;
 globalThis.__disconnect = disconnect;
 globalThis.__renderScene = renderScene;
 globalThis.__renderPriority = renderPriority;
+globalThis.__events = events;
+globalThis.__renderEvents = renderEvents;
+globalThis.__buildEventsCSV = buildEventsCSV;
+globalThis.__exportEventsCSV = exportEventsCSV;
 `;
 vm.runInContext(src, context, { filename: DASH_SRC });
 
@@ -209,10 +267,21 @@ const ACTION_AT_LOAD = {
   text: els['action-state'].textContent,
 };
 
+/* 事件记录那一块刚加载完的样子。同样的道理：P 段一上来就 clearAll()，
+   那之后再读到的就是「清空之后」画出来的。少了这一份，
+   把文件末尾那次 renderEvents() 删掉也不会有人发现 ——
+   tbody 本来就是空的，看着跟「渲染过了、只是没有事件」一模一样。 */
+const EVENTS_AT_LOAD = {
+  disabled: els['export-events'].disabled,
+  count: els['event-count'].textContent,
+  body: els['event-body'].innerHTML,
+};
+
 const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
   __clearAll: clearAll, __selectNode: selectNode, __current: current,
   __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
   __renderScene: renderScene, __renderPriority: renderPriority,
+  __events: events, __buildEventsCSV: buildEventsCSV,
   pickPriority, beginHandling, nextHandling } = context;
 
 /* ---------- 断言 ---------- */
@@ -613,7 +682,7 @@ function clickFocus(nodeId) {
 
 check('★ dashboard.js 有两条 import（scene.js 的 3D 工厂 + logic.js 的算法）',
   importCount, 2);
-check('★ logic.js 那条拿的是 pickPriority / nextAbnormal / beginHandling / nextHandling',
+check('★ logic.js 那条拿的是 7-1 的四个 + 7-4 的四个 + pickPriority',
   LOGIC_IMPORT.test(dashText), true);
 check('★ logic.js 那个文件真的在（./ 是相对 dashboard.js 自己算的，不是相对页面）',
   fs.existsSync(LOGIC_SRC), true);
@@ -994,8 +1063,13 @@ console.log('\n=== L. 没加载 mqtt.js ===');
 const els2 = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'priority', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state']
+  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
+  /* 这三个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
+  'event-body', 'event-count', 'export-events']
   .forEach((id) => { els2[id] = makeEl(id); });
+/* 这一段故意**不**补 Blob / URL / setTimeout：导出按钮在这里不会被点，
+   而「缺依赖时页面照样起得来」正是这一段要验的 —— 补得越全，
+   越测不出真缺东西时会不会崩。 */
 
 const doc2 = {
   documentElement: makeEl('html'),
@@ -1059,6 +1133,287 @@ check('3D 建不起来不影响数据照常进（卡片还是三张）', els2['c
    它是三个模块里唯一一个纯计算，没网没显卡的时候正好靠它撑住现场演示。 */
 check('★ 没网没显卡时「优先关注」照样算得出来（挑出异常的那个节点）',
   els2.priority.innerHTML.includes('优先关注') && els2.priority.innerHTML.includes('dorm-b'), true);
+
+/* ============ P. 事件记录与导出（Step 7-4）============ */
+console.log('\n=== P. 事件记录与导出 ===');
+
+const evBody = () => els['event-body'].innerHTML;
+const exportBtn = els['export-events'];
+/* 走页面真正注册在 #export-events 上的那个回调，不直接调 exportEventsCSV ——
+   回调要是挂错了元素，这里就该红。 */
+const clickExport = () => exportBtn._handlers.click.forEach((fn) => fn());
+/* 表里画了几行数据。不能数 <tr>：一条事件都没有时渲染的是一行
+   「还没有事件」的提示，它也是 <tr>。数结果胶囊最稳 ——
+   空状态一个都没有，每条数据正好一个。
+   要连 class=" 一起写：只写 ev-result 的话，同一个 span 上的
+   ev-result--open / ev-result--done 也会被数进去，一行变两行。 */
+const evRowCount = () => (evBody().match(/<span class="ev-result/g) || []).length;
+/* 按节点找事件。events 是「新的在前」（unshift），所以同节点有多条时
+   拿到的是**最新**那条 —— P 段里需要旧那条时会直接写 events[i]。 */
+const evOf = (id) => events.find((e) => e.nodeId === id);
+
+/* --- 接线本身 --- */
+
+check('index.html 里有 #event-body 那张表', dashHtml.includes('id="event-body"'), true);
+check('index.html 里有 #event-count', dashHtml.includes('id="event-count"'), true);
+check('index.html 里有 #export-events 按钮', dashHtml.includes('id="export-events"'), true);
+check('按钮的文案就是「导出事件 CSV」', dashHtml.includes('导出事件 CSV'), true);
+
+const EV_TH = ['开始', '节点', '问题', '优先关注', '处理动作', '恢复', '结果'];
+const thPos = EV_TH.map((t) => dashHtml.indexOf('<th>' + t + '</th>'));
+check('★ 表头七列全在', thPos.every((p) => p > 0), true);
+check('★ 而且顺序固定（列序换了这里就红 —— 导出 CSV 的列序跟它一一对应）',
+  thPos.every((p, i) => i === 0 || p > thPos[i - 1]), true);
+
+/* --- 启动那一刻（一条数据都没有）--- */
+
+check('★ 启动时就把这块画好了（不是等第一条消息才出现）',
+  EVENTS_AT_LOAD.body.includes('还没有事件'), true);
+check('★ 启动时条数是空的，不写「共 0 条」',
+  EVENTS_AT_LOAD.count, '');
+/* 没东西可导的时候把按钮按掉，而不是让人点了弹一个只有表头的空 CSV ——
+   拿到的人会以为导出坏了。 */
+check('★ 启动时导出按钮是灰的', EVENTS_AT_LOAD.disabled, true);
+check('★ 跑在页面上的 buildEventsCSV 就是 dashboard.js 里那个',
+  typeof buildEventsCSV, 'function');
+
+/* --- 开案：正常 -> 异常 --- */
+
+clearAll();
+check('清空之后一条事件都没有', events.length, 0);
+check('清空之后按钮又变灰', exportBtn.disabled, true);
+check('清空之后表里写的是「还没有事件」', evBody().includes('还没有事件'), true);
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
+check('★ 节点从正常变成异常：开出一条事件', events.length, 1);
+const ev0 = events[0];
+check('★ 起点就是这条消息的 time', ev0.startTime, T('20:30:00'));
+check('★ problem 记的是开始那一刻的状态', ev0.problem, '连续偏热');
+check('nodeId 是它自己的', ev0.nodeId, 'dorm-b');
+/* ★ 这一条是整段实现的地基：events 里存的是**对象本身**，不是深拷贝。
+   整个换掉 node.event 的话，总表里那条会永远停在旧值上 ——
+   页面上一点异常都看不出来，只有导出的 CSV 是空的。 */
+check('★ 节点上那个引用和 events 里那条是**同一个对象**（不是各存一份副本）',
+  nodes['dorm-b'].event === ev0, true);
+check('刚开案时还没结案', [ev0.recoverTime, ev0.result], [null, '']);
+check('★ 表里多了一行', evRowCount(), 1);
+check('★ 那一行写着节点、问题和「进行中」',
+  [evBody().includes('dorm-b'), evBody().includes('连续偏热'),
+    evBody().includes('进行中')], [true, true, true]);
+check('条数写出来了', els['event-count'].textContent, '共 1 条');
+check('★ 有事件之后按钮能点了', exportBtn.disabled, false);
+
+/* 第一次被选为「优先关注」就记上那一刻 —— 这时候它是唯一的异常节点 */
+check('★ 第一次被选中，就把那一刻记上了', ev0.priorityTime, T('20:30:00'));
+/* 记下的原因和顶上那条栏里说的是**同一句**。栏是每条报文都重画的，
+   所以要在刚记下的这一刻比 —— 后面它还会变，而事件上那句已经冻住了。 */
+check('★ 记下的原因和栏里那句一字不差',
+  els.priority.innerHTML.includes(ev0.priorityReason), true);
+
+/* --- 段内继续异常：不另开一条 --- */
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 33, 55, undefined, T('20:33:00')));
+check('★ 段内又来一条异常：不另开一条', events.length, 1);
+check('★ 起点不动（每次刷新起点的话，时长永远停在「不到 1 分钟」）',
+  events[0].startTime, T('20:30:00'));
+check('★ 表里还是那一行（每收一条加一行的话这里会变成 2）', evRowCount(), 1);
+check('★ 之后又被选中也不覆盖（复盘要的是第一次被注意到的时刻）',
+  events[0].priorityTime, T('20:30:00'));
+
+/* 段里状态变了仍然是同一段、同一条 —— 和 7-1「统计的是连续异常、
+   不是连续偏热」是同一个口径 */
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:36:00')));
+check('★ 段里从偏热变成偏湿：还是同一条事件', events.length, 1);
+check('★ problem 保持开案时的「连续偏热」（它是这条事件的名字，不跟着改）',
+  events[0].problem, '连续偏热');
+
+/* --- ★ 被记上的是胜出者**自己**的时刻，不是触发那一轮的报文时刻 ---
+
+   构造一个「触发者是 A、胜出者是 B」的局面：
+     dorm-a 20:00 起连续偏热，20 分钟，一直占着优先关注
+     dorm-b 20:05 起也偏热，但只有 0 分钟，一直被 dorm-a 压着 —— 没被选中过
+     dorm-a 20:30 恢复正常，这一轮触发的是 **dorm-a 的报文**，
+       但胜出的是 dorm-b
+   dorm-b 是这一刻才第一次被选中的，记的必须是它**自己**最新那条的 20:05。
+   写成 record.time 的话，这里会看到 20:30 —— 那是别人的时间。 */
+clearAll();
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:05:00')));
+check('这时胜出的还是 dorm-a（20 分钟 > 0 分钟）', pickPriority(nodes).nodeId, 'dorm-a');
+check('★ dorm-b 还没被选中过，所以还没记时刻', evOf('dorm-b').priorityTime, null);
+
+handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:30:00')));
+check('★ dorm-a 恢复之后轮到 dorm-b 上位', pickPriority(nodes).nodeId, 'dorm-b');
+check('★ 记的是 dorm-b **自己**最新那条的 20:05，不是这条触发报文的 20:30',
+  evOf('dorm-b').priorityTime, T('20:05:00'));
+check('★ 而且 dorm-b 自己的那条事件还在（恢复的是 dorm-a，不该动它）',
+  [evOf('dorm-b').recoverTime, evOf('dorm-b').result], [null, '']);
+
+/* --- 处理动作：也只记第一次 --- */
+
+selectNode('dorm-b');
+clickFan();
+check('★ 按一下风扇：动作写进了那条事件', evOf('dorm-b').action, '风扇已开启');
+check('★ 动作时间取的是该节点最新那条的 time', evOf('dorm-b').actionTime, T('20:05:00'));
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 32, 60, undefined, T('20:10:00')));
+clickFan();
+check('★ 再按一次不覆盖（复盘看的是第一次动手是什么时候、做了什么）',
+  evOf('dorm-b').actionTime, T('20:05:00'));
+
+/* --- 结案：来了正常数据 --- */
+
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
+check('★ 恢复正常之后没有要优先的了', pickPriority(nodes), null);
+check('★ 写上了恢复时刻', evOf('dorm-b').recoverTime, T('20:55:00'));
+check('★ result 变成「已恢复」', evOf('dorm-b').result, '已恢复');
+check('★ 节点上那个引用摘掉了（这个节点没有「当前这段」了）',
+  nodes['dorm-b'].event, null);
+check('★ 但事件还在表里 —— 结案是留档，不是删除', evOf('dorm-b') !== undefined, true);
+check('★ 表里那行写着「已恢复」', evBody().includes('已恢复'), true);
+check('★ 行数没变（结案不加行也不减行）', evRowCount(), 2);
+
+/* 恢复之后再异常，开的是**新的一条** —— 旧的那条已经结案了，不能被翻出来改。
+   先把旧那条抓在手里：下面 unshift 进来一条新的之后，evOf('dorm-b')
+   拿到的就是新的那条了，旧的就再也点不到。 */
+const oldB = evOf('dorm-b');
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('21:00:00')));
+check('★ 恢复之后又异常：开的是新的一条', events.length, 3);
+check('★ 新那条的起点是 21:00，不是被改回去的 20:05',
+  [events[0].nodeId, events[0].startTime, events[0].result],
+  ['dorm-b', T('21:00:00'), '']);
+check('★ evOf 现在拿到的是新那条（同一个节点两条事件，认最新）',
+  evOf('dorm-b') === events[0], true);
+check('★ 旧那条一个字段都没被动过',
+  [oldB.startTime, oldB.recoverTime, oldB.result],
+  [T('20:05:00'), T('20:55:00'), '已恢复']);
+/* 新那条还没结案，也没被旧那条的状态污染 */
+check('★ 新那条是干净的：没恢复、没动作、没被优先关注过',
+  [evOf('dorm-b').recoverTime, evOf('dorm-b').action, evOf('dorm-b').priorityTime],
+  [null, null, T('21:00:00')]);
+
+/* --- 每个节点各记各的 --- */
+
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 80, undefined, T('21:05:00')));
+check('★ 三个节点各有一条，互不串线',
+  ids.map((id) => {
+    const e = evOf(id);
+    return e ? e.nodeId : null;
+  }), ['dorm-a', 'dorm-b', 'dorm-c']);
+/* dorm-a 早在 20:30 就恢复正常、那条已经结案了。后面这一串 dorm-b / dorm-c
+   的消息一条都不该动到它 —— 起点和恢复时刻都还是它自己那两个。 */
+check('★ dorm-a 那条的起点和恢复时刻都还是它自己的（后面的消息没改到它）',
+  [evOf('dorm-a').startTime, evOf('dorm-a').recoverTime],
+  [T('20:00:00'), T('20:30:00')]);
+check('★ dorm-a 那条是「已恢复」，dorm-c 那条还在进行中',
+  [evOf('dorm-a').result, evOf('dorm-c').result], ['已恢复', '']);
+
+/* --- 清空 --- */
+
+clearAll();
+check('★ 清空把事件也一起清了（不清的话卡片写着「等待数据」，下面还列着上一轮的账）',
+  events.length, 0);
+check('清空后表里回到「还没有事件」', evBody().includes('还没有事件'), true);
+check('清空后条数也清空', els['event-count'].textContent, '');
+check('清空后按钮又灰了', exportBtn.disabled, true);
+check('★ 清空后节点上没留下指向总表的野引用',
+  ids.map((id) => nodes[id].event), [null, null, null]);
+/* clearAll 是 events.length = 0（就地清空），不是 events = [] ——
+   整个换掉的话，下面这个引用就指向一个已经被丢弃的数组了 */
+check('★ 清空是就地清空：拿到的还是同一个数组对象',
+  Array.isArray(events) && events.length === 0, true);
+
+/* --- CSV 字节 --- */
+
+clearAll();
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
+selectNode('dorm-b');
+clickFan();
+handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
+handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 80, undefined, T('21:00:00')));
+
+const csv = buildEventsCSV();
+const csvLines = csv.split('\r\n');
+
+check('★ 表头就是那九列，顺序固定',
+  csvLines[0],
+  'nodeId,startTime,problem,priorityTime,priorityReason,action,actionTime,recoverTime,result');
+check('★ 每条事件一行（两条 = 两行数据 + 一行表头）', csvLines.length, 4);
+check('★ 行序和表里看到的一致（最新在前）',
+  [csvLines[1].startsWith('dorm-c,'), csvLines[2].startsWith('dorm-b,')], [true, true]);
+
+/* 换行：CRLF，而且每个 \n 前面都得有 \r */
+check('★ 换行是 CRLF（Excel / WPS 对 LF 的兼容性不如 CRLF）',
+  /\n/.test(csv) && !/[^\r]\n/.test(csv), true);
+check('★ 末尾也有一个 CRLF（不是 \r\n\r\n，就一个）',
+  [csv.endsWith('\r\n'), csv.endsWith('\r\n\r\n')], [true, false]);
+
+/* 还没发生的格子要写成**空**。String(null) 会写成四个字母的 "null"：
+   Excel 里看着像真存了一个叫 null 的值，Python 那边也判不出「这条还没结束」。 */
+check('★ 整份 CSV 里一个 "null" 都没有', csv.includes('null'), false);
+check('★ 没结案那条：动作 / 恢复 / 结果三处都是空',
+  csvLines[1].endsWith(',,,,'), true);
+
+/* 结了案那条：动作、恢复、结果都写上了 */
+check('★ 已结案那条：动作、动作时间、恢复时刻、结果四处齐全',
+  csvLines[2].endsWith(',风扇已开启,2026-09-22 20:30:00,2026-09-22 20:55:00,已恢复'), true);
+check('★ problem 那一列写的是「连续偏湿」', csvLines[1].includes(',连续偏湿,'), true);
+
+/* 转义（RFC 4180）：字段里有半角逗号或双引号时要包起来、内部的引号写成两个。
+   真跑起来这两样都不会出现（原因里用的是全角「，」，不触发转义），
+   但这份文件是要喂给 analysis.py 的，格式错一点那边就解析歪了。 */
+events.unshift({
+  nodeId: 'dorm-z', startTime: T('22:00:00'), problem: '连续偏热,带逗号',
+  priorityTime: null, priorityReason: '他说"先看这个"',
+  action: null, actionTime: null, recoverTime: null, result: '',
+});
+const csvQuoted = buildEventsCSV();
+check('★ 含半角逗号的字段被双引号包起来',
+  csvQuoted.includes('"连续偏热,带逗号"'), true);
+check('★ 字段里的双引号写成两个',
+  csvQuoted.includes('"他说""先看这个"""'), true);
+events.shift();
+
+/* --- 点一下导出按钮 --- */
+
+const nBlobs = blobs.length;
+const nAnchors = clickedAnchors.length;
+const nAppended = appendedNodes.length;
+const nRemoved = removedNodes.length;
+const nTimers = timers.length;
+
+clickExport();
+
+check('★ 点一下造了一个 Blob', blobs.length, nBlobs + 1);
+const made = blobs[blobs.length - 1];
+check('★ MIME 是 text/csv;charset=utf-8', made.type, 'text/csv;charset=utf-8');
+/* ★ BOM 必须在最前面。少了它 Excel/WPS 会按本地代码页解析，
+   problem 和 result 里的中文就是乱码 —— 这正是当初定「带 UTF-8 BOM」的原因。 */
+check('★ 内容第一个字符就是 UTF-8 BOM (U+FEFF)', made.text.charCodeAt(0), 0xFEFF);
+check('★ BOM 之后就是 buildEventsCSV 拼出来的那份',
+  made.text.slice(1), buildEventsCSV());
+
+const anchor = clickedAnchors[clickedAnchors.length - 1];
+check('★ 造了一个 <a>', clickedAnchors.length, nAnchors + 1);
+check('★ 它是链接、下载名是 events.csv',
+  [anchor.tag, anchor.download], ['a', 'events.csv']);
+check('★ href 指向那个 object URL', anchor.href, objectUrls[objectUrls.length - 1].url);
+/* 先插进文档再点：Firefox 里不插进文档的 <a> 点了没反应 */
+check('★ 先插进 body 再点', appendedNodes.length, nAppended + 1);
+check('★ 点完把 <a> 摘掉，不留垃圾节点',
+  [removedNodes.length === nRemoved + 1, removedNodes[removedNodes.length - 1] === anchor],
+  [true, true]);
+/* 不能点完立刻 revoke：部分浏览器会在下载真正开始前就把 blob 释放掉，
+   表现为「点了没反应」。所以是隔一会儿再回收。 */
+check('★ objectURL 是延迟 1000ms 回收的，不是点完立刻 revoke',
+  [timers.length, timers[timers.length - 1].ms, revokedUrls.length],
+  [nTimers + 1, 1000, 0]);
+timers[timers.length - 1].fn();
+check('★ 到点了才 revoke，revoke 的就是那个 URL', revokedUrls, [anchor.href]);
+
+/* 一条事件都没有时按钮是 disabled 的。真浏览器里点灰按钮不会触发回调，
+   所以这里不模拟「点了会怎样」—— 上面 EVENTS_AT_LOAD 那条断言盯的就是它。 */
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

@@ -24,6 +24,7 @@ three.js —— 都各留了一份本地副本，默认走 CDN，现场没网时
 | 3D 宿舍实景 | ✅ 已完成（Step 6-1 ~ 6-3） | Three.js 场景嵌在看板里，跟着**当前选中的节点**走：点卡片切节点时，画面、标签、风扇一起切 |
 | 优先关注 | ✅ 已完成（Step 7-1） | 从三个节点里挑出最该先看的那个：先比连续异常时长，一样长比这段的消息条数，还一样按 nodeId 定序。点它 = 点对应那张卡片 |
 | 处理动作 | ✅ 已完成（Step 7-2） | 详情区「开启风扇 / 通风」按钮。按下后节点记「处理中｜风扇已开启」，动作之后收到的数据决定转「已恢复」还是留在「处理中」。卡片、详情区、3D 风扇读的是同一份节点数据 |
+| 事件记录 + 导出 | ✅ 已完成（Step 7-4 第一部分） | 节点从正常进入异常时开一条事件，恢复时结案，**一行 = 一段连续异常**。九列：开始 / 节点 / 问题 / 优先关注 / 处理动作 / 恢复 / 结果。「导出事件 CSV」也是 CRLF + UTF-8 BOM。第二部分的 `analysis/analysis.py` 事件复盘时间线**还没做** |
 | 手动录入分析 | ✅ 已完成 | 在页面上直接输入一组温湿度，前端按统一规则算出 status 并给出建议文案，带范围校验（温度 -20~60℃，湿度 0~100%） |
 | 录入历史 + 导出 CSV | ✅ 已完成 | 表内滚动、表头吸顶；导出为 CRLF 换行 + UTF-8 BOM，Excel / WPS 打开不乱码 |
 | Python 分析 | ✅ 已完成（Step 2-2~2-5） | 读 CSV → 规则复核 → 状态统计 → 出 `report/trend.png` 趋势图 → 出 `report/report.html`；支线还能渲染一份 Markdown 报告 |
@@ -64,8 +65,8 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── test_report.py       # 报告渲染的测试（30 条，需要 pandas）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
 │   ├── miniapp-rules.test.js # 小程序 rules.js ↔ shared/rules.js 交叉比对（48 条）
-│   ├── logic.test.js        # dashboard/logic.js 的纯函数：解析 / 时长 / 连续异常段 / 挑优先 / 处理状态机（112 条）
-│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图 / 3D 接线 / 优先关注栏 / 处理动作（271 条，假 DOM + 假 mqtt）
+│   ├── logic.test.js        # dashboard/logic.js 的纯函数：解析 / 时长 / 连续异常段 / 挑优先 / 处理状态机 / 事件（162 条）
+│   ├── dashboard.test.js    # dashboard.js 的订阅 / 校验 / 绘图 / 3D 接线 / 优先关注栏 / 处理动作 / 事件记录与 CSV 导出（353 条，假 DOM + 假 mqtt）
 │   ├── scene3d.test.js      # 3d/scene.js 与 3d/index.html 的结构（198 条，假 three 模块 + 假 DOM）
 │   ├── scene3d-page.test.js # 3d/index.html 里那段模块脚本：MQTT 驱动 3D（65 条）
 │   └── script.test.js       # 前端回归测试（130 条，纯 Node 无依赖）
@@ -374,8 +375,8 @@ node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
 node tests/scene3d.test.js                        # ⑧ 3D 场景，198 条
 node tests/scene3d-page.test.js                   # ⑨ 3D 页面的 MQTT 接线，65 条
 node tests/miniapp-rules.test.js                  # ⑥ 两份规则实现交叉比对，48 条
-node tests/dashboard.test.js                      # ⑦ 多节点看板，271 条
-node tests/logic.test.js                          # ⑩ 优先关注 + 处理动作，112 条
+node tests/dashboard.test.js                      # ⑦ 多节点看板，353 条
+node tests/logic.test.js                          # ⑩ 优先关注 + 处理动作 + 事件记录，162 条
 node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ```
 
@@ -395,10 +396,10 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
 | ⑤ 130 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错 |
 | ⑥ 48 条 | `miniapp/utils/rules.js` 与 `shared/rules.js` 的交叉比对：两份实现分别放进各自的 vm 跑，在 8211 组温湿度（温度 -20~60 步长 0.5 × 湿度 0~100 步长 2）上逐对比 `judgeStatus` 与 `getAdvice`，结果必须完全一致；另有一条守卫确认这个网格真的覆盖到了四种状态，否则「全都一样」可能只是压根没测到 |
-| ⑦ 271 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示；Step 6-3 的 3D 接线：**收到别的节点的消息时 3D 一次都不许被调**、切节点立刻改画、收到的 status 是复核之后才交给 3D 的、`renderScene` 的幂等与「3D 建不起来时直接跳过」；Step 7-1 的「优先关注」栏：`abnormalStart` / `abnormalCount` 的维护（首条开段、起点不动、节点之间互不串、来正常数据两个字段一起清零、清零后再异常是新的一段、段里从偏热变偏湿仍是同一段、**报文谎称「正常」但规则算出偏热时段不被打断**）、`abnormalCount > 0` 与 `latest.status !== '正常'` 的等价不变量、页面刚加载时那栏就画好了且说的是「还没有收到数据」而不是「三个都正常」、点那栏走的**是注册在 `#priority` 上的真实委托回调**（`clickFocus()` 模拟的是事件，不是直接调 `selectNode`，所以选择器写错这里会红）且卡片 / 趋势图 / 3D 一起切过去并改口说「正在查看」、以及交给 MQTTX 的那三组数据在 `handleMessage` 上端到端跑一遍；Step 7-2 的处理动作：没数据 / 状态正常时按钮都禁用、偏湿时可按、点在 `#action-fan` 上真实注册的回调、按下之后四个字段各是什么（`actionTime` 取的是**该节点最新那条消息的 `time`**，不是浏览器时间）、卡片上出现独立的 `<span class="card-action">处理中｜风扇已开启</span>` 且**只有被处理的那个节点有**、详情区那行字把「记在哪条数据上 / 之后收到了什么」说清楚、**按下之后先 `updateScene` 再 `setFanOn(true)`**（顺序反了会被 `updateScene` 自己那次盖掉，所以拿偏湿当被测场景 —— 偏热的 `LOOK` 本来就是 `fan: true`，顺序写反也照样绿）、比动作还早的消息不许改写处理状态、动作之后正常了转「已恢复」而再变坏自动退回「处理中」、`actionTime` 不被后来的消息顶掉、两个节点各记各的互不覆盖、**没按过按钮的节点 dashboard 一次都不碰风扇**（不许把偏热本来就转着的按停）、清空后四个字段归零且不再喊「转」、以及「启动那一刻按钮就是灰的、那行字就是『还没有收到数据』」的加载快照 |
+| ⑦ 353 条 | `dashboard.js` 配假 DOM + 假 `mqtt` 实跑：三节点数据互不串线（三份 `history` 各归各的）、切节点重绘两张图、脏数据（解析失败 / 缺字段 / 类型不对 / NaN / 未知节点）分别被拦下、`status` 与规则不一致时以规则为准、topic 与 nodeId 不一致时警告但不丢弃、历史上限、清空、MQTT 连接与订阅、Console 打印原始报文（被拦下的那条也要打）、mqtt.js 没加载时的降级提示；Step 6-3 的 3D 接线：**收到别的节点的消息时 3D 一次都不许被调**、切节点立刻改画、收到的 status 是复核之后才交给 3D 的、`renderScene` 的幂等与「3D 建不起来时直接跳过」；Step 7-1 的「优先关注」栏：`abnormalStart` / `abnormalCount` 的维护（首条开段、起点不动、节点之间互不串、来正常数据两个字段一起清零、清零后再异常是新的一段、段里从偏热变偏湿仍是同一段、**报文谎称「正常」但规则算出偏热时段不被打断**）、`abnormalCount > 0` 与 `latest.status !== '正常'` 的等价不变量、页面刚加载时那栏就画好了且说的是「还没有收到数据」而不是「三个都正常」、点那栏走的**是注册在 `#priority` 上的真实委托回调**（`clickFocus()` 模拟的是事件，不是直接调 `selectNode`，所以选择器写错这里会红）且卡片 / 趋势图 / 3D 一起切过去并改口说「正在查看」、以及交给 MQTTX 的那三组数据在 `handleMessage` 上端到端跑一遍；Step 7-2 的处理动作：没数据 / 状态正常时按钮都禁用、偏湿时可按、点在 `#action-fan` 上真实注册的回调、按下之后四个字段各是什么（`actionTime` 取的是**该节点最新那条消息的 `time`**，不是浏览器时间）、卡片上出现独立的 `<span class="card-action">处理中｜风扇已开启</span>` 且**只有被处理的那个节点有**、详情区那行字把「记在哪条数据上 / 之后收到了什么」说清楚、**按下之后先 `updateScene` 再 `setFanOn(true)`**（顺序反了会被 `updateScene` 自己那次盖掉，所以拿偏湿当被测场景 —— 偏热的 `LOOK` 本来就是 `fan: true`，顺序写反也照样绿）、比动作还早的消息不许改写处理状态、动作之后正常了转「已恢复」而再变坏自动退回「处理中」、`actionTime` 不被后来的消息顶掉、两个节点各记各的互不覆盖、**没按过按钮的节点 dashboard 一次都不碰风扇**（不许把偏热本来就转着的按停）、清空后四个字段归零且不再喊「转」、以及「启动那一刻按钮就是灰的、那行字就是『还没有收到数据』」的加载快照；Step 7-4 的事件记录：节点从正常变异常时**开一条**、段内再来异常不另开（起点不动、`problem` 保持开案时那个，哪怕段里从偏热变成偏湿）、`node.event` 和 `events` 里那条**是同一个对象**（存副本的话页面上看不出来，只有导出的 CSV 会是空的）、优先关注只记第一次、**记的是胜出者自己最新那条的 `time` 而不是触发那一轮的报文 `time`**（构造「dorm-a 恢复、dorm-b 上位」的局面，写成 `record.time` 就会看到别人的时间）、处理动作也只记第一次、恢复正常时写 `recoverTime` 并把 `node.event` 摘成 `null`（事件本体留在表里，结案不等于删除）、恢复之后再异常开的是**新的一条**且旧那条一个字段都没被动过、三个节点各记各的、清空把 `events` 一并就地清掉且不留下野引用、启动那一刻表里写着「还没有事件」而导出按钮是灰的；CSV 字节：表头九列顺序、每条一行、最新在前、**只有 CRLF 没有裸 LF**、末尾一个 CRLF、`null` 一律写成空（写成 `null` 四个字母的话 Excel 里看着像真有个值）、半角逗号与双引号按 RFC 4180 转义；以及点一下导出按钮的**真实回调**：造出的 Blob 的 MIME 与 BOM（`'\uFEFF'` 在最前面，少了它中文就是乱码）、造 `<a download="events.csv">`、href 指向那个 objectURL、先插进 body 再点、点完摘掉、**objectURL 延迟 1000ms 才 revoke**（点完立刻 revoke 在部分浏览器里表现为「点了没反应」） |
 | ⑧ 198 条 | `3d/scene.js` 配假 `three` 模块 + 假 DOM 实跑（模块里的裸名字 `three` 是不认 importmap 的，测试把那一行 import 改写成指向本地假模块的绝对 file:// URL）：容器查找与报错、renderer 的像素比封顶与尺寸、宿舍每部分的几何 / 朝向 / 摞放关系（床垫正好压在床架上、3 片扇叶互成 120°、窗扇挂在铰链的一侧、支架不在会转的那个 Group 里）、两盏灯与阴影相机、相机参数与 `lookAt`、`updateScene` 四种状态各自改了什么以及切回来有没有残留、不认识的 status 退回「正常」并在控制台警告、`setFanOn` 的归一化与「关掉不归零」、`setLabel` 的覆盖层、动画循环随 dt 累加（**验证转动快慢与帧率无关**）、resize 自适应与 0×0 容器不产生 NaN、dispose 是否真的回收了几何体 / 材质 / 监听（**包括嵌在 Group 里的零件**）、index.html 的 importmap（合法 JSON、出现顺序比的是**标签**位置、版本号）与 4 个按钮的接线、覆盖层那两条关键 CSS、以及 `lib/` 里那份的大小与自包含性。22 个变异（含「灯不能和相机同侧」「改完阴影相机范围要重算投影矩阵」「假模块的 traverse 退回只走一层」）逐个塞回源码验证过，全部被抓住 |
 | ⑨ 65 条 | `3d/index.html` 里那段 `<script type="module">`：**从 HTML 里抠出来**，摘掉 import 换成打桩的 `createDorm3D`，配上假 `mqtt` 和假的按钮桩实跑。盯的就是 Step 6-3 那条规则 —— **画面跟的是「当前选中的宿舍」，不是「最后一个发消息的宿舍」**：给 dorm-b 发消息时 3D 一次都不许被调、切过去才画、而且画的是它最新那条；没收到数据的节点退回「正常」的外观并在覆盖层上如实说明；报文里写错的 `status` 一律以规则算出的为准；脏数据四条（非 JSON / 缺字段 / 类型不对 / 未知节点）一条都不许改到画面；`shared/rules.js` 必须是普通 script 且排在模块之前；6-2 留下的 4 个手动预览按钮仍然可用，且会被下一次真数据顶掉 |
-| ⑩ 112 条 | `dashboard/logic.js` 的纯函数逐个钉住：`parseTime` 只认 `YYYY-MM-DD HH:mm:ss`（`/`、`T`、少秒、不补零、前后空格、空串、`null`、数字、中文一律 `NaN`）且按 UTC 折算（同一串在不同时区差几小时这条就红了）、跨零点 / 跨月 / 闰日、`fmtDuration` 的向下取整（4 分 59 秒说「4 分钟」）与非正数兜底、`abnormalDuration` 在起点晚于终点时返回 0 而不是负数、`nextAbnormal` 不改传入的对象 / 认得不完整的 `prev`、以及 `pickPriority` 的整套判定：三组场景、**时长优先于条数（7 分钟的 1 次排在 1 分钟的 99 次前面）**、追平那句话只点**时长相同**的那个（跟所有人比是错的）、第 3 步是固定码元序而不是跟着区域设置走的 `localeCompare`。Step 7-2 的处理动作状态机：`beginHandling` 在没有 `latest` / `latest` 是 `null` / 传 `null` 时返回 `null`、按下之后返回的正好是那四个字段、`actionTime` 只认 `latest.time`（`history` 里更早的那条不算）、每次返回新对象且不改传入的节点、`nextHandling` 对「没按过按钮」「不认识的状态」「`actionTime` 或这条的 `time` 解析不出来」一律返回 `null`、**「严格晚于 `actionTime`」**（同一时刻的那条不算，动作就记在它身上）、动作之后正常转「已恢复」而偏冷 / 偏热 / 偏湿一律留在「处理中」、只认 `record.status` 不自己复核、以及来回走一遍：处理中 → 还异常(处理中) → 正常(已恢复) → 又异常(处理中) → 正常(已恢复)。另有守门的静态检查：导出就这 7 个、`ACTION_FAN` **不**导出（那串字只该有一份）、没有 `export default`、源码里不许出现 `document` / `window` / `innerHTML` / 定时器 / `Date.now(` |
+| ⑩ 162 条 | `dashboard/logic.js` 的纯函数逐个钉住：`parseTime` 只认 `YYYY-MM-DD HH:mm:ss`（`/`、`T`、少秒、不补零、前后空格、空串、`null`、数字、中文一律 `NaN`）且按 UTC 折算（同一串在不同时区差几小时这条就红了）、跨零点 / 跨月 / 闰日、`fmtDuration` 的向下取整（4 分 59 秒说「4 分钟」）与非正数兜底、`abnormalDuration` 在起点晚于终点时返回 0 而不是负数、`nextAbnormal` 不改传入的对象 / 认得不完整的 `prev`、以及 `pickPriority` 的整套判定：三组场景、**时长优先于条数（7 分钟的 1 次排在 1 分钟的 99 次前面）**、追平那句话只点**时长相同**的那个（跟所有人比是错的）、第 3 步是固定码元序而不是跟着区域设置走的 `localeCompare`。Step 7-2 的处理动作状态机：`beginHandling` 在没有 `latest` / `latest` 是 `null` / 传 `null` 时返回 `null`、按下之后返回的正好是那四个字段、`actionTime` 只认 `latest.time`（`history` 里更早的那条不算）、每次返回新对象且不改传入的节点、`nextHandling` 对「没按过按钮」「不认识的状态」「`actionTime` 或这条的 `time` 解析不出来」一律返回 `null`、**「严格晚于 `actionTime`」**（同一时刻的那条不算，动作就记在它身上）、动作之后正常转「已恢复」而偏冷 / 偏热 / 偏湿一律留在「处理中」、只认 `record.status` 不自己复核、以及来回走一遍：处理中 → 还异常(处理中) → 正常(已恢复) → 又异常(处理中) → 正常(已恢复)。另有守门的静态检查：导出就这 11 个、`ACTION_FAN` **不**导出（那串字只该有一份）、没有 `export default`、源码里不许出现 `document` / `window` / `innerHTML` / 定时器 / `Date.now(`。Step 7-4 的事件四件套：`beginEvent` 在记录是 `null` 或状态为「正常」时返回 `null`（不许造出一个叫「连续正常」的东西）、返回的九列**顺序和 CSV 表头一致**、刚开案时优先关注/处理动作全是 `null` 而 `result` 是**空串**（不是 `'null'` 也不是「进行中」）、三种异常各自拼出的 `problem`；`markPriority` / `markAction` / `closeEvent` 三个都**只记第一次**（第二次再调返回 `null`，已有值不被覆盖）、都挡空值、都返回新对象且不改传进来的那条事件；`markPriority` 在 `reason` 为 `null` / `undefined` 时写空串、是数字时转成字符串；`closeEvent` **不做时间比较**（该不该结案由 `nextAbnormal` 说了算，这里只负责写，代价见「报文没有乱序保护」）；以及把四个函数串起来走完一整段，九列全填齐 —— 那一行就是 CSV 里的一行 |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -1858,6 +1859,160 @@ MQTT 一个来回都没走完就去读结果，读到的全是「还没有收到
 没处理过的节点。补了一条：给当前节点喂一条偏热（`handling` 是「无」），
 断言 `setFanOn` 的调用次数**一次都没增加**（转不转交给 `updateScene` 那一档）。
 补完之后这个变异当场被抓住 —— 表和上面的数字都是补完之后重跑的。
+
+## Step 7-4：A4 事件记录与导出（第一部分）
+
+节点**从正常进入异常**时开一条事件，恢复时结案。一行就是一段连续异常 ——
+不是一条报文。页面下半部多了一个「事件记录」区显示全部事件（结过案的也留着），
+旁边一个「导出事件 CSV」。
+
+九列，顺序就是导出的列序（也是 `logic.js` 里 `beginEvent` 返回值的字段顺序，
+两处由测试钉死）：
+
+| 列 | 什么时候写 |
+|---|---|
+| `nodeId` | 开案时 |
+| `startTime` | 这段异常是从哪条消息开始的 |
+| `problem` | 「连续偏热」这一串，**开案时定死，之后不变**（见下） |
+| `priorityTime` | 第一次被选为「优先关注」的那一刻，没有就是 `null` |
+| `priorityReason` | 那次选它的原因原话，和页面上那条栏里说的是**同一句** |
+| `action` / `actionTime` | 按过风扇之后做了什么、记在哪条数据上 |
+| `recoverTime` | 这段结束的那条消息的 `time` |
+| `result` | `'已恢复'`，还没结案时是**空串** |
+
+### 事件的生命周期就是「异常段」的生命周期
+
+开案和结案的判据，直接复用 Step 7-1 那套 `abnormalCount` 的 0 → 正翻转，
+**没有另立一套判断**。绕开它的代价是：「优先关注栏里说的这段」和「事件里
+记的这段」会有两个对不上的起点，而它们说的明明是同一件事。
+
+跟这条一起来的一个结论是：**段里状态从偏热变成偏湿，仍然是同一条事件**。
+和 7-1「统计的是连续异常、不是连续偏热」是同一个口径。
+
+### `problem` 为什么开案时定死
+
+它是这条事件的**名字**，在复盘的时间线里就摆在 `startTime` 旁边，说的是
+「这件事是从什么开始的」。跟着最新状态改的话，一段从偏热恶化成偏湿的经历，
+事后看起来像是从头就偏湿的 —— 那是另一件事了。恶化这件事本身在别处看得到
+（卡片上的当前状态、趋势图），不必挤进这个名字里。
+
+### `events` 里存的是对象本身，不是副本
+
+`nodes[id].event` 和 `events` 里的那一条**是同一个对象**。所以更新只能就地改：
+
+```js
+Object.assign(node.event, markAction(...));   // 对
+node.event = { ...node.event, action: x };    // 错
+```
+
+写成第二种的话，`events` 里那条永远停在旧值上。**页面上一点异常都看不出来**
+（表格本来就是从 `events` 画的，画出来的是同样旧的值），只有导出的 CSV 里
+那几列是空的。测试里专门有一条 `nodes['dorm-b'].event === events[0]` 钉住这点。
+
+同理，清空用的是 `events.length = 0` 而不是 `events = []` —— 整个换掉的话，
+已经有引用的地方就指向一个被丢弃的数组了。
+
+### 「只记第一次」
+
+`priorityTime` / `priorityReason` 和 `action` / `actionTime` 都是**只记第一次**。
+复盘要回答的是「这个宿舍是什么时候被注意到的、当时因为什么」「这件事第一次
+被动手是什么时候、做了什么」，不是「最后一次看它时长什么样」。后者在页面顶上
+那条栏里一直是最新的，不必再在台账里存一份。
+
+### 记的是胜出者**自己**的时刻
+
+```js
+markPriority(won.event, won.latest.time, pick.reason);   // 对
+markPriority(won.event, record.time,     pick.reason);   // 错
+```
+
+`handleMessage` 每次只算一遍 `pickPriority`，算完喂给「画那条栏」和「记事件」
+两处 —— 两处显示的必须是同一句话，算两遍不只是白算，两份还可能对不上。
+
+时间一定要取**胜出者自己**最新那条的 `time`。触发这一轮的报文很可能是**另一个
+节点**的：dorm-a 恢复正常那一条，触发的是 dorm-a 的报文，可胜出的是还异常着的
+dorm-b。用 `record.time` 就是把 dorm-a 的时间记在了 dorm-b 头上。测试里专门
+构造了这个局面（dorm-a 20:00 起异常 20 分钟压着 dorm-b，20:30 恢复 → dorm-b
+上位，记的必须是它自己的 20:05 而不是那条报文的 20:30）。
+
+### CSV 的几个约定
+
+- **UTF-8 BOM 必须带**，而且写成转义 `'\uFEFF'`，不写成字面量字符 ——
+  否则源码里是一段隐形字符，看起来像个空字符串。少了 BOM，Excel/WPS 会按本地
+  代码页解析，`problem` 和 `result` 里的中文就是乱码。这不是纸上谈兵：改这个
+  功能的过程里手滑导过一份没带 BOM 的，打开就是 `2026/9/29 13:36,20,60,????`。
+- **CRLF 换行，末尾也留一个**（Excel / WPS 对 LF 的兼容性不如 CRLF）。
+- **`null` 一律写成空**。`String(null)` 会写出四个字母的 `null`：Excel 里看着
+  像真存了一个叫 `null` 的值，Python 那边也判不出「这条还没结束」。
+- 半角逗号和双引号按 RFC 4180 转义。真跑起来触发不了（原因里用的是全角「，」），
+  但这份文件要喂给 `analysis/analysis.py`，格式错一点那边就解析歪了。
+- 行序和屏幕上一致（**最新在前**）。复盘要按时间正着看是 Python 侧自己排的事，
+  不靠导出把顺序改掉。
+
+### 导出按钮有两处细节
+
+```js
+document.body.appendChild(a); a.click(); document.body.removeChild(a);
+setTimeout(() => URL.revokeObjectURL(url), 1000);
+```
+
+`<a>` 要**先插进文档再点** —— Firefox 里不插进文档的 `<a>` 点了没反应。
+objectURL **不能点完立刻 revoke**：部分浏览器会在下载真正开始前就把 blob 释放掉，
+表现出来就是「点了没反应」。留 1 秒再回收。
+
+一条事件都没有时按钮是 `disabled` 的：不然点了会得到一个只有表头的空 CSV，
+拿到的人会以为导出坏了。
+
+### 这一步对测试桩的改动
+
+`tests/dashboard.test.js` 的假 DOM 补了 `Blob` / `URL` / `document.createElement` /
+`setTimeout` —— 不补的话点导出按钮就是 `ReferenceError`，而「导出的字节到底对不对」
+正是这一步最该测的东西。`setTimeout` 是**只记不执行**的：立刻执行就把「隔了一会儿
+才 revoke」这个行为测没了，测试自己挑时候触发。
+
+另外那条摘 `import` 的正则跟着改了。`LOGIC_IMPORT` 原来写的是「一行放得下四个名字」
+的形状，7-4 加到八个之后源码折成了两行，正则匹配不上 → `import` 没被摘掉 →
+`vm` 直接抛 `Cannot use import statement outside a module`。**这是改 import 时漏改的**，
+不是新功能的问题：`logic.test.js` 当时是全绿的，红的只有 `dashboard.test.js`。
+修法是把分隔符一律写成 `\s`（能匹配换行），不是把正则放宽到「差不多就行」。
+
+### 变异测试
+
+28 个变异逐个塞回源码，确认测试变红，再还原（还原后全套必须仍然是绿的）。
+**28 个全部被抓住**，没有存活，没有等价变异体。挑几个说明这一步真正钉住了什么：
+
+| 变异 | 结果 |
+|---|---|
+| 去掉「正常就不开案」的守卫 | ✓ logic 红（会造出「连续正常」） |
+| `problem` 写死成「连续偏热」 | ✓ logic 红 |
+| `problem` 改成不拼「连续」 | ✓ logic 红 |
+| `startTime` 改用浏览器当前时间 | ✓ logic 红 |
+| `result` 初始化成 `null` 而不是空串 | ✓ logic 红 |
+| `markPriority` / `markAction` / `closeEvent` 去掉「只记第一次」 | ✓ 三个各自红 |
+| `markPriority` 的 `reason` 直接 `String()` | ✓ logic 红（`null` 会变成 `"null"`） |
+| `closeEvent` 的 `result` 写成空串 | ✓ logic 红 |
+| 每条异常消息都重开一条事件 | ✓ dashboard 红 |
+| 新事件 `push` 到表尾（顺序反了） | ✓ dashboard 红 |
+| `node.event` 存副本而不是同一个引用 | ✓ dashboard 红 |
+| **优先关注的时间用触发报文的 `time`** | ✓ dashboard 红 |
+| 结案时不清 `node.event` | ✓ dashboard 红 |
+| 点风扇时不把动作写进事件 | ✓ dashboard 红 |
+| 清空时不清 `events` | ✓ dashboard 红 |
+| 一条事件都没有时不置灰按钮 | ✓ dashboard 红 |
+| 渲染时不判空（空状态没有提示行） | ✓ dashboard 红 |
+| `csvCell` 不转义半角逗号 | ✓ dashboard 红 |
+| CSV 里的 `null` 不转成空 | ✓ dashboard 红 |
+| CSV 用 LF 换行、末尾不留 CRLF | ✓ dashboard 红 |
+| 导出的 CSV 不带 BOM | ✓ dashboard 红 |
+| 导出后立刻 `revoke` | ✓ dashboard 红 |
+| `<a>` 不插进 body 直接点 | ✓ dashboard 红 |
+
+**一次「我以为是实现错了、其实是测试写错了」**：P 段第一次跑是 5 条红。
+逐条查下来全在测试这边 —— 数行数的正则写的是 `/ev-result/g`，而同一个 `span` 上的
+`ev-result--open` / `ev-result--done` 里也含 `ev-result`，一行被数成两行；另外两条是
+我把 `events[2]` 当成了旧的 dorm-b（实际那是 dorm-a 那条），又忘了 dorm-a 早在
+20:30 就恢复了。实现一处没改。**这五条一个都不是「断言太松所以没抓住 bug」，
+是断言写错了方向**，所以修的是断言，不是放宽期望值。
 
 ## 已知限制
 

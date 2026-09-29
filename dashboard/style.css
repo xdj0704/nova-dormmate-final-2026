@@ -633,6 +633,60 @@ tbody tr:last-child td { border-bottom: none; }
   .level--warn { color: var(--status-warning); }
 }
 
+/* ---------- 事件记录（Step 7-4） ---------- */
+
+/* 「优先关注」和「处理动作」这两列放的是「时间 + 一句原因」，原因可以有
+   二十来个字。全局那条 th,td{white-space:nowrap} 会把它撑成一条长线，
+   整张表就得横向滚 —— 这两列允许换行。
+   其它列（时间、节点名、问题、结果）仍然 nowrap：它们本来就短，
+   从中间断开只会更难读。 */
+.ev-cell {
+  white-space: normal;
+  min-width: 180px;
+  max-width: 300px;
+}
+
+/* 原因比时间淡一档、小一档，而且另起一行。
+   它是解释不是数据 —— 压在时间下面，眼睛才先看到「什么时候」、
+   再看到「为什么」；挤在同一行里两个都读不痛快。 */
+.ev-reason {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+/* 还没发生的格子。用一个破折号而不是留空：
+   留空看着像「这一列没数据/加载失败」，破折号是「这里本来就没有」。 */
+.ev-none {
+  color: var(--text-muted);
+}
+
+/* 结果那格。和 .level 同一套做法：小胶囊。
+   「已恢复」和「进行中」都是**写着字**的，不是只靠颜色区分 ——
+   色觉障碍、黑白打印、系统强制高对比模式下都还得能读出来。 */
+.ev-result {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ev-result--done {
+  background: color-mix(in srgb, var(--status-good) 12%, transparent);
+  color: var(--status-good);
+}
+
+/* 还没结案的那条用中性灰，不用状态色：它说的是「还没有结论」，
+   不是某一档环境状态。染成黄的会让人以为它自己代表一种天气。 */
+.ev-result--open {
+  background: var(--page);
+  color: var(--text-muted);
+  border: 1px solid var(--hairline);
+}
+
 /* ---------- 页脚 ---------- */
 
 .foot {

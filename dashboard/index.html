@@ -74,6 +74,38 @@
     </div>
   </section>
 
+  <!-- 事件记录（Step 7-4）。和下面「消息日志」的区别是粒度：
+       那边一条报文一行，这边一段连续异常一行。节点从正常变成异常时开一条，
+       恢复正常时结案；中途状态从偏热变成偏湿**不会**另开一条，
+       和「优先关注」那边「统计的是连续异常、不是连续偏热」是同一个口径。
+
+       整张表由 dashboard.js 的 renderEvents() 填，导出按钮的点击也在那边挂
+       （exportEventsCSV）。一条事件都没有时按钮是禁用的 —— 不然点了会得到
+       一个只有表头的空 CSV，拿到的人会以为导出坏了。
+       表格列的顺序就是导出 CSV 的列顺序，改的时候两边一起改。 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>事件记录 <span id="event-count" class="count"></span></h2>
+      <button id="export-events" class="ghost" type="button" disabled>导出事件 CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>开始</th>
+            <th>节点</th>
+            <th>问题</th>
+            <th>优先关注</th>
+            <th>处理动作</th>
+            <th>恢复</th>
+            <th>结果</th>
+          </tr>
+        </thead>
+        <tbody id="event-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <section class="panel">
     <div class="panel-head">
       <h2>消息日志 <span id="log-count" class="count"></span></h2>

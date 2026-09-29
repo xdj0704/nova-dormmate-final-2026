@@ -28,7 +28,8 @@ import { createDorm3D } from '../3d/scene.js';
 /* 优先关注的算法。只有两个函数被这里用到，其余（parseTime / fmtDuration /
    abnormalDuration）是给测试单独钉的，页面不直接调。
    nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个。 */
-import { pickPriority, nextAbnormal, beginHandling, nextHandling } from './logic.js';
+import { pickPriority, nextAbnormal, beginHandling, nextHandling,
+  beginEvent, markPriority, markAction, closeEvent } from './logic.js';
 'use strict';
 
 /* ---------- 节点数据 ---------- */
@@ -49,14 +50,30 @@ const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
    决定，这里同样只负责存。
      handling  '无' | '处理中' | '已恢复'
    这一份就是**唯一**的处理状态：卡片上那句「处理中｜风扇已开启」、
-   详情区那行字、3D 里风扇转不转，全都读这几个字段，谁都不另存一份。 */
+   详情区那行字、3D 里风扇转不转，全都读这几个字段，谁都不另存一份。
+
+   event 是 Step 7-4 加的：这个节点**当前这段**连续异常对应的事件对象，
+   段结束了就置回 null。它和 node.latest 一样是「指向 events 里某个元素的
+   引用」，不是副本 —— 见 events 那边的说明。 */
 const nodes = {};
 NODE_IDS.forEach(function (id) {
   nodes[id] = {
     latest: null, history: [], abnormalStart: null, abnormalCount: 0,
     handling: '无', action: null, actionTime: null, dataAfterAction: null,
+    event: null,
   };
 });
+
+/* 事件记录，新的在前。每条事件整条留档，结案之后也不删 —— 「事件记录」区
+   和导出的 CSV 显示的就是这整个数组，不只是还没结束的那些。
+
+   ⚠ 这里存的是**对象本身**，和 nodes[id].event 指向同一个。
+   往 events 里 push/unshift 的是引用，不是深拷贝，所以更新一条事件只能
+   就地改（Object.assign），绝不能整个换掉 node.event —— 一换，
+   events 里的那条就还是旧的，两边各自说各的话。
+   这也是「处理状态、页面显示、导出读同一份数据」那条要求的写法：
+   只有一份，没有第二份可以跟它不一致。 */
+const events = [];
 
 /* 每个节点最多留多少条历史。不设上限的话挂机久了数组会一直涨，图上也会挤成
    一片。要更长的趋势改这个数就行。 */
@@ -155,6 +172,9 @@ const el = {
   chartNote: document.getElementById('chart-note'),
   scene3d: document.getElementById('scene3d'),
   priority: document.getElementById('priority'),
+  evBody: document.getElementById('event-body'),
+  evCount: document.getElementById('event-count'),
+  exportEvents: document.getElementById('export-events'),
   simulate: document.getElementById('simulate'),
   clear: document.getElementById('clear'),
   conn: document.getElementById('conn'),
@@ -300,16 +320,23 @@ function renderAction() {
  *
  * 它跟着 currentNodeId 变（要标出「正在查看」），所以切节点时也得重画 ——
  * 这也是它不能只跟 handleMessage 走的原因。
+ *
+ * pick 可以不传，那就自己算一遍。传进来的唯一地方是 handleMessage ——
+ * 那边本来就要拿这个结果去记事件（见第 7 步），算两遍纯属浪费，
+ * 而且两份结果摆在同一个函数里，读的人会开始怀疑它们会不会不一样。
+ * 别的地方（切节点、清空、启动）传不传都行：数据没变，答案就没变。
+ *
+ * @param {{nodeId: string, reason: string}|null} [pick] 已经算好的结果
  */
-function renderPriority() {
-  const pick = pickPriority(nodes);
+function renderPriority(pick) {
+  const chosen = pick === undefined ? pickPriority(nodes) : pick;
 
   /* 没挑出人来有两种情况，说的话不能一样 ——
      「三个都正常」在一条数据都没收到时是句假话：页面刚打开、还没连上
      broker 的那几秒，那三个节点是**不知道**，不是正常。
      pickPriority 两种情况都返回 null（约定就是「没有要优先的」），
      所以这层区分放在画的地方做，纯函数那边不用多一个返回值。 */
-  if (!pick) {
+  if (!chosen) {
     const hasData = NODE_IDS.some(function (id) { return nodes[id].latest !== null; });
     el.priority.innerHTML = '<p class="focus focus--calm">'
       + '<span class="focus-tag">优先关注</span>'
@@ -323,16 +350,132 @@ function renderPriority() {
   /* 颜色跟着这个节点的状态走，和卡片用同一套 class、同一套状态色。
      状态色是保留色，所以这里必须配着文字用 —— 那句 reason 里本来就写着
      「偏热」两个字，颜色只是让它在三步之外也能被看见。 */
-  const view = viewFor(nodes[pick.nodeId].latest.status);
-  const current = pick.nodeId === currentNodeId;
+  const view = viewFor(nodes[chosen.nodeId].latest.status);
+  const current = chosen.nodeId === currentNodeId;
 
   el.priority.innerHTML = '<button class="focus ' + view.cls
     + (current ? ' is-active' : '') + '"'
-    + ' type="button" data-node="' + esc(pick.nodeId) + '" aria-pressed="' + current + '">'
+    + ' type="button" data-node="' + esc(chosen.nodeId) + '" aria-pressed="' + current + '">'
     + '<span class="focus-tag">优先关注</span>'
-    + '<span class="focus-text">' + esc(pick.reason) + '</span>'
+    + '<span class="focus-text">' + esc(chosen.reason) + '</span>'
     + '<span class="focus-state">' + (current ? '正在查看' : '查看详情') + '</span>'
     + '</button>';
+}
+
+/* ---------- 事件记录 ---------- */
+
+/**
+ * 表格里一格「时间 + 一句说明」。
+ *
+ * 这两格（优先关注、处理动作）的内容比别的格子长得多 —— 优先关注那句原因
+ * 可以有二十来个字。所以说明另起一行、用淡一点的颜色，不跟时间挤在一起，
+ * 也不让整张表被撑得横向滚动。
+ *
+ * @param {string|null} time
+ * @param {string|null} note
+ * @returns {string} HTML
+ */
+function eventCell(time, note) {
+  if (!time) return '<span class="ev-none">—</span>';
+  return '<span class="mono">' + esc(time) + '</span>'
+    + (note ? '<span class="ev-reason">' + esc(note) + '</span>' : '');
+}
+
+function eventRowHTML(e) {
+  /* 还没结案的那条，用中性灰标「进行中」而不是留个空格子 ——
+     空着看的人分不清是「还在异常中」还是「这一格没数据」。
+     数据上 result 仍然是空串（约定如此），这里只是把它画出来。 */
+  const result = e.result
+    ? '<span class="ev-result ev-result--done">' + esc(e.result) + '</span>'
+    : '<span class="ev-result ev-result--open">进行中</span>';
+
+  return '<tr>'
+    + '<td class="mono">' + esc(e.startTime) + '</td>'
+    + '<td class="mono">' + esc(e.nodeId) + '</td>'
+    + '<td>' + esc(e.problem) + '</td>'
+    + '<td class="ev-cell">' + eventCell(e.priorityTime, e.priorityReason) + '</td>'
+    + '<td class="ev-cell">' + eventCell(e.actionTime, e.action) + '</td>'
+    + '<td class="mono">' + (e.recoverTime
+      ? esc(e.recoverTime) : '<span class="ev-none">—</span>') + '</td>'
+    + '<td>' + result + '</td>'
+    + '</tr>';
+}
+
+/**
+ * 重画「事件记录」区。
+ *
+ * 显示的是 events 整个数组 —— 结过案的也留着，这一区的意义正是回头看看
+ * 这些事都是怎么过去的，只显示还没结束的那些等于把它变成第二个详情区。
+ */
+function renderEvents() {
+  el.evCount.textContent = events.length > 0 ? '共 ' + events.length + ' 条' : '';
+  el.evBody.innerHTML = events.length === 0
+    ? '<tr><td colspan="7" class="log-empty">还没有事件'
+      + '（节点从正常变成异常时才会记一条）</td></tr>'
+    : events.map(eventRowHTML).join('');
+
+  /* 没什么可导的时候把按钮按掉，而不是让人点了弹一个空文件 ——
+     空 CSV 只有一行表头，拿到的人会以为导出坏了。 */
+  el.exportEvents.disabled = events.length === 0;
+}
+
+/* 导出 CSV 的表头。顺序就是约定里那 9 个字段的顺序，
+   也是 logic.js 里 beginEvent 返回值的字段顺序 —— 两处要对得上。 */
+const EVENT_HEADER = ['nodeId', 'startTime', 'problem', 'priorityTime', 'priorityReason',
+  'action', 'actionTime', 'recoverTime', 'result'];
+
+const EVENT_FILENAME = 'events.csv';
+
+/* RFC 4180：字段含逗号/引号/换行时要包双引号，内部的双引号写成两个。
+   和 web/script.js 里那份是同一个写法，故意各留一份：两个页面互不依赖，
+   为六行代码共用一个 shared/ 文件反而要多发一次请求。改的时候两边一起改。 */
+function csvCell(value) {
+  const s = String(value);
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/**
+ * 拼出事件 CSV 的全文（不含 BOM，加 BOM 是下载那一步的事）。
+ *
+ * 行顺序和「事件记录」区里看到的一致（最新在前），和 web/ 那边导出
+ * 录入历史是同一个口径：导出的东西和屏幕上看到的一模一样。
+ * 复盘要按时间正着看，那是 Python 侧读进来之后自己排（EventRecord 那边
+ * 按 startTime 排一遍），不靠这里把顺序改掉。
+ *
+ * @returns {string} CRLF 换行、末尾也带一个 CRLF
+ */
+function buildEventsCSV() {
+  const lines = [EVENT_HEADER.join(',')];
+  events.forEach(function (e) {
+    lines.push(EVENT_HEADER.map(function (key) {
+      const v = e[key];
+      /* 还没发生的格子是 null，要写成空 —— String(null) 会变成四个字母的
+         "null"，Excel 里看着像真存了一个叫 null 的值，而且 Python 那边
+         读到 "null" 也判不出「这条还没结束」。 */
+      return csvCell(v == null ? '' : v);
+    }).join(','));
+  });
+  /* 用 CRLF 换行：Excel / WPS 对 LF 的兼容性不如 CRLF */
+  return lines.join('\r\n') + '\r\n';
+}
+
+function exportEventsCSV() {
+  /* '\uFEFF' 是 UTF-8 BOM。少了它 Excel/WPS 会按本地代码页解析，
+     problem 和 result 里的中文就会变成乱码。这里写成转义而不是字面量字符，
+     否则源码里是一段隐形字符，看起来像个空字符串。 */
+  const blob = new Blob(['\uFEFF' + buildEventsCSV()], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = EVENT_FILENAME;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  /* 不能立刻 revoke：部分浏览器会在下载真正开始前就把 blob 释放掉，
+     表现为「点了没反应」。留一点时间再回收。 */
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
 }
 
 /* ---------- 3D 视图 ---------- */
@@ -686,7 +829,11 @@ function handleMessage(topic, payloadText) {
 
   /* 5) 维护「当前这段连续异常」。用的是**复核之后**的 status ——
       报文里写「正常」但规则算出「偏热」时，算它还在异常里，段不中断。
-      nextAbnormal 是纯函数，只读 node 上那两个字段，别的不碰。 */
+      nextAbnormal 是纯函数，只读 node 上那两个字段，别的不碰。
+
+      先留一份改之前的状态：下面第 7 步要靠「0 -> 正」和「正 -> 0」
+      这两个翻转来判断事件该开还是该结，改完就看不出来了。 */
+  const wasAbnormal = node.abnormalCount > 0;
   const abnormal = nextAbnormal(node, record.status, record.time);
   node.abnormalStart = abnormal.abnormalStart;
   node.abnormalCount = abnormal.abnormalCount;
@@ -699,6 +846,27 @@ function handleMessage(topic, payloadText) {
   if (moved) {
     node.handling = moved.handling;
     node.dataAfterAction = moved.dataAfterAction;
+  }
+
+  /* 7) 事件记录。开案和结案的判据就是上面第 5 步那段异常段的起止，
+      不另立一套 —— 否则「优先关注栏里说的这段」和「事件里记的这段」
+      会出现两个对不上的起点，而它们说的明明是同一件事。 */
+  if (wasAbnormal && node.abnormalCount === 0) {
+    /* 正 -> 0：来了一条正常数据，这段结束了。写 recoverTime 和 result，
+       再把节点上那个引用摘掉 —— 摘的是**引用**，events 里那条还在，
+       只是这个节点从此没有「当前这段」了。 */
+    const closed = closeEvent(node.event, record.time);
+    if (closed) Object.assign(node.event, closed);
+    node.event = null;
+  } else if (!wasAbnormal && node.abnormalCount > 0) {
+    /* 0 -> 正：新的一段开始了。beginEvent 造的是个新对象，
+       下面两行存的是**同一个引用** —— 节点和总表从此指向同一条，
+       之后就地改谁都看得见，不会有一边留着旧副本。 */
+    const opened = beginEvent(record);
+    if (opened) {
+      node.event = opened;
+      events.unshift(opened);
+    }
   }
 
   const summary = record.nodeId + ' ' + fmt(record.temperature) + '℃ '
@@ -727,8 +895,23 @@ function handleMessage(topic, payloadText) {
   if (record.nodeId === currentNodeId) renderScene();
 
   /* 「优先关注」也是每次都要重算的：这一条报文可能让它换了人，
-     也可能还是同一个人但时长和次数都变了（那句 reason 里写着）。 */
-  renderPriority();
+     也可能还是同一个人但时长和次数都变了（那句 reason 里写着）。
+     这里只算一次，算完喂给下面两个地方用 —— 上面那句 reason 和事件里
+     记的必须是**同一句话**。算两遍不只是白算，两份还可能对不上。 */
+  const pick = pickPriority(nodes);
+
+  /* 被选中的那个节点，如果这一段还没记过「第一次被关注」，就把这一刻记上。
+     时间取**它自己**最新那条的 time，不是这条报文的 record.time ——
+     胜出的很可能是另一个节点（比如 dorm-a 刚恢复正常，轮到 dorm-b 上位），
+     拿 record.time 去记它就是把别人的时间写在了它头上。 */
+  if (pick) {
+    const won = nodes[pick.nodeId];
+    const stamped = markPriority(won.event, won.latest.time, pick.reason);
+    if (stamped) Object.assign(won.event, stamped);
+  }
+
+  renderEvents();
+  renderPriority(pick);
   return true;
 }
 
@@ -788,14 +971,23 @@ function clearAll() {
     nodes[id].action = null;
     nodes[id].actionTime = null;
     nodes[id].dataAfterAction = null;
+    /* 事件的引用也摘掉 —— 下面还会把整个 events 清空，
+       这里不摘的话节点上会留着一个已经不在总表里的野对象，
+       下一条数据一来，那段异常看起来就像「早就开过案了」。 */
+    nodes[id].event = null;
   });
   messages.length = 0;
+  /* 事件记录也一起清。这条和上面几条是同一个道理：不清的话，清空之后
+     卡片全写着「等待数据」，下面却还列着上一轮的「连续偏热」——
+     那是上一次的账。要留就趁清空前先按「导出事件 CSV」存下来。 */
+  events.length = 0;
   renderCards();
   renderDetailHead();
   renderAction();
   renderScene();
   renderCharts();
   renderPriority();
+  renderEvents();
   renderLog();
 }
 
@@ -919,6 +1111,7 @@ function connect() {
 
 el.simulate.addEventListener('click', simulate);
 el.clear.addEventListener('click', clearAll);
+el.exportEvents.addEventListener('click', exportEventsCSV);
 
 el.toggle.addEventListener('click', function () {
   if (client) disconnect();
@@ -955,9 +1148,18 @@ el.actionFan.addEventListener('click', function () {
   node.actionTime = started.actionTime;
   node.dataAfterAction = started.dataAfterAction;
 
+  /* 这段异常要是正记着，把这次动作也写进那条事件（只记第一次）。
+
+     必须 Object.assign 就地改，不能写成 node.event = {...}：events 里
+     存的是**同一个对象**，整个换掉的话总表里那条就永远停在旧值上，
+     导出 CSV 时「处理动作」那两列会是空的，而页面上一点异常都看不出来。 */
+  const marked = markAction(node.event, started.action, started.actionTime);
+  if (marked) Object.assign(node.event, marked);
+
   renderCards();
   renderAction();
   renderScene();
+  renderEvents();
 });
 
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -969,6 +1171,7 @@ renderAction();
 renderScene();
 renderCharts();
 renderPriority();
+renderEvents();
 renderLog();
 
 /* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，
