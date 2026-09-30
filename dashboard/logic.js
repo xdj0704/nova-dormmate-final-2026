@@ -932,3 +932,30 @@ export function mlFetchFailed(reason) {
       + '看板其余部分不受影响。',
   };
 }
+
+/**
+ * 按下「开启风扇 / 通风」之后，按钮旁边那行说明该说什么。
+ *
+ * Step D3 收尾起，这个按钮不只是改页面上的状态了 —— 它还会往
+ * `dormmate/v1/cmd` 发一条 handle 给 core。这一行回答的就是「发出去了没有」，
+ * 因为**发不出去的时候页面上看不出任何区别**：本地那几个字段照旧改、卡片上
+ * 照样写「处理中｜风扇已开启」，而 core 那边的事件一步都没动。不写这一行，
+ * 「按了没反应」这件事只有去 core 的终端里才看得出来。
+ *
+ * 发出去的那一句特意点明「好没好由后面收到的报文判」：按一下就把事件判成
+ * 已恢复是红线，这句话写在最显眼的地方，看的人不必去翻代码。
+ *
+ * @param {boolean} ok
+ * @param {string} [detail] 没发出去时的原因，原样贴出来，不翻译也不加工
+ * @returns {string}
+ */
+export function cmdNote(ok, detail) {
+  if (ok) {
+    return '已通知 core 开始处理这条事件 —— 好没好由后面收到的报文判，'
+      + '这一步不结案。';
+  }
+  const why = typeof detail === 'string' && detail.trim()
+    ? detail.trim() : '不知道什么原因';
+  return '这条指令没发出去（' + why + '）—— 这次处理只记在页面上，'
+    + 'core 那边的事件不会变。';
+}

@@ -40,12 +40,12 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十八个（多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十九个（多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,'
   + 'beginEvent,markPriority,markAction,closeEvent,pickPriority,'
   + 'buildOverview,buildReasons,tempTrend,buildFocus,buildAlert,'
-  + 'buildMlNote,mlFetchFailed');
+  + 'buildMlNote,mlFetchFailed,cmdNote');
 /* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
    只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
    自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
@@ -106,17 +106,17 @@ vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
   nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority,
   buildOverview, buildReasons, tempTrend, buildFocus, buildAlert,
-  buildMlNote, mlFetchFailed } = context;
+  buildMlNote, mlFetchFailed, cmdNote } = context;
 
-check('十八个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
+check('十九个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
   beginHandling, nextHandling, beginEvent, markPriority, markAction, closeEvent,
   pickPriority, buildOverview, buildReasons, tempTrend, buildFocus, buildAlert,
-  buildMlNote, mlFetchFailed]
+  buildMlNote, mlFetchFailed, cmdNote]
   .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function',
-  'function', 'function']);
+  'function', 'function', 'function']);
 
 /* ---------- 小工具 ---------- */
 
@@ -1320,6 +1320,37 @@ check('★ 同样输入连着算两遍，三样东西一字不差',
   [JSON.stringify(buildMlNote(mlJson())) === JSON.stringify(buildMlNote(mlJson())),
     mlFetchFailed('x').text === mlFetchFailed('x').text],
   [true, true]);
+
+/* ---------- K2. 按下处理按钮之后那行说明（Step D3 收尾） ---------- */
+
+console.log('\n=== K2. cmdNote：那条指令发给 core 没有 ===');
+
+const okNote = cmdNote(true, '');
+/* 发出去的那句必须点明「好没好由后面的报文判」。这是 D3 红线在界面上的那一半：
+   按钮只把事件推到处理中，按一下不能等于已恢复。 */
+check('★ 发出去时说的是「好没好由后面收到的报文判」',
+  [okNote.includes('好没好'), okNote.includes('后面收到的报文'),
+    okNote.includes('不结案')],
+  [true, true, true]);
+check('发出去时这句话里没有「已恢复」这三个字（按一下不是结案）',
+  okNote.includes('已恢复'), false);
+
+const badNote = cmdNote(false, '还没连上 broker');
+check('★ 发不出去时带着原始原因', badNote.includes('还没连上 broker'), true);
+check('★ 发不出去时如实说「core 那边的事件不会变」（这才是要命的那半句）',
+  [badNote.includes('只记在页面上'), badNote.includes('core 那边的事件不会变')],
+  [true, true]);
+check('发不出去时也不说「已恢复」', badNote.includes('已恢复'), false);
+check('原因取不到时也有句实话，不留个空括号在页面上',
+  [cmdNote(false, undefined).includes('（）'),
+    cmdNote(false, undefined).includes('不知道什么原因'),
+    cmdNote(false, '   ').includes('不知道什么原因')],
+  [false, true, true]);
+/* 原样贴出来，不翻译也不加工：「还没连上 broker」和「mqtt.js 没加载」
+   是两个排查方向，糊成一句「发送失败」就把线索丢了。 */
+check('原因原样贴出来，不加工', cmdNote(false, 'HTTP 500').includes('HTTP 500'), true);
+check('纯函数：同样输入连着算两遍一字不差',
+  cmdNote(true, '') === cmdNote(true, ''), true);
 
 /* ---------- L. 和 Python 读同一份期望表 ---------- */
 

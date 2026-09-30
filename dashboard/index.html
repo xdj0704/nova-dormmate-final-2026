@@ -68,6 +68,12 @@
       <span id="action-state" class="action-state"></span>
     </div>
 
+    <!-- 按下去之后这一行才出现，说的是「那条指令发给 core 没有」。
+         必须留着：发不出去的时候页面其余部分看不出任何区别（本地那几个字段
+         照旧改），而 core 那边的事件一步都没动 —— 不说就成了「按了没反应」。
+         措辞在 logic.js 的 cmdNote()，这里一个字都不拼。 -->
+    <p id="cmd-note" class="note cmd-note"></p>
+
     <p id="chart-note" class="note chart-note"></p>
 
     <!-- 3D 视图。跟着当前选中的节点走：点卡片切节点、或当前这个节点收到

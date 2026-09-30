@@ -516,6 +516,15 @@ button.focus:hover { border-color: var(--text-muted); }
 
 .chart-note:empty { display: none; }
 
+/* 「那条指令发给 core 没有」（Step D3 收尾）。空着就整行不出现 —— 没按过按钮
+   的时候它在页面上不该占位置。它紧跟操作栏，所以自带的上边距要收掉，
+   否则按钮和趋势图之间会多出一段空。 */
+.cmd-note:empty { display: none; }
+
+.cmd-note {
+  margin: -6px 0 14px;
+}
+
 .chart-note.is-error {
   padding: 10px 14px;
   margin: 0 0 14px;

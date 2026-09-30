@@ -46,6 +46,10 @@ const els = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
   'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
+  /* Step D3 收尾：按下处理按钮之后那行说明。同理必须登记 ——
+     不登记的话，测试读到的 els['cmd-note'] 和 dashboard.js 里
+     el.cmdNote 拿到的是两个对象，断言全是假绿。 */
+  'cmd-note',
   /* Step 7-4 的三件：事件表、条数、导出按钮。
      必须列在这里 —— getElementById 对没登记的 id 会现场造一个新的，
      那样断言里读到的 els['event-body'] 和页面里那个就不是同一个对象了。 */
@@ -141,8 +145,18 @@ const mqttStub = {
     const handlers = {};
     const c = {
       url, opts, handlers, subscribed: [], ended: false,
+      /* Step D3 收尾：页面第一次往外发东西了（dormmate/v1/cmd）。
+         published 把每一次都记下来 —— 发没发、发到哪条 topic、payload 是什么、
+         retain 开没开，全是断言的对象。真 mqtt.js 的客户端连上之后
+         connected 就是 true，这里照做，不然 sendHandle 会一直走「没连上」那条。 */
+      connected: false,
+      published: [],
       on(ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); return c; },
       subscribe(topic, o, cb) { c.subscribed.push(topic); if (cb) cb(null); return c; },
+      publish(topic, payload, opts) {
+        c.published.push({ topic, payload, opts });
+        return c;
+      },
       end() { c.ended = true; return c; },
     };
     mqttStub.clients.push(c);
@@ -262,7 +276,7 @@ const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene
    所以分隔符一律写 \s —— 它能匹配换行，折行处那几个空格加换行才过得去。
    写成 [ ] 或字面空格的话，摘不掉 import，下一句 vm 会抛
    「Cannot use import statement outside a module」。 */
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildFocus\s*,\s*buildAlert\s*,\s*buildMlNote\s*,\s*mlFetchFailed\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*cmdNote\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildFocus\s*,\s*buildAlert\s*,\s*buildMlNote\s*,\s*mlFetchFailed\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
 const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
 const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
 const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
@@ -536,14 +550,27 @@ check('★ 三条 topic 里认出的正是三个节点',
   Array.from(new Set(messages.map((m) => topicNode(m.topic)))).sort(),
   ['dorm-a', 'dorm-b', 'dorm-c']);
 
-/* 静态那一条：代码里（注释不算）只许有一处出现 dormmate/v1。
-   多出一处 = 有人在别处又拼了一条 topic，而拼错一条是**静默**的。
+/* 静态那一条：代码里（注释不算）出现 dormmate/v1 的地方，**只能是对应的
+   那个 const 声明**。多出一处 = 有人在别处又拼了一条 topic，而拼错一条是
+   **静默**的（形状不对时 topicNode 返回空串，一致性检查整段被跳过）。
+
+   Step D3 收尾起这条从「只许一处」变成「只许那两处」：页面现在有两个 topic
+   —— 上报的（TOPIC_PREFIX + TOPIC_SUFFIX 拼出来）和发指令的 CMD_TOPIC。
+   所以这里逐个点名：认这一整个字符串，而不是数个数。数个数的话，
+   在两处之间挪一次、或者多写一处但少写另一处，都能让数对得上。
    注释里的例子不算数，所以先把注释摘掉再数。 */
 const dashCode = dashText
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^[ \t]*\/\/.*$/gm, '');
-check('★ dashboard.js 的代码里只有一处写死 dormmate/v1（注释不算）',
-  (dashCode.match(/dormmate\/v1/g) || []).length, 1);
+const prefixHits = dashCode.match(/'dormmate\/v1[^']*'/g) || [];
+check('★ 写死 dormmate/v1 的地方正好是「上报 topic 的前缀」和「指令 topic」两处',
+  prefixHits.slice().sort(), ["'dormmate/v1/cmd'", "'dormmate/v1/nodes/'"].sort());
+/* 节点名、通配符、后缀都不许再写一遍字面量：它们全部由上面那两个 const 拼。
+   一条一条点名，是因为「少拼了哪半句」这种改动，光看上面那两处是看不出来的。 */
+check('节点上报那三段没有第二份字面量（' + "'/telemetry'" + ' 只出现在后缀那一处）',
+  (dashCode.match(/\/telemetry/g) || []).length, 1);
+check('指令 topic 没有第二个写法（后缀式的 ' + "'dormmate/v1/cmd/...'" + ' 不许出现）',
+  dashCode.includes("dormmate/v1/cmd/'"), false);
 
 /* ============ I. 历史上限 ============ */
 console.log('\n=== I. 历史上限 ===');
@@ -1277,7 +1304,153 @@ check('清空后按钮回到灰的（又变成一条数据都没有）', fanBtn.
 check('清空后那行字也回到「还没有收到数据」',
   fanState.textContent, '还没有收到这个节点的数据');
 
+/* ============ O2. 按下去的动作发给 core（Step D3 收尾）============ */
+console.log('\n=== O2. 按下去的动作发给 core ===');
+/* 这一段之前，页面从来不往外发东西 —— client.publish 一次都没被调过。
+   Step D3 收尾起，按那个按钮还会往 dormmate/v1/cmd 发一条 handle。
+
+   这一段里 client 是 K 段留下的 mc2。桩的 connected 默认 false，
+   所以上面 O 段那些点击走的都是「没连上」那条分支（也因此没炸）——
+   这里显式接上，才测得到真发出去的那条路。 */
+const cmdNoteEl = els['cmd-note'];
+const mcPublish = mc2;
+
+/* 发出去的指令要往 Console 打一行（排错时，除了页面上那行字就靠它）。
+   收起来一起验 —— 和上面收原始报文那个收集器同一个做法。 */
+const cmdLogged = [];
+function clickFanQuiet() {
+  console.log = (...args) => { cmdLogged.push(args); };
+  try { clickFan(); } finally { console.log = realLog; }
+}
+
+/* --- 没连上时：本地照旧，但页面上必须说清楚 core 那边没动 --- */
+
+clearAll();
+selectNode('dorm-a');
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+mcPublish.connected = false;
+mcPublish.published.length = 0;
+clickFanQuiet();
+check('★ 没连上时一条都不发（不许往一条假连接上 publish）', mcPublish.published.length, 0);
+check('★ 本地那几个字段照旧记上（发不出去不影响看板自己的显示）',
+  [nodes['dorm-a'].handling, nodes['dorm-a'].actionTime], ['处理中', '2026-09-22 20:00:00']);
+check('★ 但页面上如实说这条指令没发出去（不说的话就是「按了没反应」）',
+  cmdNoteEl.textContent.startsWith('这条指令没发出去'), true);
+check('★ 括号里那句原因是 sendHandle 真返回的那个（说明那句说明是接上的，'
+  + '不是旁边另写了一句话）',
+  cmdNoteEl.textContent.includes('还没连上 broker'), true);
+check('★ 而且说清了 core 那边的事件不会变',
+  cmdNoteEl.textContent.includes('core 那边的事件不会变'), true);
+check('发不出去时 Console 也别打「发出去了」那一行（打了就成了假证据）',
+  cmdLogged.length, 0);
+
+/* --- 连上之后：真发出去，而且发的是「事实」不是「结论」--- */
+
+mcPublish.connected = true;
+clearAll();
+selectNode('dorm-a');
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+const sentBefore = mcPublish.published.length;
+cmdLogged.length = 0;
+clickFanQuiet();
+
+check('★ 连上之后按一下正好发一条', mcPublish.published.length, sentBefore + 1);
+/* 下面这些全都读那一条发出去的东西。要是根本没发出去（比如谁把
+   sendHandle 那一行删了），这里读到的就是 undefined —— 直接往下取字段
+   会**抛异常**，那一抛后面十几条检查连带整个文件都不跑了，看到的只有
+   一个堆栈，反而不知道坏在哪。所以缺了就当空对象，让每条各自 FAIL。 */
+const cmd = mcPublish.published[mcPublish.published.length - 1] || {};
+const cmdOpts = cmd.opts || {};
+check('★ 发到约定的那一条 topic', cmd.topic, 'dormmate/v1/cmd');
+check('★ retain 必须是 false（留着的话，下次起 core 会凭空把某条事件推进处理中）',
+  cmdOpts.retain, false);
+check('qos 是 1，和遥测那条一致', cmdOpts.qos, 1);
+
+const cmdBody = cmd.payload ? JSON.parse(cmd.payload) : {};
+check('★ payload 就是 core 那边要的两件必填 + 两件可选：nodeId、action，'
+  + '外加 source 和 time',
+  Object.keys(cmdBody).sort(), ['action', 'nodeId', 'source', 'time']);
+check('★ nodeId 和 action 是 core 的第一道必填校验（少一个整条被拒）',
+  [cmdBody.nodeId, cmdBody.action], ['dorm-a', 'handle']);
+check('★ action 写的是小写 handle —— core 不做大小写折叠，'
+  + '发 Handle 会被拒（理由是明写的，不是静默忽略）',
+  [cmdBody.action, cmdBody.action === String(cmdBody.action).toLowerCase()],
+  ['handle', true]);
+check('带了来源，core 的 [指令] 那行日志里看得出这条是人按的',
+  cmdBody.source, 'dashboard');
+check('★ time 用的是**报文里的时刻**，不是浏览器当前时间（和 actionTime 同一个值）',
+  [cmdBody.time, cmdBody.time === nodes['dorm-a'].actionTime],
+  ['2026-09-22 20:00:00', true]);
+
+/* ★ 红线的界面那一半：这条消息里**没有**任何「已经好了」的说法。
+   塞了 status / state / result 这类字段，就等于前端替 core 下了结论 ——
+   core 那边是靠 handle_command 拿不到节点状态这个**结构**挡住这件事的，
+   前端这边只需要不往里塞。逐个点名，比断言「不含 RECOVERED」更严：
+   换个字段名（塞个 recovered 或 ok）照样会被这几条抓住。 */
+const suspicious = ['status', 'state', 'result', 'recovered', 'recoveredAt',
+  'ok', 'healthy', 'normal'];
+check('★ 这条指令里一个「结论」字段都没有（只发事实）',
+  suspicious.filter((k) => Object.prototype.hasOwnProperty.call(cmdBody, k)), []);
+check('★ 发出去之后页面上没有出现「已恢复」（按一下不等于结案）',
+  cmdNoteEl.textContent.includes('已恢复'), false);
+check('★ 那行说明点明了「好没好由后面收到的报文判」',
+  [cmdNoteEl.textContent.includes('好没好'),
+    cmdNoteEl.textContent.includes('后面收到的报文'),
+    cmdNoteEl.textContent.includes('不结案')],
+  [true, true, true]);
+
+/* --- 指令进 Console、不进消息日志 --- */
+
+/* 日志区的约定是「一条报文一行」，行数是排查时用来对数的。
+   发出去的指令混进去，那个数就对不上了 —— 它该待的地方是 Console
+   （和「原始报文打一行」同一个做法，K 段已经在测收到的方向）。 */
+const logCountBefore = messages.length;
+const loggedCmd = cmdLogged[0] || [];
+check('发出去的那一条也在 Console 里打了（现场排错时确认「到底发出去了没有」）',
+  [cmdLogged.length, loggedCmd[1], loggedCmd[2]],
+  [1, 'dormmate/v1/cmd', cmd.payload]);
+check('★ 但一条都不进消息日志（行数要和**收到的**报文数对得上）',
+  messages.length, logCountBefore);
+
+/* --- 那个时刻给不出来时不硬编一个 --- */
+
+/* beginHandling 在没有 latest 时返回 null，回调会直接 return，根本走不到
+   发指令那一步；这里防的是另一半：latest 在、time 却是个空串。
+   这种报文在页面这一侧过得去（字段校验只管温湿度是不是有限数），
+   但不该拿它去当指令里的 time —— core 那边 time 格式不对是**整条拒收**，
+   而「按钮按了没反应」就又是那个老问题了。 */
+mcPublish.connected = true;
+clearAll();
+selectNode('dorm-a');
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, ''));
+check('★ 报文里 time 是空串时按钮仍然可点（校验管的是温湿度，不是 time）',
+  fanBtn.disabled, false);
+const sentBeforeBlank = mcPublish.published.length;
+clickFanQuiet();
+const blankSent = mcPublish.published[mcPublish.published.length - 1] || {};
+const blankBody = blankSent.payload ? JSON.parse(blankSent.payload) : {};
+check('★ time 给不出来时就不带这个字段（不带的话 core 会自己补此刻；'
+  + '带一个空串过去会被整条拒收）',
+  [mcPublish.published.length, sentBeforeBlank + 1,
+    Object.prototype.hasOwnProperty.call(blankBody, 'time'),
+    Object.keys(blankBody).sort()],
+  [sentBeforeBlank + 1, sentBeforeBlank + 1, false, ['action', 'nodeId', 'source']]);
+
+/* --- 清空时那行说明也一起清掉 --- */
+
+mcPublish.connected = true;
+clearAll();
+selectNode('dorm-a');
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+clickFanQuiet();
+check('按完之后那行说明是有内容的（有了这一条，下面那条才测得出「清掉」）',
+  cmdNoteEl.textContent.length > 0, true);
+clearAll();
+check('★ 清空之后那行说明也空掉（它是上一次按的结果，不是现在的状态）',
+  cmdNoteEl.textContent, '');
+
 /* 这一段跑完，把状态交回给 L 段期望的样子 */
+mcPublish.connected = false;
 clearAll();
 selectNode('dorm-a');
 
@@ -1286,7 +1459,7 @@ console.log('\n=== L. 没加载 mqtt.js ===');
 const els2 = {};
 ['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
   'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
+  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state', 'cmd-note',
   /* 这几个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
   'event-body', 'event-count', 'export-events', 'focus', 'speak', 'speak-note',
   /* ML 那三件同理。R 段要在这一段里读它降级之后写了什么 */

@@ -36,7 +36,7 @@ import { createDorm3D } from '../3d/scene.js';
    渲染那两句，顶上只有 buildFocus 那一行。那两个函数仍然留在 logic.js 里
    ——「为什么是它、别人为什么不是」那套说法要去 report.html，那边要复用它，
    而且 pickPriority 记进事件、跟着导出的 CSV 走的 reason 也在那儿。 */
-import { pickPriority, nextAbnormal, beginHandling, nextHandling,
+import { pickPriority, nextAbnormal, beginHandling, nextHandling, cmdNote,
   beginEvent, markPriority, markAction, closeEvent,
   buildFocus, buildAlert,
   buildMlNote, mlFetchFailed } from './logic.js';
@@ -164,6 +164,21 @@ function formatTime(date) {
 const TOPIC_PREFIX = 'dormmate/v1/nodes/';
 const TOPIC_SUFFIX = '/telemetry';
 
+/* 指令那条 topic，以及这条协议里的两个字符串。和上面两个片段同一个道理：
+   只在这里写一遍 —— 写两遍的话，改一边忘一边就是「发到一条 core 不认的
+   topic 上」，而两边都不报错，只是按了按钮没反应。
+
+   CMD_ACTION 的值必须和 events.py 的 COMMANDS 对上（目前只有 'handle' 一个）。
+   这和规则那两份实现是同一类约定：跨语言没有共享的常量，所以**两边各钉一条
+   测试**把字面量定住（Python 侧 test_events.py，JS 侧 logic.test.js）。
+   core 那边不做大小写折叠，发 'Handle' 会被拒。 */
+const CMD_TOPIC = 'dormmate/v1/cmd';
+const CMD_ACTION = 'handle';
+
+/* 指令里带的来源。core 会把它打进日志：`[指令] dorm-b handle（dashboard）`——
+   演示的时候一眼分出这一条是人按的还是 send_cmd.py 发的。 */
+const SOURCE_DASHBOARD = 'dashboard';
+
 /**
  * 拼出某个节点的上报 topic。演示数据按钮走这条，别再手写字符串。
  *
@@ -214,6 +229,7 @@ const el = {
   detailMeta: document.getElementById('detail-meta'),
   actionFan: document.getElementById('action-fan'),
   actionState: document.getElementById('action-state'),
+  cmdNote: document.getElementById('cmd-note'),
   chartNote: document.getElementById('chart-note'),
   scene3d: document.getElementById('scene3d'),
   focus: document.getElementById('focus'),
@@ -1143,6 +1159,9 @@ function clearAll() {
      但按钮下面那行字是**上一次念的内容**，不清的话它会一直挂在那儿，
      看上去像是刚刚念过。 */
   setSpeakNote('');
+  /* 「指令发出去没有」那行同理：那是上一次按的结果，清空之后页面上什么都没有
+     了，它却还在说「已通知 core」——像是刚刚发过。 */
+  el.cmdNote.textContent = '';
 }
 
 /* ---------- MQTT ---------- */
@@ -1343,6 +1362,49 @@ el.focus.addEventListener('click', function (e) {
    跟顶部那一行、优先关注记进事件的那条 reason 是同一个来源。 */
 el.speak.addEventListener('click', speakAlert);
 
+/**
+ * 把一条「开始处理」发给 core。返回 `{ok, reason}`，**不抛异常**。
+ *
+ * 【只发事实，不发结论】这条消息里没有 status、没有 state、没有任何「已恢复」。
+ * core 收到它只会把事件从待处理推到处理中，之后好没好由它后面收到的报文说了算
+ * —— 这条红线在 core 那边是结构上成立的（`handle_command` 拿不到节点状态），
+ * 这边只需要不往消息里塞那些东西。
+ *
+ * 【带 time】带的是**这次动作记的那个时刻**（也就是最新那条报文的 time），
+ * 不是浏览器时钟。不给的话 core 会用自己的当下时刻盖章，于是页面上写着
+ * 「记在 2026-09-22 20:02:30 这条数据上」、core 的事件里却是墙上时间 ——
+ * 同一次动作两个说法。给的是报文里的时刻，所以没有三台机器钟不对的问题；
+ * 模拟器的剧本也是这么把 handle 帧写在两条报文中间的。
+ *
+ * 【不 retained】指令是一次性的。留在 broker 上的话，下一次起 core 时会
+ * 凭空把某条事件推进「处理中」——那条指令是上一次演示发的，人早忘了。
+ *
+ * 【不进消息日志】日志区的约定是「一条报文一行」，行数是排查时用来对数的。
+ * 这里只往 Console 打一行 —— 和收到消息那条边界同一个做法。
+ *
+ * @param {string} nodeId
+ * @param {string} actionTime
+ * @returns {{ok: boolean, reason: string}}
+ */
+function sendHandle(nodeId, actionTime) {
+  if (!client || !client.connected) {
+    return {
+      ok: false,
+      reason: client ? '还没连上 broker' : '连接还没建立（mqtt.js 没加载或已断开）',
+    };
+  }
+
+  const payload = { nodeId: nodeId, action: CMD_ACTION, source: SOURCE_DASHBOARD };
+  /* time 只在真的是个非空字符串时才带上。JSON.stringify 会把 undefined 的键
+     直接丢掉，所以这里显式判一下，别靠它的副作用。 */
+  if (typeof actionTime === 'string' && actionTime) payload.time = actionTime;
+
+  const text = JSON.stringify(payload);
+  client.publish(CMD_TOPIC, text, { qos: 1, retain: false });
+  console.log('[DormMate] 发出 MQTT 指令', CMD_TOPIC, text);
+  return { ok: true, reason: '' };
+}
+
 /* 「开启风扇 / 通风」。作用在**当前正在看的那个节点**上。
    写完这四个字段之后，卡片、详情区那行字、3D 里的风扇都是下一次
    render 时从同一份节点数据里读出来的 —— 这里不额外记任何东西。 */
@@ -1365,6 +1427,12 @@ el.actionFan.addEventListener('click', function () {
      导出 CSV 时「处理动作」那两列会是空的，而页面上一点异常都看不出来。 */
   const marked = markAction(node.event, started.action, started.actionTime);
   if (marked) Object.assign(node.event, marked);
+
+  /* 除了本地记账，把这次处理**发给 core**。发不发得出去都不影响上面那几个
+     字段 —— 看板自己那套显示照旧走，两边谁也不改谁。发不出去时那一行说明
+     会如实讲清楚，别让人以为 core 那边动了。 */
+  const sent = sendHandle(currentNodeId, started.actionTime);
+  el.cmdNote.textContent = cmdNote(sent.ok, sent.reason);
 
   renderCards();
   renderAction();
