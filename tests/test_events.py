@@ -267,6 +267,235 @@ class TestEventJson(unittest.TestCase):
         self.assertIsNone(events.Event.from_json(body).verify_from)
 
 
+class TestEventView(unittest.TestCase):
+    """E3：`Event.view()` —— 发到 MQTT 上给屏幕看的那一份。
+
+    它和 `to_json()` 是两件事，这里盯的就是「两件事别混」：
+    视图里不许出现案卷（verify / snapshots），列名必须和看板事件表对得上。
+    """
+
+    def make(self, **over):
+        kwargs = dict(event_id="dorm-b-20260922-200000", node_id="dorm-b",
+                      start_time="2026-09-22 20:00:00", problem="连续偏热")
+        kwargs.update(over)
+        return events.Event(**kwargs)
+
+    def test_column_names_match_the_dashboard_table(self):
+        """列名就是看板事件表那 9 个（也是导出 CSV 的表头）。
+
+        改这里等于改 CSV 的表头 —— CSV 是交给别人看的东西，所以钉住。
+        """
+        view = self.make().view()
+        for key in ("nodeId", "startTime", "problem", "priorityTime",
+                    "priorityReason", "action", "actionTime", "recoverTime",
+                    "result"):
+            with self.subTest(key=key):
+                self.assertIn(key, view)
+
+    def test_the_case_file_is_not_in_the_view(self):
+        """verify / snapshots 一律不进快照 —— 它们只增不减，每发一次快照
+        就要把整条案卷重发一遍，而事件表一个格子都用不到。"""
+        event = self.make()
+        event.verify.append({"time": "2026-09-22 20:05:00", "status": "偏热"})
+        event.add_snapshot({"time": "2026-09-22 20:00:00", "state": events.OPEN})
+        view = event.view()
+        self.assertNotIn("verify", view)
+        self.assertNotIn("snapshots", view)
+        # 但案卷还是好的（只是不走这条路出去）
+        self.assertEqual(len(event.verify), 1)
+        self.assertEqual(len(event.snapshots), 1)
+
+    def test_no_action_is_none_not_missing(self):
+        """还没人按过按钮时那三格是 None。
+
+        必须是「有键、值是 None」而不是「没这个键」—— 少一个键的话前端
+        `e.actionTime` 读出来是 undefined，`esc(undefined)` 会把
+        「undefined」印到页面上，而这只在「还没按过」时才发生。
+        """
+        view = self.make().view()
+        self.assertIsNone(view["action"])
+        self.assertIsNone(view["actionTime"])
+        self.assertIsNone(view["actionSource"])
+        self.assertIsNone(view["recoverTime"])
+        self.assertIsNone(view["priorityTime"])
+        self.assertEqual(view["priorityReason"], "")
+        self.assertEqual(view["result"], "")
+
+    def test_first_accepted_action_is_the_one_shown(self):
+        """显示的是**第一次被接受**的动作，不是最后一次。
+
+        第二次按也会往 actions 里记一笔（accepted=False，说明这次没重置
+        验证窗口），那一笔不该把第一次的功劳盖掉。
+        """
+        event = self.make()
+        event.actions = [
+            {"time": "2026-09-22 20:05:00", "action": "handle",
+             "source": "dashboard", "accepted": True},
+            {"time": "2026-09-22 20:06:00", "action": "handle",
+             "source": "mobile", "accepted": False},
+        ]
+        view = event.view()
+        self.assertEqual(view["action"], "handle")
+        self.assertEqual(view["actionTime"], "2026-09-22 20:05:00")
+        self.assertEqual(view["actionSource"], "dashboard")
+
+    def test_only_rejected_actions_shows_nothing(self):
+        """全是没被接受的（比如「这个节点没有开着的事件」）—— 那就是没人
+        真的处理过，页面上不该出现「处理中」那一格。"""
+        event = self.make()
+        event.actions = [{"time": "t", "action": "handle", "accepted": False}]
+        view = event.view()
+        self.assertIsNone(view["action"])
+        self.assertIsNone(view["actionTime"])
+
+    def test_verify_count_and_pending_come_from_core(self):
+        """「验证中 2/3」那两个数由 core 给，前端不自己数 verify 数组 ——
+        那个数组有上限，满了会丢最老的，数出来和判定用的计数器不是一回事。"""
+        event = self.make()
+        event.pending_abnormal = 2
+        event.verify = [{"time": "a"}, {"time": "b"}]
+        view = event.view()
+        self.assertEqual(view["abnormalAfter"], 2)
+        self.assertEqual(view["verifyCount"], 2)
+
+    def test_state_and_recovered_at_make_it_out(self):
+        event = self.make(state=events.RECOVERED, recovered_at="2026-09-22 20:20:00",
+                          result="已恢复")
+        view = event.view()
+        self.assertEqual(view["state"], events.RECOVERED)
+        self.assertEqual(view["recoverTime"], "2026-09-22 20:20:00")
+        self.assertEqual(view["result"], "已恢复")
+
+    def test_priority_fields_round_trip_through_the_file(self):
+        """priority_time / priority_reason 必须落盘 —— 不落的话，core 重启
+        之后所有历史事件的「什么时候成的重点」都变成空的了。"""
+        event = self.make()
+        event.priority_time = "2026-09-22 20:00:00"
+        event.priority_reason = "已连续偏热 不到 1 分钟（1 次），是目前唯一的异常节点"
+        again = events.Event.from_json(json.loads(json.dumps(event.to_json(),
+                                                             ensure_ascii=False)))
+        self.assertEqual(again.priority_time, "2026-09-22 20:00:00")
+        self.assertEqual(again.priority_reason, event.priority_reason)
+        self.assertEqual(again.view()["priorityTime"], "2026-09-22 20:00:00")
+
+    def test_old_files_without_those_fields_still_load(self):
+        """E3 之前写下的 events.json 里没有这两个字段 —— 读回来是 None / 空串，
+        不是报错（data/events.json 是本机跑出来的东西，不该因为版本变了就打不开）。"""
+        body = {"event_id": "x", "nodeId": "dorm-b",
+                "start_time": "2026-09-22 20:00:00", "problem": "连续偏热"}
+        event = events.Event.from_json(body)
+        self.assertIsNone(event.priority_time)
+        self.assertEqual(event.priority_reason, "")
+        self.assertIsNone(event.view()["priorityTime"])
+
+
+class TestMarkPriority(unittest.TestCase):
+    """E3：core 排完序之后，把「现在是它」记到它开着的那条事件上。"""
+
+    def make_book(self) -> events.EventBook:
+        return events.EventBook(["dorm-a", "dorm-b", "dorm-c"], 3, 3)
+
+    def open_event(self, book: events.EventBook, node_id: str = "dorm-b") -> Sim:
+        """喂一条异常读数把事件开出来 —— 走的是和 core 一样的顺序（先 apply 再 observe）。"""
+        sim = Sim(node_id, book=book)
+        sim.hot("2026-09-22 20:00:00")
+        return sim
+
+    def test_records_time_and_reason(self):
+        book = self.make_book()
+        self.open_event(book)
+        event = book.mark_priority("dorm-b", when="2026-09-22 20:00:00", reason="就是它")
+        self.assertEqual(event.priority_time, "2026-09-22 20:00:00")
+        self.assertEqual(event.priority_reason, "就是它")
+
+    def test_only_the_first_time(self):
+        """**只记第一次**：复盘看的是「什么时候被注意到的、当时因为什么」，
+        不是「最后一次的理由是什么」—— 后者在最上面那条栏里一直是最新的。"""
+        book = self.make_book()
+        self.open_event(book)
+        book.mark_priority("dorm-b", when="2026-09-22 20:00:00", reason="第一次")
+        again = book.mark_priority("dorm-b", when="2026-09-22 20:05:00", reason="第二次")
+        self.assertIsNone(again)
+        event = book.open_event("dorm-b")
+        self.assertEqual(event.priority_time, "2026-09-22 20:00:00")
+        self.assertEqual(event.priority_reason, "第一次")
+
+    def test_no_open_event_is_not_an_error(self):
+        """没有开着的案子就什么都不做 —— 一个正常的宿舍永远排不到重点，
+        它不该因为「被排到了」而凭空长出一条事件来。"""
+        book = self.make_book()
+        self.assertIsNone(book.mark_priority("dorm-b", when="t", reason="r"))
+        self.assertEqual(book.events, [])
+
+    def test_empty_time_is_ignored(self):
+        """没给时刻就不记 —— 记一条「什么时候」为空的记录，比不记更糟：
+        页面上那一格会显示成空，看着像「没被注意过」。"""
+        book = self.make_book()
+        self.open_event(book)
+        for blank in (None, "", "   "):
+            with self.subTest(blank=blank):
+                self.assertIsNone(book.mark_priority("dorm-b", when=blank, reason="r"))
+        self.assertIsNone(book.open_event("dorm-b").priority_time)
+
+    def test_does_not_change_any_state(self):
+        """**它一个字都不许改**：不改 state、不改 verify、不改 recovered_at。
+
+        在这儿改状态就等于开了一条绕过验证窗口的路 —— 而它是 core 每条
+        异常报文后面都会调一次的函数，威力比按钮还大。
+        """
+        book = self.make_book()
+        self.open_event(book)
+        event = book.open_event("dorm-b")
+        before = (event.state, list(event.verify), event.recovered_at,
+                  event.end_time, event.result, event.verify_from)
+        book.mark_priority("dorm-b", when="2026-09-22 20:00:00", reason="r")
+        self.assertEqual((event.state, list(event.verify), event.recovered_at,
+                          event.end_time, event.result, event.verify_from), before)
+        self.assertEqual(event.state, events.OPEN)
+
+    def test_none_reason_becomes_empty_string(self):
+        """重点理由可能是 None（`_reason_for` 找不到就是 None）—— 落盘时写成
+        空串，不能写成字符串 'None'，那个会原样显示在页面上。"""
+        book = self.make_book()
+        self.open_event(book)
+        book.mark_priority("dorm-b", when="2026-09-22 20:00:00", reason=None)
+        self.assertEqual(book.open_event("dorm-b").priority_reason, "")
+
+    def test_book_view_lists_events_oldest_first(self):
+        """**顺序是从旧到新**。反过来的话事件表会倒着长 —— 两种排法都说得通，
+        不钉住的话迟早会被某次重构顺手翻过来，谁也不觉得那是个改动。"""
+        book = self.make_book()
+        for i in range(3):
+            event = events.Event(event_id=f"e{i}", node_id="dorm-a",
+                                 start_time="2026-09-22 20:00:00", problem="连续偏热",
+                                 state=events.RECOVERED)
+            book.events.append(event)
+        view = book.view()
+        self.assertEqual([e["event_id"] for e in view["events"]], ["e0", "e1", "e2"])
+        self.assertEqual(view["summary"]["total"], 3)
+
+    def test_book_view_limit_keeps_the_newest(self):
+        """截的是**发出去的那一份**，summary 里的总数不动 ——
+        少报比多报危险：看见 20 条而以为一共就 20 条。"""
+        book = self.make_book()
+        for i in range(10):
+            book.events.append(events.Event(
+                event_id=f"e{i}", node_id="dorm-a", start_time="t",
+                problem="连续偏热", state=events.RECOVERED))
+        view = book.view(limit=3)
+        self.assertEqual([e["event_id"] for e in view["events"]], ["e7", "e8", "e9"])
+        self.assertEqual(view["summary"]["total"], 10)
+
+    def test_book_view_limit_zero_is_empty_not_everything(self):
+        """limit=0 是「一条都不发」。写成 0 而拿到全部的话，将来谁会因为
+        这个默认值被坑一次。"""
+        book = self.make_book()
+        book.events.append(events.Event(event_id="e0", node_id="dorm-a",
+                                        start_time="t", problem="连续偏热"))
+        self.assertEqual(book.view(limit=0)["events"], [])
+        self.assertEqual(book.view(limit=0)["summary"]["total"], 1)
+
+
 class TestEventBookkeeping(unittest.TestCase):
     def test_snapshots_keep_the_first_one(self):
         """快照封顶时丢**最老的中间那些**，开案那条永远留着。"""
@@ -985,11 +1214,36 @@ class TestRedLine(unittest.TestCase):
 
     def test_handle_command_never_touches_node_state(self):
         """**核心的那一条。** handle_command 里不许出现 self.nodes ——
-        出现一次就说明「按钮能改节点状态」这件事离发生只差一行。"""
+        出现一次就说明「按钮能改节点状态」这件事离发生只差一行。
+
+        【E3 拆掉了第三行】原来是 `assertNotIn("publish_state", body)`：那时
+        「指令进来之后快照一个字节都不会变」，所以重发快照是件可疑的事。
+        E3 起不成立了 —— 快照里多了 focus，被点名**真的**改变了快照，不重发
+        的话移动端切了焦点而看板永远收不到（跨端联动是假的）。所以那句话不再
+        是这条红线的说法，红线的说法换成了能测的那一条：**重发出去的那一份里
+        nodes 和 priority 必须一个字都没变**，见
+        tests/test_core.py 的 test_handle_command_does_not_change_nodes_or_priority。
+        静态文本查不了「哪条分支上重发」，所以那一条是行为测试，不是文本检查。
+        """
         body = self._function_body(self.core_source, "    def handle_command(")
         self.assertNotIn("self.nodes", body)
         self.assertNotIn("node.apply", body)
-        self.assertNotIn("publish_state", body)
+
+    def test_set_focus_cannot_touch_the_event_book_or_the_nodes(self):
+        """focus 那条路的红线，静态版。
+
+        它和 handle 是反的：handle 只许碰事件簿，focus 只许碰 self.focus。
+        两个都不许碰 self.nodes —— 那是共同的一条。
+        """
+        body = self._function_body(self.core_source, "    def set_focus(")
+        self.assertNotIn("self.nodes", body)
+        self.assertNotIn("event_book", body)
+        self.assertNotIn("apply_action", body)
+        self.assertNotIn("RECOVERED", body)
+        self.assertNotIn("recovered_at", body)
+        # 而且它得**主动**重发快照：不重发的话焦点只在 core 内存里变了，
+        # 两个前端谁都看不到（而快照平时只在内容变了时发，正是这种情况）。
+        self.assertIn("publish_state", body)
 
     def test_handle_command_cannot_write_recovered_or_unresolved(self):
         body = self._function_body(self.core_source, "    def handle_command(")
@@ -1212,12 +1466,26 @@ class TestCoreWiring(unittest.TestCase):
         self.assertEqual(after["nodes"], before["nodes"])
         self.assertEqual(after["priority"], before["priority"])
 
-    def test_command_does_not_republish_the_snapshot(self):
-        """快照里现在没有事件的字段，指令进来它一个字节都不会变。"""
+    def test_command_does_republish_the_snapshot(self):
+        """**E3 起和原来相反**：指令进来**要**重发一次快照。
+
+        原来这条断言的是「不重发」，理由是「快照里没有事件的字段，指令进来
+        它一个字节都不会变」。E3 把事件表放进快照了，那句话就不成立了 ——
+        按一下按钮，事件从 OPEN 变成 HANDLING，这个变化**必须**跟着快照
+        发出去，否则看板上那条一直写着「待处理」，直到下一条遥测才跳。
+
+        它不改的那部分（红线）在上面那条 test_command_does_not_change_the_node
+        里单独测着，两条一起才是完整的意思：
+        **重发的是事件和计数，不是节点状态。**
+        """
         self.feed()
         count = len(self.client.on(config.STATE_TOPIC))
         self.cmd()
-        self.assertEqual(len(self.client.on(config.STATE_TOPIC)), count)
+        self.assertEqual(len(self.client.on(config.STATE_TOPIC)), count + 1)
+
+        payload = json.loads(self.client.on(config.STATE_TOPIC)[-1]["payload"])
+        self.assertEqual(payload["events"]["events"][-1]["state"], "HANDLING")
+        self.assertEqual(payload["counters"]["commands"], 1)
 
     def test_command_with_no_event_is_counted_but_not_rejected(self):
         self.feed(temperature=25.0, humidity=60.0)          # 正常，没有案子

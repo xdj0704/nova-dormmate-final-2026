@@ -160,6 +160,13 @@ class Event:
     problem: str
     state: str = OPEN
     priority_reasons: list[str] = field(default_factory=list)
+    # 「它是什么时候被选成当前重点的、当时页面上写的是什么」。
+    # 和 priority_reasons 不是一回事：那个是每次状态迁移时记的几句话（最多 5 句），
+    # 这个是**第一次**成为重点那一刻的快照，只记一次（E3 起由 core 调
+    # mark_priority 填）。复盘要看的是「当初为什么盯上它」，而不是「最后一句
+    # 理由是什么」—— 后者在最上面那条栏里一直是最新的。
+    priority_time: str | None = None
+    priority_reason: str = ""
     actions: list[dict] = field(default_factory=list)
     verify_from: int | None = None
     verify: list[dict] = field(default_factory=list)
@@ -192,6 +199,8 @@ class Event:
             "start_time": self.start_time,
             "problem": self.problem,
             "priority_reasons": list(self.priority_reasons),
+            "priority_time": self.priority_time,
+            "priority_reason": self.priority_reason,
             "actions": [dict(a) for a in self.actions],
             "verify": [dict(v) for v in self.verify],
             "verify_from": self.verify_from,
@@ -242,6 +251,8 @@ class Event:
             problem=str(data.get("problem") or ""),
             state=state,
             priority_reasons=[str(x) for x in (data.get("priority_reasons") or [])],
+            priority_time=data.get("priority_time") or None,
+            priority_reason=str(data.get("priority_reason") or ""),
             actions=_records("actions"),
             verify_from=verify_from,
             verify=verify,
@@ -257,6 +268,48 @@ class Event:
         # 走不到那一步。留着是为了万一以后要留开放事件，账面别是负的。
         snapshot.consumed = (verify_from or 0) + len(verify) + snapshot.verify_dropped
         return snapshot
+
+    # -- 给人看的视图（E3）-------------------------------------------------
+
+    def view(self) -> dict[str, Any]:
+        """给前端渲染用的紧凑视图。**和 `to_json()` 是两件事**。
+
+        `to_json()` 是落盘那份：要能一字不差地读回来，所以 `verify` /
+        `snapshots` 那些数组一条不落。这份是**发到 MQTT 上给屏幕看的**：每个
+        字段都对应看板事件表上的某一格，字段名也照抄那张表的列名
+        （nodeId / startTime / problem / priorityTime / priorityReason /
+        action / actionTime / recoverTime / result）——
+
+        为什么字段名要跟前端对齐而不是让前端自己映射：前端那 9 个列名是
+        **导出 CSV 的表头**，改了它 CSV 的表头就跟着变，而 CSV 是交给别人看的
+        东西。名字对齐意味着「换数据源」这件事在前端只动读取那几行，渲染和
+        导出一个字都不用改。
+
+        `verify` / `snapshots` 一律不进这份视图：它们只增不减，发一次快照就
+        要把整条案卷重发一遍，而事件表一个格子都用不到。要细看案卷的人去读
+        `data/events.json`（那才是它该在的地方）。
+        """
+        first = next((a for a in self.actions if a.get("accepted")), None)
+        return {
+            "event_id": self.event_id,
+            "nodeId": self.node_id,
+            "state": self.state,
+            "startTime": self.start_time,
+            "problem": self.problem,
+            "priorityTime": self.priority_time,
+            "priorityReason": self.priority_reason,
+            "action": first.get("action") if first else None,
+            "actionTime": first.get("time") if first else None,
+            "actionSource": first.get("source") if first else None,
+            "recoverTime": self.recovered_at,
+            "endTime": self.end_time,
+            "result": self.result,
+            # 处理之后来了几条异常 —— 「验证中 2/3」就是拿它和 verify_after 比的。
+            # 前端不自己数 verify 数组：那个数组有上限，满了会丢最老的，
+            # 数出来的结果和判定用的那个计数器不是一回事。
+            "abnormalAfter": self.pending_abnormal,
+            "verifyCount": len(self.verify),
+        }
 
     # -- 记账 ---------------------------------------------------------------
 
@@ -339,6 +392,30 @@ class EventBook:
         counts["dropped"] = self.dropped
         return counts
 
+    def view(self, limit: int | None = None) -> dict[str, Any]:
+        """快照里那一块「事件」（E3）。
+
+        **顺序是从旧到新**（和 self.events 一样）。前端是照着数组顺序一行一行
+        画的，反过来的话事件表会倒着长 —— 而「最近发生的在最上面」和
+        「最早的第一次开案在最上面」两种排法都说得通，不写死的话迟早会被
+        某次重构顺手翻过来，谁也不觉得那是个改动。
+
+        `limit` 只截**发出去的那一份**：`summary` 里的 total 仍然是真的总数 ——
+        屏幕上放不下 200 条，但「一共发生过多少条」不能因此少报。
+        """
+        if limit is None:
+            picked = self.events
+        elif int(limit) > 0:
+            # 取**最后** limit 条（最近的那些），顺序不变
+            picked = self.events[-int(limit):]
+        else:
+            picked = []
+        return {
+            "summary": self.summary(),
+            "dropped": self.dropped,
+            "events": [event.view() for event in picked],
+        }
+
     # -- 状态机 -------------------------------------------------------------
 
     def observe(self, node: Any, record: Mapping[str, Any],
@@ -404,6 +481,44 @@ class EventBook:
         self._dirty = True
         self.save()
         return changes
+
+    def mark_priority(
+        self,
+        node_id: str,
+        when: str | None = None,
+        reason: str | None = None,
+    ) -> Event | None:
+        """「这一刻它成了当前重点」—— 记到它开着的那条事件上。改动过就返回那条事件。
+
+        **和 apply_action 是两件事，别混**：那个是前端按了按钮（把 OPEN 变成
+        HANDLING），这个是业务大脑自己排完序之后说「现在是它」。前者要人动手，
+        每一条异常都可能有；后者由 core 判定，同样一条事件只会记一次。
+
+        **只记第一次**（已经记过就返回 None 不动）。复盘想回答的是「这个宿舍
+        是什么时候被注意到的、当时是因为什么」，而不是「最后一句理由是什么」——
+        后者在最上面那条栏里一直是最新的，不必再存一份。
+
+        **不碰任何状态**：不改 state、不改 verify、不改 recovered_at。它只是
+        在案卷边上写一行「此刻它在最前面」。写成 `_close_*` 那种改状态的函数
+        就会在这里打开一条绕过验证窗口的路。
+        """
+        event = self._open.get(str(node_id))
+        if event is None:
+            return None
+        if event.priority_time:
+            return None
+        stamp = str(when or "").strip()
+        if not stamp:
+            return None
+
+        event.priority_time = stamp
+        event.priority_reason = str(reason or "").strip()
+        self._dirty = True
+        # 走节流写：这个方法在每条异常报文后面都会被调到一次，逐条 fsync 不划算。
+        # 真到结案那一刻有 force 写兜着，中间掉电最多丢一条「它成了重点」——
+        # 而那条在下一个重点出现时会被重新记一遍。
+        self.save()
+        return event
 
     def apply_action(
         self,

@@ -70,7 +70,32 @@ TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
 # 快照格式版本。前端将来读 dormmate/v1/state 时按这个字段挑解析方式，
 # 免得以后字段变了，旧页面把新快照读成一堆 undefined 还不报错。
-SNAPSHOT_VERSION = 1
+#
+# 2：E3 起多三块 —— 每个节点多一个 history（趋势图的数据源）、顶层多
+#    events（事件表）和 rejects（被拒绝日志）、以及 focus（谁被点名了）。
+#    加字段本身是向后兼容的（旧页面读不到就当没有），但**「前端只订快照
+#    就够不够」这件事变了** —— 旧页面订的是遥测，新页面一条都不订，
+#    这正是版本号该站出来说的那种变化。
+SNAPSHOT_VERSION = 2
+
+# 快照里最多带几条事件。屏幕上放不下 eventsMax（200）条，全带上就是每发一次
+# 快照重发一遍整本卷宗。**这只是发出去的那一份的上限**：summary 里的 total
+# 永远是真的总数，被截掉的条数在 dropped 里 —— 少报比多报危险，看见 20 条
+# 而以为一共就 20 条，正好会让「这个宿舍一直出问题」这件事消失。要看全部的
+# 人读 data/events.json。
+SNAPSHOT_EVENTS_MAX = 20
+
+# 快照里最多带几条「被拒绝」的记录。和 REJECT_PAYLOAD_MAX（单条报文截多长）
+# 是两个方向的限制：那个管一条多长，这个管一共几条。两个都得有 ——
+# 只截长度的话，一个不停发坏数据的设备能把快照撑到几十 MB。
+SNAPSHOT_REJECTS_MAX = 20
+
+# 指令动词。`events.COMMANDS` 是**会去改事件状态**的那一组（目前只有 handle）；
+# focus 不在那一组里，因为它一行都不碰事件簿 —— 它改的是「谁被点名了」，
+# 那是展示用的注意力，不是宿舍的状况。两组拼起来才是 core 认的全部动词，
+# 而 validate_command 拿到的就是这一份。
+FOCUS = "focus"
+COMMANDS = events.COMMANDS + (FOCUS,)
 
 # 写进拒绝日志的原始报文最多留这么多个字符。原样全存的话，
 # 一条 1 MB 的垃圾能把日志刷没，而看的人只需要认出来「这是谁发的什么鬼」。
@@ -323,7 +348,7 @@ def validate_command(
     topic: Any,
     payload_text: Any,
     node_ids: tuple[str, ...] | list[str],
-    commands: tuple[str, ...] | list[str] = events.COMMANDS,
+    commands: tuple[str, ...] | list[str] = COMMANDS,
 ) -> Verdict:
     """校验一条前端指令。过了就是 Verdict(ok=True, record=...)。
 
@@ -625,6 +650,24 @@ class Core:
         self._last_priority_node: object = _UNSET
         self.offline: list[str] = []   # 上一次 tick 时判定为离线的节点
 
+        # ---- E3：被点名的节点（移动端按下「聚焦」，或看板上点一下某个宿舍）----
+        # 它不是「宿舍的状况」，是「大家现在都在看哪一个」—— 所以：
+        #   * 不进 nodes，不进 ranked，**不参与优先级排序**（一个被点名的宿舍
+        #     不会因为被点名就变成最该处理的那个，那样排序就成了谁按谁有理）；
+        #   * 不落盘。重启之后谁都没被点名，从头开始，这是对的：它是当下这一屋子
+        #     人在看什么，不是历史事实。
+        # 形状是 None（没人被点名）或 {"nodeId":…, "by":…, "at":…}。
+        self.focus: dict[str, Any] | None = None
+
+        # ---- E3：最近被拒的几条报文 ----
+        # 为什么在内存里存一份而不只是发到 REJECT_TOPIC：前端要「只订一条
+        # dormmate/v1/state」就得让被拒绝日志跟着快照一起来。存最近
+        # SNAPSHOT_REJECTS_MAX 条，超了丢最老的（和事件簿同一个做法）。
+        self.rejects: deque[dict[str, Any]] = deque(maxlen=SNAPSHOT_REJECTS_MAX)
+        # 一共拒过多少条。快照里那几条是**最近**的，这个数是**总共**的 ——
+        # 两个都发，看的人才知道「这 20 条是全部还是最新的 20 条」。
+        self.rejects_total = 0
+
         # ---- 事件（D3）----
         # events_path 默认 None = **不碰磁盘**。这个默认是刻意的：一个 Core
         # 被造出来不等于「现在该往 data/ 里写文件了」，跑测试的时候更不该。
@@ -669,11 +712,17 @@ class Core:
             # 这条消息说的是「broker 存的那一份删了」，跟这个宿舍现在
             # 什么状况一点关系都没有，拿它去动历史或结算一段才是错的。
             self.counters.retained_cleared += 1
+            # 计数变了就重发一次（E3）。这个 counter 在快照里，而前端从 E3 起
+            # **只订快照**：不重发的话页面上那个数会停在上一回的值上，直到下一
+            # 条遥测才跳 —— 中间正好是「刚清完 retained、页面上还写着收到过 1 条」
+            # 那一段。这一步以前漏着（快照里只有 counters 时没什么人看那个数），
+            # 现在页面上要显示了，就得跟着发。
+            self.publish_state(now_wall)
             return verdict
 
         if not verdict.ok:
             self.counters.rejected += 1
-            self.publish_reject(topic, verdict.reasons, payload_text)
+            self.publish_reject(topic, verdict.reasons, payload_text, now_wall)
             return verdict
 
         self.counters.received += 1
@@ -688,7 +737,7 @@ class Core:
             # 留着是因为「查过了」和「这里不用防」是两件事。
             self.counters.rejected += 1
             self.publish_reject(
-                topic, (f"未知节点 {record['nodeId']!r}",), payload_text
+                topic, (f"未知节点 {record['nodeId']!r}",), payload_text, now_wall
             )
             return Verdict(False, reasons=(f"未知节点 {record['nodeId']!r}",))
 
@@ -704,6 +753,19 @@ class Core:
         reason = self._reason_for(record["nodeId"], now_wall)
         for line in self.event_book.observe(node, record, reason=reason):
             log("事件", line)
+
+        # 「它是什么时候被选成当前重点的」—— 记到它开着的那条事件上（E3）。
+        # 放在 observe **之后**：那条消息得先把事件开出来，才有可能在它身上
+        # 记这一笔（顺序反了的话，开案那一刻永远记不上）。时间用这条报文的
+        # time 而不是此刻 —— 事件表里别的时刻都是报文时间，混两种时间的话
+        # 同一行上会出现「起点在 20:30、被注意在 20:31」而其实只差一条。
+        top = self.priority(now_wall)
+        if top is not None:
+            self.event_book.mark_priority(
+                top.node_id,
+                when=record.get("time") or format_time(now_wall),
+                reason=top.reason,
+            )
 
         # 每收一条就重算并（内容变了才）重发快照。放在这里而不是放到
         # 主循环里定时发：定时发的话，两次发布之间收到的那几条数据
@@ -731,15 +793,18 @@ class Core:
         payload_text: Any,
         now_wall: float | None = None,
     ) -> Verdict:
-        """收到一条前端指令：校验 -> 记成事件动作 -> 打一行日志。
+        """收到一条前端指令：校验 -> 按动词分派 -> 打一行日志。
 
-        **这个方法一行都不碰 self.nodes，也不调 publish_state。**
-        前端说「我在处理了」，能变的只有事件的状态（OPEN -> HANDLING）；
-        这个宿舍到底好没好，只能由后面收到的遥测数据说了算。
+        两个动词走的是**两条完全不同的路**，分开写而不是塞进一个函数：
 
-        不重发快照，是因为快照里现在没有事件的任何字段 —— 指令进来之后
-        快照一个字节都不会变，发一份一模一样的出去只是徒增噪音。
-        （看板上把事件显示出来是下一步的事，那时候这里要跟着改。）
+        * `handle` —— 前端说「我在处理了」。能变的只有事件的状态
+          （OPEN -> HANDLING）；这个宿舍到底好没好，只能由后面收到的遥测
+          数据说了算。**这个方法一行都不碰 self.nodes。**
+        * `focus` —— 前端说「大家都看这个」。只动 self.focus，**一行都不碰
+          事件簿**：被点名不是事件动作，它不该在案卷上留下任何痕迹，
+          更不该给出一条绕过验证窗口的路。
+
+        两条路的共同点是都不改 self.nodes —— 红线在这一层依然成立。
         """
         if now_wall is None:
             now_wall = time.time()
@@ -748,17 +813,25 @@ class Core:
 
         if verdict.ignored:
             self.counters.retained_cleared += 1
+            # 和 handle_message 那边同一条理由：计数变了就重发一次快照。
+            self.publish_state(now_wall)
             return verdict
 
         if not verdict.ok:
             self.counters.command_rejected += 1
-            self.publish_reject(topic, verdict.reasons, payload_text)
+            self.publish_reject(topic, verdict.reasons, payload_text, now_wall)
             return verdict
 
         self.counters.commands += 1
         record = verdict.record
         assert record is not None  # ok=True 时一定有 record
         node_id = record["nodeId"]
+        who = record.get("source") or "来源未标"
+
+        if record["action"] == FOCUS:
+            message = self.set_focus(node_id, source=record.get("source"), now_wall=now_wall)
+            log("指令", f"{node_id} focus（{who}）-> 接受：{message}")
+            return verdict
 
         accepted, message = self.event_book.apply_action(
             node_id,
@@ -769,12 +842,58 @@ class Core:
             source=record.get("source"),
             reason=self._reason_for(node_id, now_wall),
         )
-        who = record.get("source") or "来源未标"
         log("指令", (
             f"{node_id} {record['action']}（{who}）-> "
             f"{'接受' if accepted else '没接受'}：{message}"
         ))
+        # **重发快照**。E3 起快照里有 events（事件表）和 counters，这两个都因为
+        # 这条指令变了：事件从 OPEN 变成 HANDLING、指令计数 +1。不重发的话，
+        # 看板上那条事件会一直写着「待处理」，直到下一条遥测过来才跳 ——
+        # 而「按了按钮，事件变成处理中」正是这一步要给人看的东西。
+        #
+        # 注意这**不是**在改节点状态：上面那句 assertEqual 测的就是这个，
+        # 重发出去的那一份里 nodes 和 priority 一个字都没动（红线）。
+        self.publish_state(now_wall)
         return verdict
+
+    def set_focus(
+        self,
+        node_id: str,
+        source: str | None = None,
+        now_wall: float | None = None,
+    ) -> str:
+        """点名一个节点（或再点一次取消）。返回要说给日志听的那句话。
+
+        **同一个节点点两次 = 取消**，不是「再点一次没反应」。理由是得有办法
+        取消：没有取消的话，焦点一旦设上就再也没有任何一条报文能把它改掉 ——
+        演示到一半想回到「谁也不看」，只能重启 core。这个判断放在这里而不是
+        放在前端，是因为前端不许自己算（而且两个前端各算一次迟早会不一样）。
+
+        焦点**不参与优先级排序**，也不改任何节点的状态：被点名的宿舍还是
+        原来那个 status、原来那个 rank。「大家都在看它」和「它最该处理」
+        是两件事，合成一件之后，谁按了按钮谁就成了最该处理的。
+        """
+        if now_wall is None:
+            now_wall = time.time()
+
+        node_id = str(node_id)
+        if self.focus is not None and self.focus.get("nodeId") == node_id:
+            self.focus = None
+            message = "取消焦点（同一个人点了第二次）"
+        else:
+            self.focus = {
+                "nodeId": node_id,
+                "by": source or "来源未标",
+                "at": format_time(now_wall),
+            }
+            message = f"焦点切到 {node_id}"
+
+        # 快照里现在有 focus 这一块了，所以这一次**必须**重发：
+        # 移动端点了「聚焦」而看板的焦点没跟过来，跨端联动就是假的。
+        # force=True 是因为内容确实变了（变了才走到这里）——用 force 是为了
+        # 把「这一步发生的本身要让人看见」写明确，不靠 payload 比较来兜。
+        self.publish_state(now_wall, force=True)
+        return message
 
     # -- 排 -----------------------------------------------------------------
 
@@ -840,12 +959,31 @@ class Core:
                 "reason": ranked[node_id].reason if node_id in ranked else None,
                 "lastSeen": None if node.last_seen is None else format_time(node.last_seen),
                 "historyCount": len(node.history),
+                # 趋势图的数据源（E3）。前端从这一步起**不再订遥测**，所以图上
+                # 的点必须跟着快照一起来 —— 不然页面刷一下，图上就一条线都没有，
+                # 得干等几分钟才看得出走势（而「刚刚是不是在降」正是最该看的时候）。
+                #
+                # 每条只留画图要用的四个字段：完整报文里的 seq / source 在这里
+                # 一个都用不到，而这份东西是每个周期都要重发一遍的。
+                "history": [
+                    {
+                        "time": item.get("time"),
+                        "temperature": item.get("temperature"),
+                        "humidity": item.get("humidity"),
+                        "status": item.get("status"),
+                    }
+                    for item in node.history
+                ],
             }
             nodes.append(entry)
 
         return {
             "v": SNAPSHOT_VERSION,
             "time": format_time(now_wall),
+            # 谁被点名了（E3）。null = 没人被点名 —— 那是「大家看默认那个」，
+            # 不是「不知道谁被点名了」，所以两个前端都得把这个 null 认成
+            # 「回落到 priority」，不能认成「什么都别高亮」。
+            "focus": None if self.focus is None else dict(self.focus),
             "priority": None if top is None else {
                 "nodeId": top.node_id,
                 "status": top.status,
@@ -856,6 +994,16 @@ class Core:
                 "reason": top.reason,
             },
             "nodes": nodes,
+            # 事件表（E3）。**只发最近 SNAPSHOT_EVENTS_MAX 条**，但 summary 里的
+            # total 是真的总数 —— 前端那行「共 N 条」读的是 summary，不是数组长度。
+            "events": self.event_book.view(limit=SNAPSHOT_EVENTS_MAX),
+            # 被拒绝日志（E3）。前端只订这一条 topic，所以这份跟着快照走；
+            # REJECT_TOPIC 照发不误，给 MQTTX 和命令行用。
+            "rejects": {
+                "total": self.rejects_total,     # 一共拒过多少条
+                "kept": len(self.rejects),       # 这几条是最近 kept 条里的
+                "items": [dict(item) for item in self.rejects],
+            },
             "counters": {
                 "received": self.counters.received,
                 "rejected": self.counters.rejected,
@@ -890,7 +1038,13 @@ class Core:
             return
         self.client.publish(topic, payload, qos=self.cfg.get("_qos", config.QOS), retain=retain)
 
-    def publish_reject(self, topic: Any, reasons: tuple[str, ...], payload_text: Any) -> None:
+    def publish_reject(
+        self,
+        topic: Any,
+        reasons: tuple[str, ...],
+        payload_text: Any,
+        now_wall: float | None = None,
+    ) -> None:
         """把一条非法报文记到 dormmate/v1/log/reject。
 
         **retain=False**（显式写出来，不靠 paho 的默认值）：
@@ -907,6 +1061,21 @@ class Core:
             "payload": self._clip(payload_text),
         }
         self.publish(config.REJECT_TOPIC, json.dumps(body, ensure_ascii=False), retain=False)
+
+        # 同一份东西也留在内存里，供快照带着走（E3）。**是同一份，不是另攒一份**：
+        # 页面上的被拒绝面板和 MQTTX 里抓到的那条必须逐字一致，否则「页面上没
+        # 显示」和「根本没发出来」这两种情况在排查时分不出来。
+        self.rejects.append(body)
+        self.rejects_total += 1
+
+        # **重发一次快照**。前端从 E3 起只订 dormmate/v1/state，被拒绝面板读的是
+        # 快照里那份 —— 这里不重发的话，那条日志发到 REJECT_TOPIC 上就没了，
+        # 页面上永远看不见（面板是死的，而且**不报错**）。
+        #
+        # 放在这里而不是放在三个调用点：拒收有好几条路（遥测坏报文、未知节点、
+        # 坏指令），漏掉任何一条就是「某一种拒收页面上看不到」—— 收在这一个
+        # 出口上，将来加第四条路也不会漏。
+        self.publish_state(now_wall)
 
     @staticmethod
     def _clip(payload_text: Any) -> str:

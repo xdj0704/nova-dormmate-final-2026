@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 import config  # noqa: E402
 import core  # noqa: E402
+import events  # noqa: E402
 import rules  # noqa: E402
 
 # 固定的"现在"。传进去而不是让代码读 time.time()，否则「30 秒算离线」
@@ -401,8 +402,8 @@ class TestRetainedClear(unittest.TestCase):
         self.assertEqual(c.counters.received, 0)
         self.assertEqual(c.counters.retained_cleared, 1)
 
-    def test_it_touches_no_node_and_sends_no_snapshot(self):
-        """不改节点、不发快照 —— 它说的是「broker 存的那份删了」，
+    def test_it_touches_no_node(self):
+        """**不改节点状态** —— 它说的是「broker 存的那份删了」，
         跟这个宿舍现在什么状况一点关系都没有。"""
         c, client = make_core()
         c.handle_message(topic_of("dorm-a"), payload_text(), now_wall=NOW)
@@ -412,7 +413,27 @@ class TestRetainedClear(unittest.TestCase):
 
         self.assertEqual(list(c.nodes["dorm-a"].history), before)
         self.assertEqual(c.nodes["dorm-a"].abnormal_count, 1)  # 那一段还开着
-        self.assertEqual(len(client.state_payloads()), 1)      # 还是只有前面那一次
+
+    def test_it_does_republish_the_snapshot(self):
+        """但**要重发一次快照** —— E3 起这条和原来相反了。
+
+        原来这里断言的是「不发快照」（那时快照里只有节点的东西，清 retained
+        和它们无关）。现在快照里带着 counters，这一次 retain_cleared 加了一，
+        而前端只订快照：不重发的话页面上那个数就停在上一回的值上，直到下一条
+        遥测才跳 —— 中间那一段正好是「刚清完 retained、页面上还写着收到过几条」。
+        这条测试跟着行为一起改了，不是为了让它变绿。
+        """
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-a"), payload_text(), now_wall=NOW)
+        count = len(client.state_payloads())
+
+        c.handle_message(topic_of("dorm-a"), "", now_wall=NOW)
+
+        self.assertEqual(len(client.state_payloads()), count + 1)
+        self.assertEqual(client.state_payloads()[-1]["counters"]["retainedCleared"], 1)
+        # 但节点那部分一个字没变 —— 「不改节点」和「重发快照」是两件事
+        self.assertEqual(client.state_payloads()[-1]["nodes"],
+                         client.state_payloads()[-2]["nodes"])
 
     def test_whitespace_is_still_a_bad_message(self):
         """只认长度为 0。空白字符不是「清 retained」，那是真写坏了。"""
@@ -869,16 +890,30 @@ class TestSnapshot(unittest.TestCase):
 
         self.assertEqual(snapshot["v"], core.SNAPSHOT_VERSION)
         self.assertEqual(len(snapshot["time"]), 19)
+        self.assertEqual(sorted(snapshot), [
+            "counters", "events", "focus", "nodes", "priority", "rejects",
+            "time", "v",
+        ])
         self.assertEqual(sorted(snapshot["nodes"][0]), [
-            "abnormalCount", "durationSec", "durationText", "historyCount",
-            "humidity", "lastSeen", "nodeId", "online", "reason", "status",
-            "temperature", "time",
+            "abnormalCount", "durationSec", "durationText", "history",
+            "historyCount", "humidity", "lastSeen", "nodeId", "online",
+            "reason", "status", "temperature", "time",
         ])
         self.assertEqual([n["nodeId"] for n in snapshot["nodes"]], list(NODES))
         self.assertEqual(snapshot["counters"],
                          {"received": 1, "rejected": 0, "statusMismatch": 0,
                           "retainedCleared": 0, "commands": 0,
                           "commandRejected": 0})
+        # history 里每条只留画图要用的四个字段（完整报文里的 seq / source
+        # 不进快照 —— 它是每个周期都要重发一遍的）。
+        by_id = {n["nodeId"]: n for n in snapshot["nodes"]}
+        self.assertEqual(by_id["dorm-b"]["history"], [{
+            "time": "2026-09-22 20:30:00", "temperature": 31.0,
+            "humidity": 78.0, "status": "偏热",
+        }])
+        # 一条数据都还没收到的节点：history 是空表而**不是**缺失。
+        # 缺失的话前端 `node.history.length` 会当场抛，页面停在半路。
+        self.assertEqual(by_id["dorm-a"]["history"], [])
 
     def test_priority_block(self):
         c, client = make_core()
@@ -922,6 +957,304 @@ class TestSnapshot(unittest.TestCase):
         entry = [n for n in client.state_payloads()[-1]["nodes"] if n["nodeId"] == "dorm-b"][0]
         self.assertEqual(entry["durationText"], rules.format_duration(420))
         self.assertEqual(entry["durationText"], "7 分钟")
+
+
+class TestFocusCommand(unittest.TestCase):
+    """E3 的 focus 指令：移动端切焦点，看板跟着走。
+
+    这里盯的是**红线**在第二个动词上是不是照样成立：focus 只许动
+    self.focus，事件簿和节点状态都一个字节都不许变。松掉的话，「按一下
+    按钮就把事情办完」会从 handle 那条门缝里溜回来 —— 走 focus 这条。
+    """
+
+    def _send(self, c, node_id="dorm-c", action="focus", source="mobile", **extra):
+        body = {"nodeId": node_id, "action": action, "source": source}
+        body.update(extra)
+        return c.handle_command(config.CMD_TOPIC, json.dumps(body), now_wall=NOW)
+
+    def _focus_in_snapshot(self, client):
+        return client.state_payloads()[-1]["focus"]
+
+    def test_focus_sets_the_snapshot_field(self):
+        c, client = make_core()
+        verdict = self._send(c)
+        self.assertTrue(verdict.ok)
+        # at 用的是**此刻**（core 的时钟），不是报文里那个 time ——
+        # 「谁什么时候点的名」只能问收到指令的人。所以这里比的是
+        # format_time(NOW)，写死一个时刻的话测试会跟着时区飘。
+        self.assertEqual(self._focus_in_snapshot(client), {
+            "nodeId": "dorm-c", "by": "mobile", "at": core.format_time(NOW),
+        })
+
+    def test_focus_republishes_the_state(self):
+        """**这一步必须重发快照** —— 不重发，移动端点了「聚焦」而看板
+        永远收不到，跨端联动就是假的（快照只在内容变了时发，而 focus
+        正是那种「变了但得有人主动发」的情况）。"""
+        c, client = make_core()
+        before = len(client.on(config.STATE_TOPIC))
+        self._send(c)
+        self.assertEqual(len(client.on(config.STATE_TOPIC)), before + 1)
+
+    def test_focus_is_retained_state_not_a_command(self):
+        """快照本身仍然是 retained —— 焦点要留给后开页面的人。"""
+        c, client = make_core()
+        self._send(c)
+        self.assertIs(client.last_on(config.STATE_TOPIC)["retain"], True)
+
+    def test_same_node_twice_cancels(self):
+        """得有办法取消：没有取消的话，焦点一旦设上就没有任何一条报文
+        能把它改掉，演示到一半只能重启 core。"""
+        c, client = make_core()
+        self._send(c, "dorm-b")
+        self._send(c, "dorm-b")
+        self.assertIsNone(self._focus_in_snapshot(client))
+
+    def test_switching_to_another_node(self):
+        c, client = make_core()
+        self._send(c, "dorm-b")
+        self._send(c, "dorm-a")
+        self.assertEqual(self._focus_in_snapshot(client)["nodeId"], "dorm-a")
+
+    def test_focus_does_not_touch_the_event_book(self):
+        """**红线**：被点名不是事件动作。
+
+        拿一条真的开着的事件来看：点完 focus 之后它还是 OPEN、
+        actions 还是空的、recovered_at 还是 null。
+        """
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b"), now_wall=NOW)
+        event = c.event_book.open_event("dorm-b")
+        self.assertIsNotNone(event)
+        before = (event.state, list(event.actions), event.recovered_at)
+
+        self._send(c, "dorm-b", action="focus")
+
+        after = (event.state, list(event.actions), event.recovered_at)
+        self.assertEqual(after, before)
+        self.assertEqual(event.state, events.OPEN)
+        self.assertEqual(event.actions, [])
+        self.assertIsNone(event.recovered_at)
+
+    def test_handle_command_does_not_change_nodes_or_priority(self):
+        """**红线的行为版**（静态那条在 tests/test_events.py 里）。
+
+        E3 之后指令确实会让快照变（events 那块要变、focus 要变），所以
+        「指令进来快照不动」这句话不再成立、也就没法再拿它当红线。真正
+        不许变的是这两个：**每个节点的状态**和**谁是重点**。按一下按钮就
+        让宿舍变正常、或者让自己变成重点，都是从这里漏出去的。
+        """
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-a"), payload_text("dorm-a", 31, 78), now_wall=NOW)
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b", 16, 60, "偏冷"), now_wall=NOW)
+        before = client.state_payloads()[-1]
+        snapshot_before = (before["nodes"], before["priority"])
+
+        c.handle_command(
+            config.CMD_TOPIC,
+            json.dumps({"nodeId": "dorm-b", "action": "handle", "source": "dashboard"}),
+            now_wall=NOW,
+        )
+
+        after = client.state_payloads()[-1]
+        self.assertEqual((after["nodes"], after["priority"]), snapshot_before)
+        # 变了的是事件那一条（OPEN -> HANDLING），这才是按按钮该有的效果
+        self.assertEqual(c.event_book.open_event("dorm-b").state, events.HANDLING)
+        self.assertEqual(after["counters"]["commands"], 1)
+
+    def test_focus_does_not_change_who_is_the_priority(self):
+        """被点名的宿舍**不因此变成最该处理的**。
+
+        合起来的话，谁按了按钮谁就成了重点 —— 排序就成了「谁按谁有理」。
+        """
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-a"), payload_text("dorm-a", 31, 78), now_wall=NOW)
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b", 16, 60, "偏冷"), now_wall=NOW)
+        before = client.state_payloads()[-1]["priority"]
+
+        self._send(c, "dorm-b", action="focus")   # 点名的是**弱**的那个
+
+        self.assertEqual(client.state_payloads()[-1]["priority"], before)
+        self.assertEqual(before["nodeId"], "dorm-a")
+
+    def test_focus_cannot_start_handling(self):
+        """focus 不许被当成 handle 用：事件不许从 OPEN 变成 HANDLING。"""
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b"), now_wall=NOW)
+        self._send(c, "dorm-b", action="focus")
+        self.assertEqual(c.event_book.open_event("dorm-b").state, events.OPEN)
+
+    def test_focus_survives_later_telemetry(self):
+        """后面来的数据不许把焦点冲掉 —— 它是「大家在看的那个」，不是
+        「最后一条报文是哪个」。"""
+        c, client = make_core()
+        self._send(c, "dorm-c")
+        c.handle_message(topic_of("dorm-a"), payload_text("dorm-a"), now_wall=NOW)
+        self.assertEqual(self._focus_in_snapshot(client)["nodeId"], "dorm-c")
+
+    def test_focus_is_not_persisted(self):
+        """不落盘：重启之后谁都没被点名。它是当下这一屋子人在看什么，
+        不是历史事实。"""
+        c, _ = make_core()
+        self._send(c, "dorm-b")
+        c2, client2 = make_core()
+        self.assertIsNone(c2.snapshot(NOW)["focus"])
+
+    def test_focus_is_case_sensitive_like_handle(self):
+        """大小写不折叠这条对新的动词一样成立。"""
+        c, client = make_core()
+        verdict = self._send(c, "dorm-b", action="Focus")
+        self.assertFalse(verdict.ok)
+        self.assertIn("不认识的 action", " ".join(verdict.reasons))
+        self.assertIsNone(c.snapshot(NOW)["focus"])
+
+    def test_focus_rejects_unknown_node(self):
+        """不认识的节点还是拒收 —— 快照里出现一个不存在的宿舍名，前端
+        会为它画一张永远没有数据的卡片。"""
+        c, client = make_core()
+        verdict = self._send(c, "dorm-z")
+        self.assertFalse(verdict.ok)
+        self.assertIn("未知节点", " ".join(verdict.reasons))
+
+    def test_focus_with_wrong_topic_is_rejected(self):
+        c, client = make_core()
+        verdict = c.handle_command(
+            topic_of("dorm-b"),
+            json.dumps({"nodeId": "dorm-b", "action": "focus"}),
+            now_wall=NOW,
+        )
+        self.assertFalse(verdict.ok)
+        self.assertIsNone(c.snapshot(NOW)["focus"])
+
+    def test_rejected_focus_is_counted_as_a_rejected_command(self):
+        """focus 被拒要记在 commandRejected 上，不是记在其它计数上 ——
+        页面上那个数是排查「按钮按了没反应」的第一站。"""
+        c, client = make_core()
+        self._send(c, "dorm-z")
+        self.assertEqual(client.state_payloads()[-1]["counters"]["commandRejected"], 1)
+        self.assertEqual(client.state_payloads()[-1]["counters"]["commands"], 0)
+
+    def test_focus_without_source_says_so(self):
+        c, client = make_core()
+        c.handle_command(config.CMD_TOPIC,
+                         json.dumps({"nodeId": "dorm-b", "action": "focus"}),
+                         now_wall=NOW)
+        self.assertEqual(self._focus_in_snapshot(client)["by"], "来源未标")
+
+    def test_all_commands_are_reachable_through_the_same_validator(self):
+        """两个动词都得能从 validate_command 过掉 —— 漏登记一个的话，
+        那个词会被拒，而理由写的是「目前只有 ['handle']」，看着像没实现。"""
+        for action in core.COMMANDS:
+            verdict = core.validate_command(
+                config.CMD_TOPIC,
+                json.dumps({"nodeId": "dorm-a", "action": action}),
+                NODES,
+            )
+            self.assertTrue(verdict.ok, f"{action} 过不了校验：{verdict.reasons}")
+        self.assertEqual(core.COMMANDS, ("handle", "focus"))
+
+
+class TestSnapshotEventsAndRejects(unittest.TestCase):
+    """E3：快照里那两块新内容 —— 事件表和被拒绝日志。"""
+
+    def test_events_block_shape(self):
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b"), now_wall=NOW)
+        block = client.state_payloads()[-1]["events"]
+        self.assertEqual(sorted(block), ["dropped", "events", "summary"])
+        self.assertEqual(block["summary"]["total"], 1)
+        self.assertEqual(len(block["events"]), 1)
+
+        view = block["events"][0]
+        self.assertEqual(view["nodeId"], "dorm-b")
+        self.assertEqual(view["state"], events.OPEN)
+        self.assertEqual(view["problem"], "连续偏热")
+        self.assertEqual(view["startTime"], "2026-09-22 20:30:00")
+        # 「什么时候成的重点」：这条数据一来它就是唯一的异常，所以当场记上
+        self.assertEqual(view["priorityTime"], "2026-09-22 20:30:00")
+        # 还没人按过按钮 —— 那两个字段是 None，不是缺字段（缺了前端
+        # 读 e.action 会抛，而这只在「还没按过」时才发生，最不容易发现）
+        self.assertIsNone(view["action"])
+        self.assertIsNone(view["actionTime"])
+        self.assertIsNone(view["recoverTime"])
+        self.assertEqual(view["result"], "")
+        # 案卷那两摞数组**不进快照**（只增不减，每发一次快照就要重发一遍）
+        self.assertNotIn("verify", view)
+        self.assertNotIn("snapshots", view)
+
+    def test_events_block_is_empty_before_anything_happens(self):
+        c, client = make_core()
+        c.publish_state(NOW, force=True)
+        block = client.state_payloads()[-1]["events"]
+        self.assertEqual(block["events"], [])
+        self.assertEqual(block["summary"]["total"], 0)
+
+    def test_events_are_capped_but_the_total_is_not(self):
+        """截的是**发出去的那一份**，total 永远是真的总数。
+
+        少报比多报危险：看见 20 条而以为一共就 20 条，正好会让「这个
+        宿舍一直出问题」这件事消失。
+        """
+        c, client = make_core()
+        # 直接往事件簿里塞，不靠喂报文（那要几百条数据）
+        for i in range(core.SNAPSHOT_EVENTS_MAX + 5):
+            c.event_book.events.append(events.Event(
+                event_id=f"dorm-a-20260922-{i:06d}", node_id="dorm-a",
+                start_time="2026-09-22 20:30:00", problem="连续偏热",
+                state=events.RECOVERED,
+            ))
+        block = c.snapshot(NOW)["events"]
+        self.assertEqual(len(block["events"]), core.SNAPSHOT_EVENTS_MAX)
+        self.assertEqual(block["summary"]["total"], core.SNAPSHOT_EVENTS_MAX + 5)
+        # 留的是**最近**的那些，顺序不变（先发生的在前）
+        self.assertEqual(block["events"][-1]["event_id"],
+                         f"dorm-a-20260922-{core.SNAPSHOT_EVENTS_MAX + 4:06d}")
+
+    def test_rejects_block_shape(self):
+        c, client = make_core()
+        c.publish_state(NOW, force=True)
+        block = client.state_payloads()[-1]["rejects"]
+        self.assertEqual(sorted(block), ["items", "kept", "total"])
+        self.assertEqual((block["total"], block["kept"], block["items"]), (0, 0, []))
+
+    def test_rejects_carry_the_same_body_as_the_published_one(self):
+        """页面上那条和 MQTTX 里抓到的那条必须**逐字一致** —— 不然
+        「页面上没显示」和「根本没发出来」在排查时分不出来。"""
+        c, client = make_core()
+        c.handle_message("dormmate/v1/nodes/dorm-b/telemetry", "{不是 JSON", now_wall=NOW)
+
+        published = json.loads(client.last_on(config.REJECT_TOPIC)["payload"])
+        in_snapshot = client.state_payloads()[-1]["rejects"]["items"][-1]
+        self.assertEqual(in_snapshot, published)
+
+    def test_rejects_total_counts_beyond_the_ring(self):
+        c, client = make_core()
+        for i in range(core.SNAPSHOT_REJECTS_MAX + 3):
+            c.handle_message(topic_of("dorm-b"), f"{{坏报文 {i}", now_wall=NOW)
+        block = client.state_payloads()[-1]["rejects"]
+        self.assertEqual(block["total"], core.SNAPSHOT_REJECTS_MAX + 3)
+        self.assertEqual(block["kept"], core.SNAPSHOT_REJECTS_MAX)
+        self.assertEqual(len(block["items"]), core.SNAPSHOT_REJECTS_MAX)
+        # 留下的是最近那几条
+        self.assertIn(str(core.SNAPSHOT_REJECTS_MAX + 2), block["items"][-1]["payload"])
+
+    def test_rejected_commands_land_in_the_same_panel(self):
+        """被拒的**指令**和坏报文进的是同一个面板。它们是两件事（一个
+        该去查前端、一个该去查设备），所以 topic 字段照着发出来 ——
+        看的人从那一栏就能分出是谁的错。"""
+        c, client = make_core()
+        c.handle_command(config.CMD_TOPIC,
+                         json.dumps({"nodeId": "dorm-z", "action": "focus"}),
+                         now_wall=NOW)
+        items = client.state_payloads()[-1]["rejects"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["topic"], config.CMD_TOPIC)
+
+    def test_retained_clear_is_not_a_reject(self):
+        """清 retained 的空报文不该出现在被拒绝面板里 —— 它什么都不是，
+        摆上去就是一条查不出的假警报。"""
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-b"), "", now_wall=NOW)
+        self.assertEqual(client.state_payloads()[-1]["rejects"]["items"], [])
 
 
 class TestLifespanAndLwt(unittest.TestCase):
