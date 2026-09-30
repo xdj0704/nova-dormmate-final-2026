@@ -6,14 +6,19 @@
     py -3.14 core.py --quiet          # 只报拒绝和快照，不逐条报收到的数据
 
 这个文件要**替全校所有的前端做判断**。所以它自己不渲染任何东西，
-只做四件事：
+只做五件事：
 
     1) 收：订阅 dormmate/v1/nodes/+/telemetry，校验每一条报文
     2) 判：status 一律用 rules.judge_status 重算，**不信报文里写的值**
     3) 排：把异常节点交给 rules.rank_priority，得出「最该先看的是谁、为什么」
-    4) 发：retained 快照发到 dormmate/v1/state，坏报文发到 dormmate/v1/log/reject
+    4) 管：异常段开成一条事件（events.py），前端的 handle 指令把它推到「处理中」，
+       之后靠**新收到的报文**判它恢复还是没恢复
+    5) 发：retained 快照发到 dormmate/v1/state，坏报文发到 dormmate/v1/log/reject
        （清 retained 的那条空报文既不是数据也不是坏报文，只记一笔——见
        validate_message 第 2 步前面那段）
+
+两条订阅：遥测那一条是数据，`dormmate/v1/cmd` 那一条是指令。on_message 按
+topic 分派（`message.topic == config.CMD_TOPIC` 走 handle_command）。
 
 四条红线在代码里的落点（改这个文件之前先看一遍）：
 
@@ -23,6 +28,8 @@
     并记账（counters.statusMismatch），永远不把它当成结论。
   * **恢复要等新数据。** 不是「按个按钮就算好了」—— 恢复判据是**后来收到的**
     连续 N 条正常报文（N = core/config.json 的 recoverConsecutiveNormal）。
+    代码上的落点：`handle_command()` 里**一行都不碰 self.nodes**，它只能让
+    事件从 OPEN 转 HANDLING；写下 RECOVERED 的只有 `EventBook.observe()`。
   * **不手工改结果。** 快照里的每个数字都是当场从内存里算的，没有任何一处
     是写死的常量。
 
@@ -53,6 +60,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import config  # noqa: E402
+import events  # noqa: E402
 import rules  # noqa: E402
 from status_rules import compute_status  # noqa: E402
 
@@ -300,6 +308,121 @@ def validate_message(
 
 
 # --------------------------------------------------------------------------
+# 指令（前端 -> core）
+# --------------------------------------------------------------------------
+
+# 指令的必填字段。这里比遥测少得多，因为指令是**人按出来的**，
+# 不是传感器报上来的 —— 只有一个「对哪个节点、干什么」。
+COMMAND_FIELDS: tuple[tuple[str, type], ...] = (
+    ("nodeId", str),
+    ("action", str),
+)
+
+
+def validate_command(
+    topic: Any,
+    payload_text: Any,
+    node_ids: tuple[str, ...] | list[str],
+    commands: tuple[str, ...] | list[str] = events.COMMANDS,
+) -> Verdict:
+    """校验一条前端指令。过了就是 Verdict(ok=True, record=...)。
+
+    和 validate_message 是一路的（同样的九道里挑出该有的那几道，同样的
+    Verdict、同样的 reasons），但**判据不同**，所以另起一个函数而不是加参数：
+    指令少了 time 不是错（core 用自己的时钟补），多了个不认识的 action 是错
+    （一个不认识的动词没法猜大意 —— 猜错了就是替前端做主）。
+
+    record 里带着 action，但**不带任何节点的状态**：这个函数能看的东西里
+    没有温度湿度，它也就没法替数据说话。红线在这一层就已经成立。
+    """
+    # 1) topic 必须正好是那一条。指令不是遥测，没有通配符的余地：
+    #    dormmate/v1/cmd/dorm-a 这种「看着更整齐」的写法会被拒 ——
+    #    节点在 payload 里已经有了，topic 里再来一份就是第二个出处。
+    if topic != config.CMD_TOPIC:
+        return Verdict(False, reasons=(
+            f"不是指令 topic：{topic!r}，指令的约定是 {config.CMD_TOPIC}",
+        ))
+
+    # 空报文：和遥测那边同一个做法（清 retained）。指令这条 topic 是
+    # retain=False 发的，正常情况下不会出现，但「不会出现」和「不用处理」
+    # 是两件事 —— 真收到一条空的，按坏报文拒掉会让 reject 里多一条查不出的
+    # 假警报，而它其实什么都不是。
+    if payload_text == "":
+        return Verdict(
+            False, ignored=True,
+            reasons=(f"{config.CMD_TOPIC} 上收到空报文（清 retained），不当作指令",),
+        )
+
+    # 2) JSON
+    if not isinstance(payload_text, str):
+        return Verdict(False, reasons=("指令不是文本，没法按 UTF-8 JSON 解析",))
+    try:
+        payload = json.loads(payload_text)
+    except ValueError as exc:
+        return Verdict(False, reasons=(f"指令 JSON 解析失败：{exc}",))
+
+    # 3) 顶层是对象
+    if not isinstance(payload, dict):
+        return Verdict(False, reasons=(
+            f"指令 payload 顶层不是对象（收到 {type(payload).__name__}）",
+        ))
+
+    # 4) 字段齐不齐、类型对不对
+    problems: list[str] = []
+    for key, expected in COMMAND_FIELDS:
+        if key not in payload:
+            problems.append(f"指令缺少 {key}")
+            continue
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, expected):
+            problems.append(
+                f"指令 {key} 应为 {expected.__name__}，实际是 {type(value).__name__}"
+            )
+    if problems:
+        return Verdict(False, reasons=tuple(problems))
+
+    # 5) 节点认不认识 —— 和遥测同一条理由：不认识的节点没有地方可写。
+    #    这里还要防一件事：事件文件的路径是按节点名分文件的吗？不是，
+    #    所以更要挡住，否则会开出一条 nodeId 是乱码、谁也结不掉的事件。
+    if payload["nodeId"] not in tuple(node_ids):
+        return Verdict(False, reasons=(
+            f"指令未知节点 {payload['nodeId']!r}，配置里只有 {list(node_ids)}",
+        ))
+
+    # 6) action 认不认识。**不做大小写折叠、不做同义词**：
+    #    「Handle」「处理」「开始处理」一律拒收，理由写清目前只有哪几种。
+    #    松一点看着更"友好"，但下一步就是有人发 'Handle' 之后
+    #    「按了没反应」而日志里一条拒绝都没有（它被折叠后接受了）——
+    #    那种错只能靠读代码发现。
+    if payload["action"] not in tuple(commands):
+        return Verdict(False, reasons=(
+            f"指令不认识的 action {payload['action']!r}，目前只有 {list(commands)}"
+            "（大小写不折叠：'Handle' 和 'handle' 不是一回事）",
+        ))
+
+    # 7) time 是可选的：给了就得是那个格式，不给由 core 补上此刻。
+    #    可选是因为指令是"当前这一刻发生的动作"，前端不该被迫自己造一个时间；
+    #    允许给，是为了剧本能复现出固定的时刻（d3_event.json 就是这么写死的）。
+    when = payload.get("time")
+    if when is not None:
+        if not isinstance(when, str) or parse_time(when) is None:
+            return Verdict(False, reasons=(
+                f"指令 time 格式不对：{when!r}，应是 YYYY-MM-DD HH:mm:ss",
+            ))
+
+    record: dict[str, Any] = {
+        "nodeId": payload["nodeId"],
+        "action": payload["action"],
+        "time": when,                     # None = 让 core 用自己的时钟补
+    }
+    source = payload.get("source")
+    if isinstance(source, str):
+        record["source"] = source
+
+    return Verdict(True, record=record)
+
+
+# --------------------------------------------------------------------------
 # 节点状态
 # --------------------------------------------------------------------------
 
@@ -463,6 +586,13 @@ class Counters:
     # 不数它的话，broker 明明投递了 15 条、快照上只有 14 条，差的那一条
     # 在任何地方都看不见 —— 这个项目里「看不见的东西才叫丢」。
     retained_cleared: int = 0
+    # 收下的指令条数（含「按了但没有对应事件」的那种 —— 那条指令本身是好的，
+    # 只是没案子可办）。它在快照里，是为了回答一个具体的问题：
+    # 「前端到底把话说到了没有」。按钮按下去没反应时，先看这个数变没变。
+    commands: int = 0
+    # 被拒的指令。和 rejected 分开数：遥测被拒说明现场设备在发坏数据，
+    # 指令被拒说明前端在发坏指令 —— 该去查的地方根本不是一处。
+    command_rejected: int = 0
 
 
 class Core:
@@ -473,7 +603,13 @@ class Core:
     前者坏一次就把后者的测试一起带红，什么都看不出来。
     """
 
-    def __init__(self, cfg: dict[str, Any], client: Any | None = None, quiet: bool = False) -> None:
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        client: Any | None = None,
+        quiet: bool = False,
+        events_path: str | Path | None = None,
+    ) -> None:
         self.cfg = cfg
         self.nodes: dict[str, NodeState] = {
             node_id: NodeState(node_id, history_max=cfg["historyMax"])
@@ -488,6 +624,24 @@ class Core:
         # 混了的话，一上来就"没有重点"的那次永远打不出来。
         self._last_priority_node: object = _UNSET
         self.offline: list[str] = []   # 上一次 tick 时判定为离线的节点
+
+        # ---- 事件（D3）----
+        # events_path 默认 None = **不碰磁盘**。这个默认是刻意的：一个 Core
+        # 被造出来不等于「现在该往 data/ 里写文件了」，跑测试的时候更不该。
+        # 真正跑起来的那条路（run()）显式把 config.EVENTS_PATH 递进来。
+        event_cfg = cfg.get("events") or {}
+        self.events_path = None if events_path is None else Path(events_path)
+        self.event_book = events.EventBook(
+            nodes=cfg["nodes"],
+            recover_after=cfg["recoverConsecutiveNormal"],
+            verify_after=event_cfg.get("verifyConsecutiveAbnormal", 3),
+            events_max=event_cfg.get("eventsMax", 200),
+            verify_max=event_cfg.get("eventsVerifyMax", 50),
+            path=self.events_path,
+        )
+        # 读历史事件的那句话**不在这里打**：__init__ 每造一个 Core 都会被调用
+        # （测试里几千次），在这儿 print 会把测试输出刷没。存下来，由 run() 打。
+        self.events_load_message = self.event_book.load()
 
     # -- 生命周期 ----------------------------------------------------------
 
@@ -539,10 +693,87 @@ class Core:
             return Verdict(False, reasons=(f"未知节点 {record['nodeId']!r}",))
 
         node.apply(record, now_wall, self.cfg["recoverConsecutiveNormal"])
+        # 事件状态机跟在后面吃**同一份**判据：它读 node.abnormal_count /
+        # consecutive_normal，不自己再数一遍。数两遍等于有两份真相，
+        # 改一处漏一处的时候，「事件说恢复了、core 说还在异常」这种事
+        # 不会有任何报错。
+        #
+        # 顺序也是定的：先 apply 再 observe。反过来的话这里读到的是**上一条**
+        # 报文留下的计数，事件会比数据慢一条 —— 而慢的正好是恢复/未恢复
+        # 那一条，也就是唯一要紧的那条。
+        reason = self._reason_for(record["nodeId"], now_wall)
+        for line in self.event_book.observe(node, record, reason=reason):
+            log("事件", line)
+
         # 每收一条就重算并（内容变了才）重发快照。放在这里而不是放到
         # 主循环里定时发：定时发的话，两次发布之间收到的那几条数据
         # 在快照上永远看不见，而它们可能正好是把重点换掉的那两条。
         self.publish_state(now_wall)
+        return verdict
+
+    def _reason_for(self, node_id: str, now_wall: float | None = None) -> str | None:
+        """这个节点**此刻**该被优先关注的理由（不在异常里就是 None）。
+
+        事件把这句话记进 priority_reasons —— 「业务大脑当初为什么盯上它」
+        得由业务大脑自己说，events.py 算不出这个（它手里没有整张排序表，
+        也不该有）。
+        """
+        for entry in self.ranked(now_wall):
+            if entry.node_id == node_id:
+                return entry.reason
+        return None
+
+    # -- 指令 ---------------------------------------------------------------
+
+    def handle_command(
+        self,
+        topic: Any,
+        payload_text: Any,
+        now_wall: float | None = None,
+    ) -> Verdict:
+        """收到一条前端指令：校验 -> 记成事件动作 -> 打一行日志。
+
+        **这个方法一行都不碰 self.nodes，也不调 publish_state。**
+        前端说「我在处理了」，能变的只有事件的状态（OPEN -> HANDLING）；
+        这个宿舍到底好没好，只能由后面收到的遥测数据说了算。
+
+        不重发快照，是因为快照里现在没有事件的任何字段 —— 指令进来之后
+        快照一个字节都不会变，发一份一模一样的出去只是徒增噪音。
+        （看板上把事件显示出来是下一步的事，那时候这里要跟着改。）
+        """
+        if now_wall is None:
+            now_wall = time.time()
+
+        verdict = validate_command(topic, payload_text, self.cfg["nodes"])
+
+        if verdict.ignored:
+            self.counters.retained_cleared += 1
+            return verdict
+
+        if not verdict.ok:
+            self.counters.command_rejected += 1
+            self.publish_reject(topic, verdict.reasons, payload_text)
+            return verdict
+
+        self.counters.commands += 1
+        record = verdict.record
+        assert record is not None  # ok=True 时一定有 record
+        node_id = record["nodeId"]
+
+        accepted, message = self.event_book.apply_action(
+            node_id,
+            action=record["action"],
+            # 指令没给 time 就由 core 补此刻 —— 「动作是什么时候发生的」
+            # 只能问收到它的人，不能问发它的人。
+            when=record.get("time") or format_time(now_wall),
+            source=record.get("source"),
+            reason=self._reason_for(node_id, now_wall),
+        )
+        who = record.get("source") or "来源未标"
+        log("指令", (
+            f"{node_id} {record['action']}（{who}）-> "
+            f"{'接受' if accepted else '没接受'}：{message}"
+        ))
         return verdict
 
     # -- 排 -----------------------------------------------------------------
@@ -630,6 +861,8 @@ class Core:
                 "rejected": self.counters.rejected,
                 "statusMismatch": self.counters.status_mismatch,
                 "retainedCleared": self.counters.retained_cleared,
+                "commands": self.counters.commands,
+                "commandRejected": self.counters.command_rejected,
             },
         }
 
@@ -735,7 +968,11 @@ class Core:
             log("连接", f"连不上 broker：{reason_code}")
             return
         client.subscribe(config.TOPIC_PATTERN, qos=self.cfg.get("_qos", config.QOS))
-        log("连接", f"已连接，订阅 {config.TOPIC_PATTERN}")
+        # 指令那条也一起订。漏订这一条的现象特别难查：core 一切正常、
+        # 遥测照收、快照照发，只是前端按了半天按钮，日志里一个字都没有 ——
+        # 看起来像前端坏了。所以两处订阅写在一起，加订阅的时候不会漏掉一条。
+        client.subscribe(config.CMD_TOPIC, qos=self.cfg.get("_qos", config.QOS))
+        log("连接", f"已连接，订阅 {config.TOPIC_PATTERN} 和 {config.CMD_TOPIC}")
         # 先把自己标成在线，再发第一份快照：顺序反过来的话，
         # 订阅方有可能先看到快照、再看到 core 离线（那还是上一条遗嘱）。
         self.publish(
@@ -757,6 +994,15 @@ class Core:
 
     def on_message(self, client: Any, userdata: Any, message: Any) -> None:
         text = message.payload.decode("utf-8", errors="replace")
+
+        # 按 topic 分派。判据是**精确相等**，不是 startswith：
+        # 通配符那条订阅和这条指令 topic 号段完全不同，将来加第二条指令 topic
+        # 的时候，「以 dormmate/v1/cmd 开头就算指令」会让 dormmate/v1/cmd-log
+        # 这种 topic 悄悄走进来处理。
+        if message.topic == config.CMD_TOPIC:
+            self._on_command_message(message, text)
+            return
+
         verdict = self.handle_message(message.topic, text)
 
         if verdict.ignored:
@@ -796,6 +1042,24 @@ class Core:
         # 每收一条就把「现在该看谁」打一行。这是 core 作为业务大脑的对外结论，
         # 不打印的话，日志里只有一堆原始数据，得自己心算才知道重点变了没有。
         self.report()
+
+    def _on_command_message(self, message: Any, text: str) -> None:
+        """指令那条路上的回调尾巴：打日志。
+
+        遥测那条路要 report()（重点可能换人了），这条路**不要**：
+        指令不改变任何节点的数据，重点不可能因为一条指令而换人。
+        （真要换，只能是新数据来了 —— 也就是遥测那条路的事。）
+        """
+        verdict = self.handle_command(message.topic, text)
+
+        if verdict.ignored:
+            log("保留", f"{message.topic} -> " + "；".join(verdict.reasons))
+            return
+
+        if not verdict.ok:
+            log("拒绝", f"{message.topic} -> " + "；".join(verdict.reasons))
+            return
+        # 成功那条已经在 handle_command 里打过「指令」一行了，这里不再重复。
 
     def report(self, now_wall: float | None = None) -> str:
         """把当前的重点打一行 —— **只在换人的时候**。
@@ -900,6 +1164,18 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         value = loop.get("timeoutSec")
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             problems.append("loop.timeoutSec 应该是正数")
+
+    # events 是 D3 新增的一块。这里**要求它必须在**，不是「不给就用默认值」：
+    # 默认值会让「配置里写错了键名」（eventsVerifyMax 写成 eventsVerify）变成
+    # 一个静默的行为差异 —— 文件里写着 20，跑起来按 50 走，谁也不报错。
+    event_cfg = cfg.get("events")
+    if not isinstance(event_cfg, dict):
+        problems.append("events 应该是一个对象（verifyConsecutiveAbnormal / eventsMax / eventsVerifyMax）")
+    else:
+        for key in ("verifyConsecutiveAbnormal", "eventsMax", "eventsVerifyMax"):
+            value = event_cfg.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                problems.append(f"events.{key} 应该是不小于 1 的整数")
 
     if problems:
         raise ConfigError(
@@ -1007,7 +1283,9 @@ def run(cfg: dict[str, Any], quiet: bool = False) -> int:
     # 加下划线是明说「这不是配置文件的字段，是运行期算出来递进来的」。
     cfg = dict(cfg, _qos=broker["qos"])
 
-    core = Core(cfg, quiet=quiet)
+    # events_path 显式递进来。Core 的默认是「不碰磁盘」——
+    # 「真正跑起来」这个决定是在这里下的，不能藏在构造函数里。
+    core = Core(cfg, quiet=quiet, events_path=config.EVENTS_PATH)
     client = build_client(cfg, broker)
     core.client = client
     client.on_connect = core.on_connect
@@ -1018,8 +1296,11 @@ def run(cfg: dict[str, Any], quiet: bool = False) -> int:
         f"连 {broker['host']}:{broker['port']}，"
         f"{len(cfg['nodes'])} 个节点 {'/'.join(cfg['nodes'])}，"
         f"离线超时 {cfg['offlineTimeoutSec']}s，"
-        f"连续 {cfg['recoverConsecutiveNormal']} 条正常算恢复"
+        f"连续 {cfg['recoverConsecutiveNormal']} 条正常算恢复，"
+        f"处理后再连续 {cfg['events']['verifyConsecutiveAbnormal']} 条异常算没治好"
     ))
+    # 读历史事件的结果在这里打 —— 起来的时候必须让人看见「这一叠是从哪儿接上的」。
+    log("事件", f"{core.events_path.name}：{core.events_load_message}")
     try:
         client.connect(broker["host"], broker["port"], keepalive=broker["keepalive"])
     except OSError as exc:
@@ -1083,9 +1364,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  严重度权重    {cfg['priority']['severity']}")
         print(f"  离线超时      {cfg['offlineTimeoutSec']} 秒")
         print(f"  恢复判据      连续 {cfg['recoverConsecutiveNormal']} 条正常")
+        print(f"  未恢复判据    处理后再连续 "
+              f"{cfg['events']['verifyConsecutiveAbnormal']} 条异常")
         print(f"  历史上限      {cfg['historyMax']} 条 / 节点")
+        print(f"  事件文件      {config.EVENTS_PATH}")
+        print(f"                最多留 {cfg['events']['eventsMax']} 条事件，"
+              f"每条最多 {cfg['events']['eventsVerifyMax']} 条验证数据")
         print(f"  broker        {broker['host']}:{broker['port']} qos={broker['qos']}")
         print(f"  topic         订阅 {config.TOPIC_PATTERN}")
+        print(f"                指令 {config.CMD_TOPIC}（retain=False）")
         print(f"                快照 {config.STATE_TOPIC}（retained）")
         print(f"                拒绝 {config.REJECT_TOPIC}（retain=False）")
         print(f"                在线 {config.CORE_STATUS_TOPIC}（retained + 遗嘱）")

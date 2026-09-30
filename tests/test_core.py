@@ -877,7 +877,8 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual([n["nodeId"] for n in snapshot["nodes"]], list(NODES))
         self.assertEqual(snapshot["counters"],
                          {"received": 1, "rejected": 0, "statusMismatch": 0,
-                          "retainedCleared": 0})
+                          "retainedCleared": 0, "commands": 0,
+                          "commandRejected": 0})
 
     def test_priority_block(self):
         c, client = make_core()
@@ -947,7 +948,10 @@ class TestLifespanAndLwt(unittest.TestCase):
     def test_on_connect_subscribes_and_announces_online(self):
         c, client = make_core()
         c.on_connect(client, None, {}, _ReasonCode(ok=True), None)
-        self.assertEqual(client.subscribed, [(config.TOPIC_PATTERN, config.QOS)])
+        # 两条订阅：遥测是指令之外的那条。指令漏订的现象是「前端按了没反应、
+        # 而 core 日志里一个字都没有」，所以它必须在这次断言里钉住。
+        self.assertEqual(client.subscribed, [(config.TOPIC_PATTERN, config.QOS),
+                                             (config.CMD_TOPIC, config.QOS)])
         body = json.loads(client.last_on(config.CORE_STATUS_TOPIC)["payload"])
         self.assertEqual(body["core"], "online")
         self.assertIs(client.last_on(config.CORE_STATUS_TOPIC)["retain"], True)

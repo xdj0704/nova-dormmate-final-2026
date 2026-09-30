@@ -28,3 +28,12 @@ broker/
 # 留在盘上照旧能跑，只是不进仓库。哪天真要收编，git add -f 就行。
 analysis_no_pandas.py
 dormmate (2).csv
+
+# data/events.json 是 core 跑起来之后自己写的事件记录（D3），不是源码。
+# 它每次跑都在变，而且里面全是「几点几分谁家偏热了」这种本机现场数据 ——
+# 入库的话每次演示完都会多一个「改动」，真正要提交的东西反而被淹掉。
+# 它的格式和生成规则在 events.py 里；要看内容就自己跑一遍 d3_event.json。
+# （data/ 下那几份 *_sim.csv / dormmate.csv 是**输入**，那些要提交。）
+data/events.json
+data/events.json.bad
+data/events.json.tmp

@@ -28,6 +28,7 @@ three.js —— 都各留了一份本地副本，默认走 CDN，现场没网时
 | 优先关注 | ✅ 已完成（Step 7-1，**栏本身已被 8-3 换成顶部那一行**） | 从三个节点里挑出最该先看的那个：先比连续异常时长，一样长比这段的消息条数，还一样按 nodeId 定序。挑法一个字没变（还是 `pickPriority`），只是顶上换成了 8-3 那一行；点它 = 点对应那张卡片，这个行为也留着 |
 | 处理动作 | ✅ 已完成（Step 7-2） | 详情区「开启风扇 / 通风」按钮。按下后节点记「处理中｜风扇已开启」，动作之后收到的数据决定转「已恢复」还是留在「处理中」。卡片、详情区、3D 风扇读的是同一份节点数据 |
 | 事件记录 + 导出 | ✅ 已完成（Step 7-4 第一部分） | 节点从正常进入异常时开一条事件，恢复时结案，**一行 = 一段连续异常**。九列：开始 / 节点 / 问题 / 优先关注 / 处理动作 / 恢复 / 结果。「导出事件 CSV」也是 CRLF + UTF-8 BOM。第二部分的 `analysis/analysis.py` 事件复盘时间线**还没做** |
+| **事件闭环（`events.py`）** | ✅ 已完成（Step D3） | 服务端的事件状态机：`OPEN`（待处理）→ 收到 `dormmate/v1/cmd` 上的 `handle` → `HANDLING`（处理中）→ 后面**连着 N 条正常**自动 `RECOVERED`（已恢复）/ 连着 M 条还是异常自动 `UNRESOLVED`（未恢复）。**恢复与否只看后来收到的报文**，处理指令只能把事件推到「处理中」—— 这条红线在代码里是结构上成立的（`handle_command` 拿不到节点状态，`= RECOVERED` 只有一条路）。事件带验证数据数组、处理前后的快照、优先关注理由，落盘在 `data/events.json`，core 重启会读回来并把没结案的按未恢复收尾 |
 | 当前总览 + 判断依据 | ✅ 已完成（Step 8-1，**页面部分已被 8-3 收编**） | 两句人话：B1 说「几个正常、几个需要关注、谁是当前重点」，B2 说「为什么是它、别人为什么不是」。每收到一条报文重算，句子里的节点名、状态、数字**一个都不写死**。Step 8-3 起看板顶部不再渲染这两句（改成「当前重点」一行），函数留在 `logic.js` 里给 `report.html` 那侧用 |
 | 四个出口各说各的 | ✅ 已完成（Step 8-3） | 看板顶部一行「当前重点」（谁 / 在不在处理 / 温度往哪走）、3D 场景只表达空间（哪个宿舍、哪个空间要关注）、「语音提醒」按钮念当前最重要的一句、`report.html` 记全过程。**「谁是重点」只有一份实现**（`pickPriority`），四个出口都从它出发 |
 | 今日摘要 | ✅ 已完成（Step 8-2） | Python 侧按节点找出**连续异常段**当成环境事件，串成一段人话（「dorm-b 14:10 起持续偏热 40 分钟后恢复；dorm-c 21:30 出现偏湿，目前仍未恢复」），并作为「今日摘要」区块进 `report/report.html`。数据来自模拟日数据 `data/day_sim.csv` |
@@ -56,18 +57,22 @@ nova-dormmate-final-2026/    # 仓库根
 ├── config.py                # Broker / 端口 / Topic / 节点 等统一配置
 ├── core.py                  # Phase2 业务大脑：校验 / 判状态 / 存历史 / 算优先 / 发快照
 ├── rules.py                 # Phase2 规则层：judge_status（转发）+ rank_priority（这一步在这实现）
+├── events.py                # Step D3 事件状态机：OPEN→HANDLING→RECOVERED/UNRESOLVED，读写 data/events.json
+│                            #   恢复与否只看 core 后来收到的报文，处理指令只把事件推到 HANDLING
 ├── core/
-│   └── config.json          # core 的全部可调参数（节点 / 阈值 / 权重 / 离线超时 / 恢复条数）
+│   └── config.json          # core 的全部可调参数（节点 / 阈值 / 权重 / 离线超时 / 恢复条数 / 事件门槛）
 ├── simulator/               # Phase1 数据源（是个包：老的 `from simulator import ...` 照旧能用）
 │   ├── __init__.py          # 惰性转发 simulator.simulator 的公开名字
 │   ├── simulator.py         # 三个节点的数据源：多节点 / cooling 降温 / json 剧本（帧可写死 time）
 │   ├── publish_one.py       # 手动发一条 + 故障注入（--topic / --raw / --clear）
+│   ├── send_cmd.py          # Step D3：以「前端的身份」发一条 dormmate/v1/cmd（--node / --action）
 │   ├── inject_faults.py     # Step D4：把坏报文一次发全，并当场核对 core 有没有真的拦住
 │   └── scenarios/
 │       ├── phase1_demo.json # 演示剧本：8 帧，四种状态各一次（含 dorm-b 降温那段）
 │       ├── d2_case1.json    # Phase2 场景一：时长决出，靠恢复交接（15 帧）
 │       ├── d2_case2.json    # Phase2 场景二：时长并列比条数，再被更长的接管（17 帧）
-│       └── d2_case3.json    # Phase2 场景三：时长条数全平，严重度决出（14 帧）
+│       ├── d2_case3.json    # Phase2 场景三：时长条数全平，严重度决出（14 帧）
+│       └── d3_event.json    # Step D3 剧本：两幕，dorm-b 处理→恢复、dorm-c 处理→未恢复（14 帧）
 ├── shared/
 │   └── rules.js             # 规则（JS 侧唯一实现，前端页面共用一份）
 ├── analysis/                # Step 2-2/2-3/2-4/2-5/8-2：分析层（是个包，所以有 __init__.py）
@@ -84,6 +89,7 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── day_sim.csv          # Step 8-2 的模拟日数据：一天、三个节点、864 行，固定种子生成
 │   ├── dorm-a_history_sim.csv  # Step 9-1：dorm-a 的 40 条「平时」历史（全正常，固定种子生成）
 │   └── new_samples.csv      # Step 9-1：6 条待判断的新数据（25/60、26/62、29/72、31/60、25/80、17/60）
+│                            # （events.json 是 core 自己写的事件记录，运行时产物，不入库 —— 见 .gitignore）
 ├── report/                  # Step 2-4/2-5 的产物（注意是单数，见下面说明）
 │   ├── trend.png            # 温湿度趋势折线图（analysis/analysis.py 的产物）
 │   ├── report.html          # HTML 报告，里面的 <img src="trend.png"> 是相对路径
@@ -103,6 +109,7 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── test_rules_priority.py # Phase2：rules.py 的四步排序 + 理由措辞 + 「不许写死节点名」的静态检查（29 条）
 │   ├── test_scenarios.py    # Phase2：把 d2_case1/2/3 逐帧喂给 core，断言「优先关注」的换人轨迹（15 条）
 │   ├── test_inject_faults.py # Step D4：故障清单逐条对 core 的判据，外加两个前端对未知节点的差异（37 条，不连 broker）
+│   ├── test_events.py       # Step D3：事件状态机 / 落盘读取 / 指令校验 / D3 剧本重放 / 四条红线的静态检查（145 条，不连 broker）
 │   ├── fixtures/
 │   │   └── priority_cases.json # Python 与 Node 共读的期望表（排序四步 + 时长措辞）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
@@ -221,6 +228,7 @@ Python 侧现在有两个 `judge_status`，但只有一份实现：`analysis/rul
 | `dormmate/v1/nodes/<nodeId>/telemetry` | 发布端 | 是 | 一条读数 |
 | `dormmate/v1/nodes/+/telemetry` | —— | —— | 订阅用（前后端都用这一条） |
 | `dormmate/v1/state` | core | 是 | 全局状态快照（Phase2：谁该先看、每个节点现在什么样） |
+| `dormmate/v1/cmd` | 前端 | **否** | 指令（Step D3：`{"nodeId":"dorm-b","action":"handle",…}`）。**不 retained** —— 指令是一次性的，留在 broker 上会让下一次起 core 时凭空把某条事件推进「处理中」 |
 | `dormmate/v1/log/reject` | core | **否** | 非法报文（清 retained 的那条空报文**不算** —— 它根本不是报文）；坏消息不许留在 broker 上，否则每开一个看板都先看到它 |
 | `dormmate/v1/core/status` | core | 是 | core 在线/离线（遗嘱 LWT：core 一掉线，broker 立刻替它发 `offline`） |
 
@@ -425,7 +433,7 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 ## 跑测试
 
 ```bash
-py -3.14 -m unittest discover -s tests -t . -v   # ①②③⑪⑫⑬⑭⑮⑯⑰⑱，共 752 条
+py -3.14 -m unittest discover -s tests -t . -v   # ①②③⑪⑫⑬⑭⑮⑯⑰⑱⑲，共 897 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
 node tests/scene3d.test.js                        # ⑧ 3D 场景，224 条
 node tests/scene3d-page.test.js                   # ⑨ 3D 页面的 MQTT 接线，65 条
@@ -435,8 +443,8 @@ node tests/logic.test.js                          # ⑩ 优先关注 + 处理动
 node tests/script.test.js                         # ⑤ 页面 JS 侧，150 条
 ```
 
-`unittest discover` 会把 `tests/` 下十一个 `test_*.py` 一起收进来
-（23 + 206 + 54 + 30 + 123 + 124 + 22 + 89 + 29 + 15 + 37 = 752 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib，
+`unittest discover` 会把 `tests/` 下十二个 `test_*.py` 一起收进来
+（23 + 206 + 54 + 30 + 123 + 124 + 22 + 89 + 29 + 15 + 37 + 145 = 897 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib，
 ⑫ 那 124 条还要 scikit-learn（没装的话，要真跑模型的那几类会被整类 `skipUnless` 跳过，
 纯函数那批照样跑 —— 输出里是 `s` 不是失败）。
 `node` 那七条不需要任何依赖，也不用起服务器。
@@ -458,6 +466,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，150 条
 | ⑯ 29 条 | Phase2 的 `rules.py`。`judge_status` **就是** `status_rules.compute_status` 那个对象本身（`assertIs`，转发写成「重抄一遍」这里就红）；`rank_priority` 的四步：时长决出、时长打平比条数、条数也平比严重度、全平按字典序，**只有进到某一步的节点才参与那一步的比较**（时长不同的那些根本不该出现在比条数的名单里）、传进来的东西一个都不改、空输入返回空表、`format_duration` 的边界（59.9 秒说「不到 1 分钟」、非数 / 负数 / NaN / 无穷一律「不到 1 分钟」）、理由的两半（第一名说凭什么赢、其余说输在哪一步，都不许含糊成「它更严重」）；**权重可覆盖**（改了权重赢家和措辞一起变）；以及那条静态检查：把注释和**文档字符串**用 `ast` + `tokenize` 剥掉之后，源码里不许出现任何节点名 —— 但**其他字符串字面量要留着**（写死节点名最典型的形态就是 `if node_id == "dorm-a"`，一起删掉这个检查就永远绿了），所以配了一条元测试：只有注释的代码必须通过、`node.node_id == "dorm-a"` 必须被抓出来 |
 | ⑰ 15 条 | Phase2 的三套剧本（`simulator/scenarios/d2_case*.json`）。不是给人读的演示稿，是**能被断言**的：每一帧逐帧喂给 core，记下每一步的结论，跟预期的**换人轨迹**对。只记「换人」那几步（同一个人连续领先不重复记），因为「没有乱跳」也是结论的一部分。`d2_case1`：空 → dorm-b → dorm-c → 空（时长决出、靠恢复交接），并断言 20:07 / 20:08 那两条正常**没有**触发换人；`d2_case2`：dorm-a → dorm-b → dorm-a → dorm-b → dorm-a → 空，而且每一步的理由必须是真的那一步（第 2 步赢的那行要提「异常次数最多」，第 1 步赢的那几行才提「持续时间最长」）；`d2_case3`：dorm-a → dorm-b → dorm-a → 空，第 2 步赢的那行要提「偏湿比偏冷更要紧」，第一条理由必须是「唯一的异常节点」而不是「持续时间最长」（只有一个异常节点时，比时长那一步根本没发生过）。另有四条件对所有剧本都成立：三个节点都用上、**同一个节点的时间必须往前走**（core 用报文时间算时长，倒着来的时间会算出负数被夹到 0，「持续了多久」就成了空话而且不报错）、**至少换两次人**（只换一次证不了「跟着数据自己变」）、**结尾必须是三个都正常**（收尾状态要看得见，方便截图） |
 | ⑱ 37 条 | Step D4 的故障注入清单（`simulator/inject_faults.py` + `tests/test_inject_faults.py`）。**不连 broker** —— 连真 broker 的那种自检是脚本自己的 `--verify`。这一批测的是**清单站不站得住**：每一条逐条喂给 `core.validate_message`，结论必须和清单上写的那个 `outcome` 对上（`reject` → `ok is False` 且 `ignored is False`；`pass` → `ok is True`；`silent` → `ignored is True` 且发出去的就是空串；`unrouted` → `ok is False` 且理由里有「topic 形状不对」）。**理由关键词也钉住**：第 3 条（topic 和报文对不上）如果是因为 JSON 写坏了才被拒，光数条数照样绿，而演示时那句理由是当着人念出来的。清单本身的性质：编号唯一且递增、每条都写了期望、**只有 `reject` 才带理由关键词**、有一条确定能通过的当对照（全都能拦住也可能是「什么都拦」）、每条参数 `publish_one` 都吃得下、**只有清 retained 那条带 retain**（故障消息被 retained 的话，之后每开一次看板都先看到它）。逐条验它宣称的性质：第 1 条真的 `json.loads` 就报、第 2 条是合法 JSON 只是缺字段、第 3 条 topic 里的节点和报文里的确实不一样**而报文本身是完好的**（所以看板那边只警告不丢弃）、第 4 条的节点确实不在 `config.NODE_IDS` 里、**第 5 条 99℃/200% 被如实收下且判成偏热**（core 里没有任何范围校验）、第 6 条 `[1,2,3]` 是合法 JSON 但不是对象、第 7 条的段数和订阅 pattern 对不上**且 pattern 里没有 `#`**（有 `#` 的话段数规则就不成立了）。两个前端对「未知节点」的差异拿源码钉住：`dashboard/dashboard.js` 有节点名单也有「未知节点」那句话、`web/script.js` 两样都没有 —— README 上写着这是设计如此，哪天有人给 `web/` 也加了名单这一条会红。命令行的几条路（`--list` / `--dry-run` **压根不建客户端**、`--only 99` 返回 2、连不上返回 3 并告诉人怎么起 broker，都是拿一个「一被调用就报错」的假 Client 顶着的）。最后是一整条 `run()`：拿假 Client **顺便扮一下 core**（订上 reject 之后，`publish` 时按 topic + payload 回一条 reject），于是「拒了但拒错了原因也要红」「core 没起时不能喊拦住」「放行的不该收到 reject」「不投递那条说的是收不到」「清 retained 那条说的是 `[保留]` 且确实带了 retain」这些都能在不起 broker 的情况下跑；另有一组直接测比对函数：**比的是 topic + payload 全文，不是「有几条 reject」** —— 连着跑九条，只数条数的话「第 2 条没被拒、第 3 条被拒了两次」总数照样对得上 |
+| ⑲ 145 条 | Step D3 的事件状态机（`events.py` + `core.py` 的那几处接线 + `simulator/send_cmd.py` + `d3_event.json`）。**也不连 broker** —— 状态机是纯的，喂数据就行。**开案**：节点第一次异常开一条 `OPEN`、`start_time` 取的是**报文里的 `time`** 不是墙上时间（拿墙上时间的话，剧本里 20:00 那段会被记成今天下午）、同一段里再来异常不另开（`abnormal_count` 不是 1 就一定还在原来那段里）、恢复正常这条事件还挂着（要等连续 N 条正常，不是一条）、开案快照里 `durationText` 是 `null`（起点就是它自己，写「0 分钟」是在说一件没发生过的事）。**处理**：`handle` 把 `OPEN` 推成 `HANDLING` 并在 `actions` 里记一笔、`verify_from` 记的是「从第几条验证数据之后开始算」、在已经 `HANDLING` 的事件上再点一次只多记一笔动作而**不动 `verify_from`**（动了的话验证窗口会被第二次点击推走，前面收的正常数据白算）。**恢复**：要连续 N 条正常（N 取自 `core/config.json`）、恢复那一刻写的是最后那条正常数据的 `time`、`recovered_at` 与 `result` 一起填上、结案快照的 `durationText` 是「起点到这条」的时长。**未恢复**：处理之后连着 N 条还是异常就结案成 `UNRESOLVED`、`recovered_at` 保持 `null`（**不是**写一个空串，看板那边判的是 `null`）、`result` 里说的是最后那条是什么状态。**判据不能被存档数拖累**：`events_verify_max=2` 而门槛是 3 时照样判得出 `UNRESOLVED`（数存档里最后几条的话，第 3 条早就被挤掉了，而 `verify_dropped` 还是 0 —— 这条是真跑出来的，见下）、来一条正常就把这个计数清零（不清零的话「异常 正常 异常 异常」会被算成连着三条异常）。**落盘**：写 `<名>.tmp` 再 `os.replace`、`newline="\n"`、`load()` 把读不动的文件改名成 `.bad` 而不是覆盖掉、坏的那几条跳过并报数、**启动时读到还没结案的事件一律按 `UNRESOLVED` 收尾并在 `result` 里说明是重启造成的**（不然它会永远挂在「处理中」，重启一次变一次）、**验证数据在结案之前就得到文件里**（不是只有开案/结案那两下才写 —— 一条迟迟结不了案的事件，中间收的验证数据要是只在内存里，core 一被杀就全没了，而 `verify` 正是「处理之后好了几条」的唯一凭证；这条是拿真文件读回来断言的，把 `observe()` 末尾那次节流写删掉就红）。**四条红线的静态检查**（拿 `ast` 抠出函数体、剥掉函数自己的 docstring 再查文本）：`apply_action` 里对 `event.state` 只有一处赋值而且是 `= HANDLING`、`event.state = RECOVERED` 这个字符串**只出现在 `_close_recovered` 里**而 `_close_recovered` 只被 `observe` 调、`Core.handle_command` 的函数体里**一次都不出现 `self.nodes`**。**指令校验**：十几种坏指令（topic 不对 / 不是 JSON / 缺 `nodeId` / 缺 `action` / 未知 action / 未知节点 / `time` 写坏）各来一遍，理由清一色带「指令」两个字（不然和报文那条路的拒收理由糊在一起）；`action` **不做大小写归一**（`Handle` 不认，理由里明说了要小写 —— 悄悄认下的话，前端写错了永远没人发现）。**接线**：收到指令只多 `commands` 计数、`core` 收到指令**不发快照**（这一轮事件还没进快照，发了等于说「什么都没变」）、`on_connect` 订的是两个 topic、`on_message` 拿**全等**分路而不是 `startswith`（`dormmate/v1/cmd/foo` 这种长得像的不该被当成指令）。**配置**：`core/config.json` 少了 `events` 那一块时拒绝启动、三个数都得是 ≥1 的整数。**剧本重放**：`d3_event.json` 那 14 帧（3 偏热 → handle → 3 正常 → 3 偏湿 → handle → 3 偏湿）离线喂给一个真 `Core`，断言第一幕 `RECOVERED`、第二幕 `UNRESOLVED`，并且**两幕分别属于哪 7 帧**（`[:7]` 全是 dorm-b、`[7:]` 全是 dorm-c）。`send_cmd.py` 那几条：默认不 retain、`--clear` 必须带 retain、`--raw` 原样发、参数错了返回 2 且一条都不发 |
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
 | ⑤ 150 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错；Step 3-3 的语音播报：一个节点都没收到时念「还没有收到任何节点的数据」而不是「都正常」、按 nodeId 排序（不是按收到的先后）、小数照 `fmt` 的格式念（25.5 不写成 25.50）、**念的是报文里的 `status` 而不是页面自己重算的**（故意把 31℃/78% 那条写成偏湿，规则上它该是偏热 —— 前端重算的话这一条就红）、说「朗读」走完整条链路真的调了 `speak()`、念的就是当前状态那句话、`lang` 是 `zh-CN`、**先 `cancel()` 再 `speak()`**、页面上显示的就是要念的那一句、utterance 留着一个引用（被 GC 掉的话 Chrome 念到一半会停）、第二个节点收到数据之后下一句立刻带上它（不缓存上一句）、浏览器不支持时返回 `{ok:false}` 而不抛异常、不支持时照样把要念的内容写在页面上且压根没碰 `speechSynthesis`、**只有 `speechSynthesis` 没有 `SpeechSynthesisUtterance` 也算不支持**（少查一个就是一条未捕获的 TypeError）、`onerror` 把原始错误码覆盖到页面上（不留一句「正在朗读」的假话）、连错误码都没有时写 `unknown` 不写 `undefined` |
 | ⑥ 48 条 | `miniapp/utils/rules.js` 与 `shared/rules.js` 的交叉比对：两份实现分别放进各自的 vm 跑，在 8211 组温湿度（温度 -20~60 步长 0.5 × 湿度 0~100 步长 2）上逐对比 `judgeStatus` 与 `getAdvice`，结果必须完全一致；另有一条守卫确认这个网格真的覆盖到了四种状态，否则「全都一样」可能只是压根没测到 |
@@ -3859,6 +3868,176 @@ const ML_REAL = JSON.parse(fs.readFileSync(path.join(ROOT, 'report', 'ml_result.
 空格时也算没给」，把 `trim()` 那一半也钉住。补完当场抓住，`logic.test.js`
 336 → **337 条**。上面那张表里「补测试后 ✓」就是补完之后重跑的结果。
 
+## Step D3：事件闭环（处理 → 验证 → 恢复）
+
+D3 要的是一条**闭环**：节点异常自动开一条事件，人在前端点一下「开始处理」，
+然后**由后续收到的数据自己判定到底好没好**。
+
+```
+   异常数据来               收到 handle 指令            后面连着 N 条正常
+ ─────────────────► OPEN ──────────────────────► HANDLING ──────────────► RECOVERED
+                    │                             │
+                    │                             └── 后面连着 N 条还是异常 ──► UNRESOLVED
+                    └──（这条事件已经开着，段里的后续异常不再另开）
+```
+
+状态机在 `events.py`，core 只负责叫它。两个数字（`recoverConsecutiveNormal`
+和 `verifyConsecutiveAbnormal`）都在 `core/config.json` 的 `events` 块里，
+**事件层不自己定门槛**。
+
+### 四条红线落在哪一行
+
+红线不能靠「记得别这么写」，得靠**结构上做不到**。所以每一条都在源码里
+有个具体的位置，`tests/test_events.py` 的 `TestRedLine` 拿 `ast` 把这些位置
+钉住了：
+
+| 红线 | 落在哪 | 测试怎么盯 |
+|---|---|---|
+| 处理指令不能把事件改成 `RECOVERED` | `EventBook.apply_action()` 里对 `event.state` 只有一处赋值，而且是 `= HANDLING` | 抠出函数体，把所有对 `event.state` 的赋值列出来，必须正好是 `['event.state = HANDLING']` |
+| 恢复只能由后来的数据判定 | `event.state = RECOVERED` 这个字符串**只出现在 `_close_recovered()` 里** | 全文件搜这个字符串：除 `_close_recovered` 外一处都不许有 |
+| `_close_recovered` 不是谁都能叫 | 它只被 `observe()` 调用 | 搜 `_close_recovered(` 的调用点，必须只有 `observe` 那一处 |
+| core 不越权改节点状态 | `Core.handle_command()` 里**一行都不碰 `self.nodes`** | 抠出 `handle_command` 的函数体，`self.nodes` 一次都不许出现 |
+
+第四条是最要紧的：`handle_command` 拿不到 `NodeState`，就算想在指令里顺手把
+节点标成「正常」也无从下手。**「处理中」不是节点的一个状态，是事件的一个状态。**
+
+> 写这几条检查时踩了个坑：`apply_action` 的 docstring 里正好有一句
+> 「这个方法一行都不碰 `self.nodes`」，于是这条检查**先把自己的说明文字抓了**。
+> 假警报一次就够让人把整个检查注释掉，所以 `_function_body` 会先把函数自己的
+> docstring 剥掉再查文本。
+
+### 两处容易想岔的地方
+
+**判据不能数存档里的条数。** 一开始 `UNRESOLVED` 是这么判的：看 `verify`
+数组最后 3 条是不是都异常。这默认了「`eventsVerifyMax` ≥ 门槛」，而这两个数
+是分开配的 —— 配置成 `eventsVerifyMax=2` / `verifyConsecutiveAbnormal=3`
+时，第 3 条异常早就被挤掉了，于是怎么喂都判不出未恢复，`verify_dropped`
+还一直是 0（连「丢过东西」这个线索都没有）。现在事件上挂了个运行期的
+`pending_abnormal` 计数，**存档留多少条不参与判定**。
+`test_pending_count_survives_the_cap` 就是拿 `verify_max=2, verify_after=3`
+钉的，它当场把这个洞抓了出来。
+
+**`verify_from` 记的是下标，不是条数。** 它是「从第几条验证数据之后开始算」，
+在已经 `HANDLING` 的事件上再点一次 `handle`，只多记一笔 `actions`，
+**不动 `verify_from`** —— 动了的话第二次点击会把验证窗口往后推，前面已经收到的
+那些正常数据就白算了。
+
+### 持久化：`data/events.json`
+
+core 每有变化就写一次，写完 `os.replace` 原子换上去。开案 / 转处理中 / 结案这
+三个时刻是**立刻**写（状态迁移丢了就说不清发生了什么）；验证数据一条一条地
+**攒着**写，同一秒内只落一次盘 —— 一条进了「处理中」却迟迟结不了案的事件
+（一直治不好那种，要等第 M 条异常才结案），中途收到的验证数据也都在文件里，
+core 被杀掉也不会把「处理之后收了几条、都是什么」丢掉。
+
+启动时 `load()` 读回来：
+
+- 文件读不动 → 改名成 `events.json.bad` 再继续（**不覆盖**，那份是查问题的线索）
+- 里面某几条坏了 → 跳过并报数，不因为一条坏的就丢掉整本
+- **读到还没结案的事件，一律按 `UNRESOLVED` 收尾**，`result` 里写明是重启造成的
+
+最后这条是必须的：不然它会在文件里永远挂着「处理中」，重启一次变一次，
+而实际上谁也不知道那段时间里好没好。
+
+看这份文件时按 `summary` 看全局，按 `events` 看单条。一条事件里值钱的是四样：
+`verify`（处理之后收到的那些数据，一条不落地记着）、`verify_from`、
+`snapshots`（开案 / 处理 / 结案三个时刻的现场）、`result`（最后那句人话）。
+
+`data/events.json` **不入库**（`data/` 下其他 CSV 是输入，这个是产物）。
+
+### 复现操作
+
+```bash
+# ① 清掉 retained：上一次跑剩下的最后一条读数会在 core 一订阅上就送过去，
+#    看起来就像「凭空多了一段异常」，而且时间是上一次的墙上时间。
+py -3.14 -m simulator.publish_one --node dorm-a --clear
+py -3.14 -m simulator.publish_one --node dorm-b --clear
+py -3.14 -m simulator.publish_one --node dorm-c --clear
+rm -f data/events.json
+
+# ② 起 core（另开一个终端）—— 它会订 telemetry 和 cmd 两个 topic
+py -3.14 core.py
+
+# ③ 跑剧本（再开一个终端）：两幕，dorm-b 处理→恢复、dorm-c 处理→未恢复
+py -3.14 -m simulator.simulator --script simulator/scenarios/d3_event.json
+```
+
+只想手动演一幕也行 —— 剧本里那两个 `handle` 帧换成这条命令就是「前端按下了按钮」：
+
+```bash
+py -3.14 -m simulator.send_cmd --node dorm-b --action handle
+py -3.14 -m simulator.send_cmd --node dorm-b --action handle --dry-run   # 只看要发什么
+```
+
+每一行都带一个**墙上时间**的前缀（就是 `core.py` 打这条日志的当下，不是报文里的
+`time` —— 两个时间不是一回事，看的时候别混）：
+
+```
+[2026-09-30 13:41:02] [事件] 开事件 dorm-b-20260922-200000（连续偏热），待处理
+    ← 20:01、20:02 那两条偏热一声不响：事件已经开着，段里的后续异常不另开
+[2026-09-30 13:41:05] [指令] dorm-b handle（script）-> 接受：dorm-b-20260922-200000
+                       转「处理中」，等后续 3 条异常 / 3 条正常来判
+[2026-09-30 13:41:06] [事件] dorm-b-20260922-200000 验证中：这条 正常，再连续 2 条正常就判恢复
+[2026-09-30 13:41:07] [事件] dorm-b-20260922-200000 验证中：这条 正常，再连续 1 条正常就判恢复
+[2026-09-30 13:41:08] [事件] dorm-b-20260922-200000 -> RECOVERED：处理后连续 3 条正常，已恢复（验证数据 3 条）
+[2026-09-30 13:41:09] [事件] 开事件 dorm-c-20260922-200600（连续偏湿），待处理
+[2026-09-30 13:41:12] [指令] dorm-c handle（script）-> 接受：dorm-c-20260922-200600
+                       转「处理中」，等后续 3 条异常 / 3 条正常来判
+[2026-09-30 13:41:13] [事件] dorm-c-20260922-200600 验证中：处理后连续第 1/3 条异常（偏湿）
+[2026-09-30 13:41:14] [事件] dorm-c-20260922-200600 验证中：处理后连续第 2/3 条异常（偏湿）
+[2026-09-30 13:41:15] [事件] dorm-c-20260922-200600 -> UNRESOLVED：处理后连续 3 条依旧异常（最后一条 偏湿），事件未恢复
+```
+
+`data/events.json` 里就是一条 `RECOVERED`、一条 `UNRESOLVED`。
+
+`RECOVERED` / `UNRESOLVED` 是 `event.state` 的原值，直接印出来的 ——
+和文件里那份对得上，截图时不用在两套叫法之间换算。日志的 kind 这一轮只多了
+`[事件]` 和 `[指令]` 两种，想筛出 D3 有关的就 `grep '\\(\\[事件\\]\\|\\[指令\\]\\)'`。
+
+### 自测清单
+
+1. 清完 retained、删掉 `data/events.json`，跑剧本 —— core 日志里**第一条事件
+   的开案时间是 `20:00:00`**（剧本里的时间），不是今天的墙上时间。
+   是墙上时间的话说明 retained 没清干净。
+2. 剧本跑完，`data/events.json` 的 `summary` 是
+   `{"OPEN": 0, "HANDLING": 0, "RECOVERED": 1, "UNRESOLVED": 1, "total": 2}`。
+3. dorm-b 那条：`state` 是 `RECOVERED`、`recovered_at` 是 `20:05:00`、
+   `verify` 正好 3 条且全是正常、`snapshots` 三条（开案 / 处理 / 结案）。
+4. dorm-c 那条：`state` 是 `UNRESOLVED`、`recovered_at` 是 `null`（**不是空串**）、
+   `verify` 3 条全是偏湿。
+5. 单独按一次 `send_cmd --node dorm-b --action handle`（dorm-b 现在正常）：
+   日志里**没有**「未恢复」也没有「已恢复」—— 没有开着的异常段时，指令不该
+   凭空造出一条事件。
+6. 把 `core/config.json` 里 `events` 整块删掉再起 core：**拒绝启动**并说清是
+   哪一块缺了，不是带着默认值悄悄跑起来。
+7. `py -3.14 -m unittest tests.test_events` → 145 条通过。
+
+### Evidence 证据建议
+
+| 证据 | 怎么留 |
+|---|---|
+| 状态迁移图 | 剧本跑完那一段 core 日志（`[事件]` 那七行）整段截图，**带上时间戳** |
+| 恢复是数据判的，不是按钮判的 | **同一个 `event_id`** 的三张快照：开案（`OPEN`）→ 收到 handle（`HANDLING`）→ 后面第三条正常（`RECOVERED`）。同一个 id 是关键，说明是**一条**事件走完的，不是三条各走一步 |
+| 未恢复那一幕 | dorm-c 那条的 `verify` 三条全是偏湿 + `result` 那句话一起截 |
+| 落盘 | `data/events.json` 全文件截图，`summary` 和两条事件的 `state` 都要在框里 |
+| 前端没资格改状态 | `py -3.14 -m simulator.send_cmd --node dorm-b --action handle` 发完之后，`data/events.json` 里那条事件**还是 `HANDLING`**（没有 `recovered_at`）—— 这条最能证明红线 |
+| 重启不留悬挂 | core 跑完一幕、**在处理中**按 Ctrl-C 掉，再起一次 core：日志里那条事件按 `UNRESOLVED` 收尾，`result` 里写明是重启 |
+
+### 这一步对测试桩的改动
+
+`tests/test_core.py` 里两条断言跟着变了，都是**故意的**：
+
+- `test_snapshot_shape`：快照的 `counters` 多了 `commands` / `commandRejected`
+  两个计数。钉死整份字典（而不是只查某个键在不在），是为了让「悄悄往快照里加
+  字段」这种改动**必须显式改一次测试** —— 前端 `dashboard.js` 是照着这组键名
+  取的，无声加字段等于无声改协议。
+- `test_on_connect_subscribes_and_announces_online`：现在订的是
+  `[(TOPIC_PATTERN, QOS), (CMD_TOPIC, QOS)]` **两个** topic。只查第一个的话，
+  哪天有人把第二行删了，指令这条路会静悄悄地断掉而测试全绿。
+
+`tests/test_core.py` 用的是假客户端，走的是真的 `on_message` 那条路，所以
+`on_message` 里那个「全等分路」的判断被真跑到了。
+
 ## Step D4：故障注入
 
 D4 要的不是「能发一条坏数据」，是**证明坏数据真的被拦住了、并且是因为对的原因**。
@@ -3975,6 +4154,11 @@ core 的订阅之外）」，不会让人去找一条根本不存在的 reject�
 | **core 不做范围校验**，99℃ / 200% 会被如实收下 | 九道判据管的是「这是不是我们要的那种数据」（形状 / 类型 / 来路），不管这个数在物理上合不合理 —— 所以 D4 第 5 条发出去之后，看板上 `dorm-c` 那张卡真的会显示 99℃ / 200% / 偏热，reject 上一条都没有。要拦得先定下来「合理范围」是哪个范围、超了算拒收还是打标（那就不该叫拒收），是另一套需求。手动录入那一侧有 -20~60℃ / 0~100% 的校验，因为那是人手打的字，打字会打错 |
 | 恢复判据两边还不一样：`core.py` 要连续 3 条正常，`dashboard/logic.js` 一条正常就结束 | **有意留着**，不是漏改。Phase2 先把「唯一业务大脑」立起来，前端这一轮还没改成读 core 那份 retained 快照（`dormmate/v1/state`）。等前端读了快照，状态机就只有一份，这个分歧自然消失。在那之前，同一个宿舍在同一时刻可能有两个说法 —— 所以演示时以 core 的终端和 `dormmate/v1/state` 为准，看板那一栏暂时只当个参考 |
 | 前端还没读 `dormmate/v1/state` | 同上：Phase2 先把「谁说了算」定下来（core 发布、前端渲染），前端接线是下一步。现在 core 发了没人读，快照的用处是用 MQTTX 订阅来核对结论 |
+| 事件（D3）现在只落盘 + 打日志，**快照里还没有它** | `dormmate/v1/state` 的字段是 Phase2 定下的协议（`tests/test_core.py` 的 `test_snapshot_shape` 是整份字典钉死的，加字段必须显式改一次测试），往里塞一截事件数据等于改协议；而 D3 这一轮的活儿是状态机和闭环本身。要看事件就开 `data/events.json`，或者看 core 终端那几个 `[事件]`。看板显示事件列表是下一步 |
+| 「处理中」是**事件**的状态，不是节点的状态 | 节点那边只有「这一段现在是不是异常」，从来没有多过「处理中」这一档。前端按一下按钮，core 记的是「这条事件开始验证了」，而 dorm-b 那个节点的 `status` 该是偏热还是偏热、该不该参与优先排序也不受影响。两套状态混成一套的话，「处理中」会被当成一种环境状况去和「偏湿」比严重度 —— 那是两个维度的事 |
+| 点多少次「开始处理」都不改结局 | 连点 N 次只是多记 N 笔动作（`accepted: false`，note 里写明），**验证窗口一次都不重置**。重置的话，连点几下就能把「连续 M 条依旧异常」那条判据一直往后推，事件永远判不出未恢复，验证环节就等于白设了 |
+| 事件里的 `verify` 和 `snapshots` 都有上限，满了丢**最老**的 | `eventsVerifyMax` / `eventsMax` 管的是**存档留多少条**，不参与判定 —— 判定看的是运行期的计数（原因见 Step D3 那节「判据不能数存档里的条数」）。开案那条快照永远留着：丢了它就看不出这件事从头到尾持续了多久 |
+| 「已恢复 / 未恢复」两个词在日志和 JSON 里都是英文原值 | `RECOVERED` / `UNRESOLVED` 直接照 `event.state` 印，不另起一套中文说法。对着一份文件和一个终端截图时不用在两套叫法之间换算 |
 | core 一启动就会收到 retained 的最后一条读数，把它当成当前数据 | `RETAIN=True` 是为了「后开的看板立刻看到数值」，代价是 core 也照收 —— 它在协议上分不出这条是三小时前的还是刚发的（`time` 字段可以看出来，但 core 没有拿它去做新鲜度判断，因为剧本里的时间**故意**是写死的过去时刻，一查就会把整个演示机制否掉）。所以跑剧本前要先清 retained，见 Phase2 那一节的步骤 |
 | 清 retained **不会**清掉 core 的内存 | `--clear` 发的那条空报文只记一笔（`counters.retainedCleared`），**不动节点**：已经在跑着的 core 里，那个节点已有的历史、开着的那一段、离线计时都照旧。它是「broker 存的那份删了」，跟这个宿舍现在的状况没有关系 —— 拿它去结算一段，等于凭一条和读数无关的消息改业务结论。所以复现步骤写的是「清完 retained **再起** core」：要的是新起的那个进程订阅时读不到旧值，而不是让跑着的那个忘掉什么 |
 | core 没有乱序保护，和前端那条限制是同一个 | `latest` 一律被最后收到的那条顶掉。剧本里同一个节点的时间必须是递增的（`tests/test_scenarios.py` 有一条守着），因为倒着来的时间会让「持续了多久」算出负数被夹到 0 —— 不报错，只是数字变得没意义 |
@@ -4050,6 +4234,12 @@ core 的订阅之外）」，不会让人去找一条根本不存在的 reject�
 | 日志里没有 `[重点]` 这一行 | 那是**只在换人时**打印的。同一个宿舍一直领先就不重复打 —— 时长在涨不是新闻，换人才是。想看当前的结论就订阅 `dormmate/v1/state` 看 `priority` 那一段 |
 | 优先关注和看板顶部那一行对不上 | 预期之内：恢复判据两边还不一样（core 要连续 3 条正常，看板一条就结束），且看板还没读 core 的快照。演示时以 core 的终端和 `dormmate/v1/state` 为准。见「已知限制」 |
 | `dormmate/v1/log/reject` 上出现消息 | 有报文没通过校验，`reasons` 里写着是哪一条判据（比如 topic 是 dorm-a、报文里写 dorm-b）。发布端那边看 `--topic` 和 `--node` 是不是给岔了。**清 retained 的空报文不在这里**：它打的是 `[保留]`、进 `counters.retainedCleared` —— 空报文不是坏报文，别去追一条本来就没问题的警报 |
+| 剧本跑完 `data/events.json` 还是空的（或根本没这个文件） | 两种可能：① 剧本里的节点名和 `core/config.json` 里的对不上 —— core 会拒收未知节点，终端上是 `[拒绝]` 不是 `[事件]`；② 一个异常段都没凑起来 —— 事件是**节点真的进了异常段**才开的，`--dry-run` 那几条不算数。先看 core 终端有没有 `[事件]` 那一行。文件不在这件事本身也算线索：一个事件都没有时 core 也会写一份空的出来 |
+| 事件开出来了，但 `start_time` 是今天的墙上时间、不是剧本里写的 | retained 没清干净：core 一订阅上就收到上一次跑剩下的那条读数，于是**拿当下的时间**开了一条事件。跑剧本前先 `publish_one --clear` 三个节点，再删掉 `data/events.json`，然后**再起** core（顺序见 Step D3 那节） |
+| 发了 `handle`，事件却还停在 `OPEN` | 先看 core 有没有 `[指令]` 那一行。没有的话是消息没到：查 topic 是不是正好 `dormmate/v1/cmd`（不是 `dormmate/v1/nodes/<节点>/cmd`），`send_cmd --node` 写错节点也会发到别人头上。有那一行而且写着「没接受」的话，理由就在那一行后半句 —— 多半是「现在没有开着的事件」（这个节点此刻是正常的，没有案子可接） |
+| 事件停在 `HANDLING` 再也不动了 | 验证数据还不够。要**连着** N 条正常（`events.recoverConsecutiveNormal`）或**连着** M 条异常（`verifyConsecutiveAbnormal`）才结案，中间断一次就从头数（一条正常会把异常计数清零，反之亦然）。发够条数再看。要是中途重启过 core，那条已经按 `UNRESOLVED` 收尾了，`result` 里写明是重启造成的 |
+| 按了「开始处理」，`data/events.json` 里那条还是 `HANDLING`、`recovered_at` 是 `null` | **这是对的**，红线就是这个意思：恢复只能由后来收到的数据判。接着发够连续 N 条正常再看一次，那时候变才正常 —— 要是按完按钮当场就变成 `RECOVERED`，那才是出事 |
+| 日志里有 `[事件] ... -> RECOVERED`，但发出去的数据里明明还有异常 | 看两件事：这条 `RECOVERED` 是不是**另一条**事件的（同一个宿舍可以先后开好几条，`event_id` 里的时间戳不一样）；以及恢复判据是「连续 N 条正常」，中间夹的那条异常在攒够 N 条之前就把计数清零了，所以结案时最后 N 条确实都是正常的 |
 | 剧本跑起来「优先关注」每一条都在跳 | 同一个节点的时间要么在往回走（core 算出的时长被夹到 0），要么两个节点的数据交错得太碎。先看 `tests/test_scenarios.py` 里的轨迹断言是不是红的 —— 脚本层面能保证的事不该靠眼睛盯 |
 
 ## 开源组件来源

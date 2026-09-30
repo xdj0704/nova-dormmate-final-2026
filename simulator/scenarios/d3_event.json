@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "D3 剧本：一条事件从开案到结案走完整条路，两个分支各走一遍。",
+    "",
+    "跑之前先确认没有别的模拟器在发数据（--all-nodes 那个要停掉）：",
+    "剧本的判据是「连续几条」，中间插进来任何一条别的读数都会把计数打断 ——",
+    "而结果是「事件没按剧本结案」，看上去像 core 坏了。",
+    "",
+    "    py -3.14 -m simulator.simulator --script simulator/scenarios/d3_event.json",
+    "",
+    "第一幕 dorm-b 偏热 -> 有人按 handle -> 数据自己回到正常 -> RECOVERED。",
+    "关键在最后三条：事件变成已恢复**不是**因为那条 handle，是因为后面收到了",
+    "连续 3 条正常读数（recoverConsecutiveNormal）。把 handle 那一帧删掉再跑一遍，",
+    "结果一样是 RECOVERED，只是 result 会写「没人处理，数据自己恢复」——",
+    "这一点正是这一步要证明的东西。",
+    "",
+    "第二幕 dorm-c 偏湿 -> 有人按 handle -> 数据还是偏湿 -> UNRESOLVED。",
+    "这一幕是**对照**：没有它，「按了就能好」和「数据说的才算」在截图上分不开，",
+    "因为只看第一幕的话，事件确实在 handle 之后变绿了。",
+    "",
+    "时间写在报文里（20:00 起），所以整段「持续了 11 分钟」是写死的、可复现的，",
+    "不受 interval 影响。interval 只决定跑多快：15 帧约 15 秒跑完。"
+  ],
+
+  "interval": 1,
+
+  "frames": [
+    {"comment": "------ 第一幕：dorm-b 偏热 ------"},
+
+    {"comment": "20:00 第一条偏热 —— core 在这一条开案（异常段的第一条）",
+     "node": "dorm-b", "temperature": 33, "humidity": 55, "time": "2026-09-22 20:00:00"},
+    {"node": "dorm-b", "temperature": 33, "humidity": 55, "time": "2026-09-22 20:01:00"},
+    {"comment": "湿度掉到 55% 但温度还是 34℃ —— 仍然是偏热（规则 2 先于规则 3）",
+     "node": "dorm-b", "temperature": 34, "humidity": 55, "time": "2026-09-22 20:02:00"},
+
+    {"comment": "20:02:30 有人按下了处理。注意这一帧是**指令**，发到 dormmate/v1/cmd。事件只从 OPEN 变成 HANDLING，recovered_at 还是空的 —— 按钮没有能力写那个字段",
+     "node": "dorm-b", "action": "handle", "time": "2026-09-22 20:02:30"},
+
+    {"comment": "处理之后的前两条正常还**不算恢复**：要连续 3 条（core 日志里会看到「再连续 2 条正常就判恢复」这种倒计时）",
+     "node": "dorm-b", "temperature": 29, "humidity": 60, "time": "2026-09-22 20:03:00"},
+    {"node": "dorm-b", "temperature": 27, "humidity": 62, "time": "2026-09-22 20:04:00"},
+    {"comment": "第三条正常 —— core 在这里把事件判成 RECOVERED，recovered_at 取的就是这条报文的时间",
+     "node": "dorm-b", "temperature": 25, "humidity": 60, "time": "2026-09-22 20:05:00"},
+
+    {"comment": "------ 第二幕：dorm-c 偏湿，处理了也没好 ------"},
+
+    {"comment": "偏湿不是靠温度判的：25℃ 在正常范围内，但湿度 80% ≥ 75",
+     "node": "dorm-c", "temperature": 25, "humidity": 80, "time": "2026-09-22 20:06:00"},
+    {"node": "dorm-c", "temperature": 25, "humidity": 82, "time": "2026-09-22 20:07:00"},
+    {"comment": "湿度降到 79%，但还是偏湿 —— 段还在继续，起点仍是 20:06",
+     "node": "dorm-c", "temperature": 26, "humidity": 79, "time": "2026-09-22 20:08:00"},
+
+    {"node": "dorm-c", "action": "handle", "time": "2026-09-22 20:08:30"},
+
+    {"comment": "处理之后连续 3 条依旧异常（verifyConsecutiveAbnormal=3）—— 判决线上写的就是「没治好」",
+     "node": "dorm-c", "temperature": 26, "humidity": 80, "time": "2026-09-22 20:09:00"},
+    {"node": "dorm-c", "temperature": 27, "humidity": 79, "time": "2026-09-22 20:10:00"},
+    {"comment": "第三条异常 —— core 在这一条把事件结案成 UNRESOLVED。注意这时候 dorm-c 这一段异常**还没结束**，只是事件已经结了案",
+     "node": "dorm-c", "temperature": 26, "humidity": 83, "time": "2026-09-22 20:11:00"}
+  ]
+}

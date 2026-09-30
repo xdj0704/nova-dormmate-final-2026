@@ -35,6 +35,13 @@
   "recoverConsecutiveNormal": 3,
   "historyMax": 50,
 
+  "events": {
+    "_comment": "D3 事件状态机的门槛。verifyConsecutiveAbnormal 是「处理之后连着几条异常算没治好」，recoverConsecutiveNormal（上面那条）是「连着几条正常算恢复」—— 两个数都在这里，事件层不自己定门槛。eventsMax / eventsVerifyMax 只管落盘时留多少条，不参与判定。",
+    "verifyConsecutiveAbnormal": 3,
+    "eventsMax": 200,
+    "eventsVerifyMax": 50
+  },
+
   "broker": {
     "host": null,
     "port": null,

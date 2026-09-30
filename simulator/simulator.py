@@ -11,6 +11,11 @@
 一轮（tick）= 给每个选中的节点各发一条，间隔 --interval 秒。所以
 `--count 4` 是「发 4 轮」；只选了一个节点时它就等于「发 4 条」。
 
+剧本（--script）里除了数据帧，还可以有**指令帧**（`"action": "handle"`）——
+那一帧不是传感器读数，是「有人按下了处理」。它发到 dormmate/v1/cmd，
+core 收下之后把事件从「待处理」推到「处理中」。见
+simulator/scenarios/d3_event.json。
+
 关于「恢复」：cooling 模式只是让温度自己降下来，看板上的状态变化完全由
 后续收到的这条新数据决定 —— 没有任何按钮能把事件直接置成已恢复。协议上
 也保证得了这一点：这条消息的 seq 一定比上一条大。
@@ -37,6 +42,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import (  # noqa: E402
+    CMD_TOPIC,
     DEFAULT_NODE_ID,
     MQTT_HOST,
     MQTT_PASSWORD,
@@ -49,6 +55,7 @@ from config import (  # noqa: E402
     TIME_FORMAT,
     topic_for,
 )
+from events import COMMANDS  # noqa: E402  —— 合法 action 的真源在 events.py
 from status_rules import compute_status  # noqa: E402
 
 # Windows 控制台兜底：某些代码页下中文/箭头会抛 UnicodeEncodeError 直接崩掉。
@@ -62,6 +69,9 @@ for _stream in (sys.stdout, sys.stderr):
 # source 用来区分「这条是谁发的」：模拟器发的、人手发的，排查时一眼能看出来。
 SOURCE_SIM = "sim"
 SOURCE_MANUAL = "manual"
+# 剧本发的指令。它和 SOURCE_SIM 分开，是因为 core 的日志里要能一眼看出
+# 「这个 handle 是剧本按的，不是人按的」—— 演示翻车时先看的就是这一栏。
+SOURCE_SCRIPT = "script"
 
 # 报文里 time 字段的形状。和统一 JSON 的约定一致：固定 YYYY-MM-DD HH:mm:ss。
 TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
@@ -127,6 +137,24 @@ def build_payload(node_id: str, temperature: float, humidity: float,
     return payload
 
 
+def build_command_payload(node_id: str, action: str,
+                          now: datetime | None = None,
+                          source: str = SOURCE_SCRIPT) -> dict:
+    """按指令的形状组装一条 cmd 报文（发到 dormmate/v1/cmd）。
+
+    指令里**没有 status、没有温湿度**，这是故意的：一条指令能说的话只有
+    「对哪个节点、干什么、什么时候」，它没有能力描述现场状况。想表达
+    「我处理完已经好了」在这里连字段都找不到 —— 好没好只能由后面的
+    遥测数据说。这是红线在报文格式上的那一半。
+    """
+    return {
+        "nodeId": str(node_id),
+        "action": str(action),
+        "time": (now or datetime.now()).strftime(TIME_FORMAT),
+        "source": str(source),
+    }
+
+
 def dumps(payload: dict) -> str:
     """ensure_ascii=False 才能让 status 里的中文正常显示。"""
     return json.dumps(payload, ensure_ascii=False)
@@ -190,14 +218,36 @@ class Frame:
     time: datetime | None = None
 
 
-def load_script(path: str | Path) -> tuple[list[Frame], float | None]:
-    """读 json 剧本 → ([Frame, ...], 剧本自带的间隔或 None)。
+@dataclass(frozen=True)
+class Command:
+    """剧本里的一帧**指令**：有人按下了处理。
+
+    和 Frame 分开、而不是给 Frame 加个 `action=None` 字段，是因为这两种东西
+    在不同 topic 上、形状也不同：Frame 有温湿度没有 action，Command 反过来。
+    塞进一个 dataclass 的话，`frame.temperature` 在指令帧上就是个没有意义的
+    None，而唯一的防线是「记得判断一下」——那种防线迟早会被绕过。
+    分成两个类型，publish 那一层就必须显式分派，漏了会直接 AttributeError。
+    """
+
+    node: str
+    action: str
+    time: datetime | None = None
+
+
+def load_script(path: str | Path) -> tuple[list[Frame | Command], float | None]:
+    """读 json 剧本 → ([Frame | Command, ...], 剧本自带的间隔或 None)。
 
     格式（frames 里的 comment 字段是给人看的，会被忽略）：
         {"interval": 2,
          "frames": [{"node": "dorm-a", "temperature": 31, "humidity": 78},
                     {"node": "dorm-b", "temperature": 16, "humidity": 60,
-                     "repeat": 2, "time": "2026-09-22 20:00:00"}]}
+                     "repeat": 2, "time": "2026-09-22 20:00:00"},
+                    {"node": "dorm-b", "action": "handle",
+                     "time": "2026-09-22 20:02:30"}]}
+
+    有 `action` 的帧是指令帧（发到 dormmate/v1/cmd），没有的就是数据帧。
+    一帧只能是一件事：同时写 action 和温度湿度会报错，不是「以某一个为准」——
+    「以某一个为准」意味着另一部分被静默忽略，而写剧本的人正是想让它生效。
 
     repeat 默认 1。每轮只消费一帧，所以剧本写几帧就发几条。
     帧里没有 node 就用 dorm-a —— 只有一个宿舍的剧本不用每帧都重复写。
@@ -226,10 +276,35 @@ def load_script(path: str | Path) -> tuple[list[Frame], float | None]:
     if not isinstance(frames, list) or not frames:
         raise ScriptError(f"{file.name} 里没有 frames，或 frames 是空的 —— 至少要有一帧")
 
-    out: list[Frame] = []
+    out: list[Frame | Command] = []
     for i, frame in enumerate(frames, 1):
         if not isinstance(frame, dict):
             raise ScriptError(f"{file.name} 第 {i} 帧不是对象")
+
+        # repeat 先取出来：数据帧和指令帧都要用它，两边各写一遍迟早会漏改一处
+        repeat = frame.get("repeat", 1)
+        if not isinstance(repeat, int) or isinstance(repeat, bool) or repeat < 1:
+            raise ScriptError(f"{file.name} 第 {i} 帧的 repeat 要是 ≥1 的整数，现在是 {repeat!r}")
+
+        if "action" in frame:
+            if "temperature" in frame or "humidity" in frame:
+                raise ScriptError(
+                    f"{file.name} 第 {i} 帧既有 action 又有温度/湿度："
+                    "一帧只能说一件事（指令发到指令 topic，读数发到遥测 topic）"
+                )
+            node = str(frame.get("node", DEFAULT_NODE_ID))
+            action = frame["action"]
+            # 合法 action 的真源是 events.py，这里不另抄一份 ——
+            # 抄的那份不会跟着 events.py 一起改，于是剧本能写出 core 会拒收的指令，
+            # 而报错要等 core 那边打出来才看得见。
+            if action not in COMMANDS:
+                raise ScriptError(
+                    f"{file.name} 第 {i} 帧的 action 不认识：{action!r}，目前只有 {list(COMMANDS)}"
+                )
+            moment = parse_frame_time(file.name, i, frame.get("time"))
+            out.extend([Command(node, action, moment)] * repeat)
+            continue
+
         if "temperature" not in frame or "humidity" not in frame:
             # 只有 comment 的帧是合法的，直接跳过
             if set(frame) <= {"comment"}:
@@ -245,9 +320,6 @@ def load_script(path: str | Path) -> tuple[list[Frame], float | None]:
                 f"{frame['temperature']!r} / {frame['humidity']!r}"
             ) from None
         moment = parse_frame_time(file.name, i, frame.get("time"))
-        repeat = frame.get("repeat", 1)
-        if not isinstance(repeat, int) or isinstance(repeat, bool) or repeat < 1:
-            raise ScriptError(f"{file.name} 第 {i} 帧的 repeat 要是 ≥1 的整数，现在是 {repeat!r}")
         out.extend([Frame(node, temperature, humidity, moment)] * repeat)
 
     if not out:
@@ -341,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     # 剧本与模式二选一：剧本自带每一帧的温湿度，再叠一个 --mode 只会打架
-    script_frames: list[Frame] = []
+    script_frames: list[Frame | Command] = []
     if args.script:
         if args.mode != "demo":
             print("[错误] --script 和 --mode 只能用一个：剧本里已经写好了每一帧的数据",
@@ -371,6 +443,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[DormMate] 节点={'、'.join(nodes)}  模式={mode_label}  "
           f"间隔={args.interval}s  topic={topic_for(nodes[0])}")
     print("           订阅用通配符：dormmate/v1/nodes/+/telemetry")
+    command_count = sum(1 for step in script_frames if isinstance(step, Command))
+    if command_count:
+        # 说了这一句，截图里就能看出「这条不是读数、是有人按了按钮」。
+        # 只看命令行第一行的话，从头到尾都像在发数据。
+        print(f"           剧本里有 {command_count} 帧指令，发到 {CMD_TOPIC}（retain=False）")
 
     # 一个进程只开一根连接，三个节点共用它 —— 三根连接没必要，还多三份重连逻辑。
     # 想分成三个进程跑也行（老写法），client_id 按节点拼，互相不会顶下线。
@@ -418,7 +495,23 @@ def main(argv: list[str] | None = None) -> int:
                         temperature, humidity = demo_sample(state.step)
                     plan.append(Frame(node, temperature, humidity))
 
-            for frame in plan:
+            for step in plan:
+                # 指令帧：发到另一条 topic，格式也不是遥测那一套。
+                # retain 写死 False —— 指令是「此刻发生的动作」。保留住的话，
+                # 下次 core 一重连就先把这条半小时前的 handle 又收一遍，
+                # 于是日志里出现一个没人按过的动作。和 reject 那条同一个道理。
+                if isinstance(step, Command):
+                    message = dumps(build_command_payload(step.node, step.action, now=step.time))
+                    if client is not None:
+                        info = client.publish(CMD_TOPIC, message, qos=QOS, retain=False)
+                        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                            print(f"[警告] 发布失败 rc={info.rc}", file=sys.stderr)
+                    sent += 1
+                    flag = "→" if client is not None else " "
+                    print(f"[{sent:>4}] {flag} {CMD_TOPIC}  {message}")
+                    continue
+
+                frame = step
                 node, temperature, humidity = frame.node, frame.temperature, frame.humidity
                 state = states[node]
                 payload = build_payload(node, temperature, humidity,

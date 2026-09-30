@@ -30,8 +30,17 @@ def topic_for(node_id: str) -> str:
 STATE_TOPIC = "dormmate/v1/state"              # retained：全局状态快照
 REJECT_TOPIC = "dormmate/v1/log/reject"        # 非法报文，retain=False
 CORE_STATUS_TOPIC = "dormmate/v1/core/status"  # retained：core 在线状态（遗嘱）
+CMD_TOPIC = "dormmate/v1/cmd"                  # 前端 -> core 的指令，retain=False
 CORE_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "core", "config.json"
+)
+
+# ---- 事件（D3）----
+# 事件文件放在 data/ 下，和别的产物一个地方，验收时一眼能找到。
+# 这是**运行期产生的数据**，不是源码：它进了 .gitignore，
+# 历史上跑出来的事件留在本机，不往仓库里塞。
+EVENTS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "events.json"
 )
 
 
