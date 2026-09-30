@@ -155,19 +155,53 @@ function formatTime(date) {
     + ' ' + pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
 }
 
+/* topic 的形状只写一遍，下面三个东西都从这两个片段拼出来。
+   以前是订阅、解析、演示数据三处各写一遍字符串：从旧的三段式迁到 v1 那次，
+   批量替换只扫到字面量，演示数据那处是 'dormmate/' + nodeId + '/env' 拼的，
+   于是漏了下来 —— 而它**照样能跑**，因为形状不对时 topicNode 返回空串、
+   topic 与 nodeId 的一致性检查整段被跳过，谁也没发现发出去的 topic
+   应用自己不认识。收成一处之后，这种漏改不会再静默通过。 */
+const TOPIC_PREFIX = 'dormmate/v1/nodes/';
+const TOPIC_SUFFIX = '/telemetry';
+
+/**
+ * 拼出某个节点的上报 topic。演示数据按钮走这条，别再手写字符串。
+ *
+ * @param {string} nodeId
+ * @returns {string} 例如 dormmate/v1/nodes/dorm-a/telemetry
+ */
+function topicFor(nodeId) {
+  return TOPIC_PREFIX + nodeId + TOPIC_SUFFIX;
+}
+
+/**
+ * 订阅用的通配符 topic。
+ *
+ * @returns {string} dormmate/v1/nodes/+/telemetry
+ */
+function topicWildcard() {
+  return TOPIC_PREFIX + '+' + TOPIC_SUFFIX;
+}
+
 /**
  * 从 topic 里取出节点名。约定是 dormmate/v1/nodes/<nodeId>/telemetry。
  * 形状不对就返回空串 —— 调用方据此跳过 topic 与 nodeId 的一致性检查，
  * 而不是拿一个猜出来的节点名去报警。
  *
+ * 头尾都是从 TOPIC_PREFIX / TOPIC_SUFFIX 上切的，不另写一份字面量：
+ * 上面注释里那次的漏改，根子就是「同一件事写了两遍」。
+ *
  * @param {string} topic
  * @returns {string} 节点名，或空串
  */
 function topicNode(topic) {
-  const parts = String(topic == null ? '' : topic).split('/');
-  if (parts.length === 5 && parts[0] === 'dormmate' && parts[1] === 'v1'
-      && parts[2] === 'nodes' && parts[4] === 'telemetry') return parts[3];
-  return '';
+  const text = String(topic == null ? '' : topic);
+  if (!text.startsWith(TOPIC_PREFIX) || !text.endsWith(TOPIC_SUFFIX)) return '';
+  const nodeId = text.slice(TOPIC_PREFIX.length, text.length - TOPIC_SUFFIX.length);
+  /* 节点名里不许再出现分隔符：dormmate/v1/nodes/a/b/telemetry 头尾都对得上，
+     但那是两个节点名拼出来的，取出来是个不存在的节点。 */
+  if (nodeId === '' || nodeId.indexOf('/') !== -1) return '';
+  return nodeId;
 }
 
 /* ---------- DOM ---------- */
@@ -1065,7 +1099,7 @@ function simulate() {
       time: formatTime(new Date(base + i * 1000)),
     };
 
-    handleMessage('dormmate/' + nodeId + '/env', JSON.stringify(payload));
+    handleMessage(topicFor(nodeId), JSON.stringify(payload));
   });
 }
 
@@ -1124,7 +1158,7 @@ function brokerUrl(hostname) {
 }
 
 const BROKER_URL = brokerUrl(location.hostname);
-const TOPIC = 'dormmate/v1/nodes/+/telemetry';
+const TOPIC = topicWildcard();
 
 /* 当前那根连接。null 表示没连上，或已被主动断开。 */
 let client = null;

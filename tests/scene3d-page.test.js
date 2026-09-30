@@ -312,7 +312,7 @@ check('正常就是正常', lastStatus(), '正常');
 console.log('  -- 回归测试数据 --');
 [['dorm-a', 25, 60, '正常'], ['dorm-a', 16, 60, '偏冷'],
   ['dorm-a', 31, 60, '偏热'], ['dorm-a', 25, 80, '偏湿']].forEach((row) => {
-  deliver('dormmate/' + row[0] + '/env', mk(row[0], row[1], row[2]));
+  deliver('dormmate/v1/nodes/' + row[0] + '/telemetry', mk(row[0], row[1], row[2]));
   check(`★ ${row[1]}℃ / ${row[2]}% -> ${row[3]}`, lastStatus(), row[3]);
 });
 

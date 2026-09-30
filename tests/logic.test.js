@@ -288,23 +288,36 @@ const byCount = pickPriority(three(
   node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 2, '偏湿')));
 check('★ 三个一样长，条数最多的是 dorm-b', byCount.nodeId, 'dorm-b');
 check('★ 尾巴如实说赢在次数，不写「持续时间最长」',
-  byCount.reason, 'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-a 一样长，异常次数最多');
+  byCount.reason, 'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长，异常次数最多');
 
-/* 场景三：全都一样，按名字 */
-const byName = pickPriority(three(
+/* 场景三：时长和条数都打平，比严重度（偏热 > 偏湿 > 偏冷） */
+const bySeverity = pickPriority(three(
   node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏冷'),
   node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
   node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏湿')));
-check('★ 完全并列时按字母顺序，dorm-a 在前', byName.nodeId, 'dorm-a');
-check('★ 尾巴如实说要按名字排了',
-  byName.reason, 'dorm-a 已连续偏冷 6 分钟（3 次），和 dorm-b 完全并列，按节点名顺序排在前面');
+check('★ 时长、条数都一样时，偏热的 dorm-b 排在前面', bySeverity.nodeId, 'dorm-b');
+check('★ 尾巴如实说赢在严重度',
+  bySeverity.reason,
+  'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长、异常次数也一样，'
+  + '但偏热比偏湿更要紧');
 
-/* 第 3 步要的是**固定的码元序**，不是跟着运行环境走的本地化排序。
+/* 场景四：连严重度都一样，才轮到按名字。
+   注意三个的状态必须**相同** —— 不然会停在上面那一步，测不到字典序。 */
+const byName = pickPriority(three(
+  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
+  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
+  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热')));
+check('★ 四步全平才按字母顺序，dorm-a 在前', byName.nodeId, 'dorm-a');
+check('★ 尾巴如实说要按名字排了',
+  byName.reason, 'dorm-a 已连续偏热 6 分钟（3 次），和 dorm-b 完全并列，按节点名顺序排在前面');
+
+/* 第 4 步要的是**固定的码元序**，不是跟着运行环境走的本地化排序。
    dorm-a / dorm-b / dorm-c 上这两种排法碰巧答案一样，所以上面那条测不出区别，
    得挑一对能把它们分开的名字：码元序里 'B'(0x42) < 'a'(0x61)，
-   本地化排序先比字母再比大小写，'a' 反而排在 'B' 前面。 */
+   本地化排序先比字母再比大小写，'a' 反而排在 'B' 前面。
+   两个的状态也得一样（原因同上），否则赢的是严重度那一步。 */
 const byCodeUnit = pickPriority({
-  'dorm-a': node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏冷'),
+  'dorm-a': node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
   'dorm-B': node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
 });
 check("★ 第 3 步用码元序：'dorm-B' 排在 'dorm-a' 前面", byCodeUnit.nodeId, 'dorm-B');
@@ -350,9 +363,9 @@ const vals = [
 ];
 const forward = pickPriority({ [ks[0]]: vals[0], [ks[1]]: vals[1], [ks[2]]: vals[2] });
 const reverse = pickPriority({ [ks[2]]: vals[2], [ks[1]]: vals[1], [ks[0]]: vals[0] });
-check('★ 键的顺序反过来，结果一模一样（完全并列时靠名字定序）',
+check('★ 键的顺序反过来，结果一模一样（时长条数都平，靠严重度定序）',
   [reverse.nodeId, reverse.reason], [forward.nodeId, forward.reason]);
-check('倒序之后仍然是 dorm-a（不是「谁先被遍历到就是谁」）', reverse.nodeId, 'dorm-a');
+check('倒序之后仍然是 dorm-b（不是「谁先被遍历到就是谁」）', reverse.nodeId, 'dorm-b');
 
 /* logic.js 不判断规则：status 是原样抄进那句原因的，它不自己复核 */
 const echo = pickPriority(three(
@@ -758,15 +771,27 @@ check('★ 时长打平时，输的那个不能写成「只持续 20 分钟」�
   '优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间和 dorm-a 一样长，异常次数最多；'
   + 'dorm-a 也偏冷，持续时间和它一样长，但只有 2 条异常数据；dorm-c 当前正常。');
 
-/* ---- 完全并列、只能按节点名定序 ---- */
+/* ---- 时长和条数都打平，靠严重度分胜负 ---- */
 
-const DEAD = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏冷'),
+const SEV = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏冷'),
+  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
+  calm('2026-09-22 20:00:00'));
+
+check('★ 时长条数都一样时靠严重度定序：偏热 > 偏冷',
+  buildReasons(SEV),
+  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），持续时间和 dorm-a 一样长、异常次数也一样，'
+  + '但偏热比偏冷更要紧；'
+  + 'dorm-a 也偏冷，时长和次数都跟它一样，但偏冷没有偏热要紧；dorm-c 当前正常。');
+
+/* ---- 连严重度都一样，只能按节点名定序 ---- */
+
+const DEAD = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
   node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
   calm('2026-09-22 20:00:00'));
 
 check('★ 完全并列时明说是靠节点名排的，不装作赢了',
   buildReasons(DEAD),
-  '优先关注 dorm-a：已连续偏冷 20 分钟（2 次），和 dorm-b 完全并列，按节点名顺序排在前面；'
+  '优先关注 dorm-a：已连续偏热 20 分钟（2 次），和 dorm-b 完全并列，按节点名顺序排在前面；'
   + 'dorm-b 也偏热，时长和次数都跟它一样，按节点名顺序排在后面；dorm-c 当前正常。');
 
 /* ---- 处理状态 ---- */
@@ -1295,6 +1320,118 @@ check('★ 同样输入连着算两遍，三样东西一字不差',
   [JSON.stringify(buildMlNote(mlJson())) === JSON.stringify(buildMlNote(mlJson())),
     mlFetchFailed('x').text === mlFetchFailed('x').text],
   [true, true]);
+
+/* ---------- L. 和 Python 读同一份期望表 ---------- */
+
+console.log('\n=== L. 共用期望表：和 Python 的 rules.py 逐条对齐 ===');
+
+/* 这一段的期望值**不是**在这里写的，是从 tests/fixtures/priority_cases.json
+   读的 —— Python 那边的 tests/test_rules_priority.py 读的是同一份。
+   两边各写一套测试治不了「改了一边忘了另一边」：两套都绿，
+   而它们期望的不是同一件事。
+
+   要跑的东西不一样：那边直接调 rank_priority 拿到整张表，
+   这边只有两个对外的口 —— pickPriority（赢家 + 那句理由）和
+   buildReasons（一整段话）。所以这边用「整段话里含不含某句、
+   几条的相对先后」来钉同一批事实，钉的是**页面上真会出现的字**。 */
+const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'priority_cases.json');
+const fix = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
+
+/* fixture 里给的是秒，这边要的是 time 字符串。换算只在这一处显式做，
+   不藏进 fixture —— 一次换算看不懂的时候，第一个该被怀疑的就是单位。 */
+const FIX_BASE = '2026-09-22 20:00:00';
+const FIX_BASE_MS = parseTime(FIX_BASE);
+
+function pad2(n) { return n < 10 ? '0' + n : String(n); }
+
+/* parseTime 用的是 Date.UTC，这里也照 UTC 拼回来。
+   拼成本地时间的话，时区一偏，同一个 360 秒就变成「6 小时」了。 */
+function timeAfter(seconds) {
+  const d = new Date(FIX_BASE_MS + seconds * 1000);
+  return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate())
+    + ' ' + pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
+}
+
+function nodesOf(c) {
+  const nodes = {};
+  c.nodes.forEach(function (n) {
+    /* count 为 0 的走正常那条：起点给 null，和页面里维护的正常节点一样 */
+    nodes[n.nodeId] = n.count > 0
+      ? node(timeAfter(n.durationSec), FIX_BASE, n.count, n.status)
+      : node(FIX_BASE, null, 0, n.status);
+  });
+  return nodes;
+}
+
+check('期望表读得到（坏掉的样子是一条都跑不到）', fix.cases.length >= 8, true);
+
+/* ---- 时长说法：同一张表 ---- */
+fix.duration.forEach(function (row) {
+  check('时长 ' + row.seconds + ' 秒 -> ' + row.expect,
+    fmtDuration(row.seconds * 1000), row.expect);
+});
+
+/* ---- 每个用例：赢家、赢家的理由、输家各自输在哪、以及先后 ---- */
+fix.cases.forEach(function (c) {
+  const nodes = nodesOf(c);
+  const top = pickPriority(nodes);
+  const reason = buildReasons(nodes);
+
+  if (c.order.length === 0) {
+    check('★ ' + c.name + '：没有要优先处理的', top, null);
+    return;
+  }
+
+  const winner = c.order[0];
+  check('★ ' + c.name + '：挑出来的是 ' + winner, top.nodeId, winner);
+
+  /* 两边唯一那个故意的差别：pickPriority 的 reason 前面有节点名，
+     Python 的 RankedNode.reason 没有。差别在这里被**显式**对上，
+     而不是靠 fixture 含糊过去。 */
+  check('★ ' + c.name + '：赢家的理由',
+    top.reason, winner + ' ' + c.reasons[winner]);
+
+  /* 同一句话在 B2 依据里是「优先关注 X：…」—— 那里名字在冒号前，
+     所以理由那半句不带名字。两处都得对。 */
+  check('★ ' + c.name + '：依据里那句「优先关注 ' + winner + '：…」',
+    reason.includes('优先关注 ' + winner + '：' + c.reasons[winner]), true);
+
+  /* 输家：每一个都要在整段话里，且说的是 fixture 里那句。
+     只查「含不含」不够 —— 先后顺序也得对，否则「谁排在谁前面」这件事
+     在页面上就是错的，而每条单独看都挑不出毛病。 */
+  const losers = c.order.slice(1);
+  losers.forEach(function (id) {
+    check('★ ' + c.name + '：' + id + ' 输在哪',
+      reason.includes(id + ' ' + c.reasons[id]), true);
+  });
+  for (let i = 0; i + 1 < losers.length; i += 1) {
+    check('★ ' + c.name + '：' + losers[i] + ' 排在 ' + losers[i + 1] + ' 前面',
+      reason.indexOf(losers[i] + ' ') < reason.indexOf(losers[i + 1] + ' '), true);
+  }
+});
+
+/* ---- 输入顺序不影响结果（第 4 步存在的唯一理由）---- */
+const shuffled = fix.cases.filter(function (c) {
+  return c.name.indexOf('与数据到达顺序无关') >= 0;
+})[0];
+check('期望表里有那条「顺序无关」的用例', Boolean(shuffled), true);
+if (shuffled) {
+  const forward = nodesOf(shuffled);
+  const backward = nodesOf({ nodes: shuffled.nodes.slice().reverse() });
+  check('★ 同一份数据倒着喂，挑出来的人和理由一字不差',
+    [pickPriority(forward).nodeId === pickPriority(backward).nodeId,
+      pickPriority(forward).reason === pickPriority(backward).reason],
+    [true, true]);
+}
+
+/* ---- logic.js 里也不许写死节点名 ---- */
+/* 和 Python 那边同一个checker思路，只是 JS 没有文档字符串，
+   要摘的只有注释：块注释和行注释。 */
+const logicCode = raw
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^[ \t]*\/\/.*$/gm, '');
+check('★ logic.js 的代码里不出现任何具体节点名（注释里的例子不算）',
+  /dorm-/.test(logicCode), false);
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

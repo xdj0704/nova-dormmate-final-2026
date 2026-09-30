@@ -352,7 +352,10 @@ const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulat
   __events: events, __buildEventsCSV: buildEventsCSV,
   __loadMlResult: loadMlResult, buildMlNote, mlFetchFailed,
   pickPriority, beginHandling, nextHandling,
-  buildFocus, buildAlert } = context;
+  buildFocus, buildAlert,
+  /* 这两个不是 __ 钩子，是 dashboard.js 顶层的普通函数声明 ——
+     和 judgeStatus 一样，本来就是上下文全局，直接取就行。 */
+  topicFor, topicWildcard } = context;
 
 /* ---------- 断言 ---------- */
 let pass = 0, fail = 0;
@@ -507,6 +510,40 @@ check('少了 v1 段不认', topicNode('dormmate/nodes/dorm-a/telemetry'), '');
 check('尾段不是 telemetry 不认', topicNode('dormmate/v1/nodes/dorm-a/env'), '');
 handleMessage('随便什么', mk('dorm-a', 25, 60));
 check('形状不对的 topic 不产生额外 warn', top().level, 'ok');
+
+console.log('\n=== H2. 拼 topic 的地方只有一处，且拼出来的自己认得出 ===');
+/* 这一节是补上来的。以前「演示数据」按钮里那句是
+   'dormmate/' + nodeId + '/env' —— 迁到 v1 那轮批量替换只扫到字面量，
+   这句是**拼**出来的，漏了。它还不报错：形状不对时 topicNode 返回空串，
+   topic 与 nodeId 的一致性检查整段被跳过，页面上一切正常，
+   等于演示数据一直在发一种本页自己解析不出节点名的 topic。 */
+check('topicFor 拼出来的，topicNode 解析得回来', topicNode(topicFor('dorm-b')), 'dorm-b');
+check('订阅用的通配符也是同一个形状（把 + 换成节点名就解析得动）',
+  topicNode(topicWildcard().replace('+', 'dorm-c')), 'dorm-c');
+check('通配符 topic 仍然是约定的那一条',
+  topicWildcard(), 'dormmate/v1/nodes/+/telemetry');
+
+/* 走一遍演示数据按钮真正走的路：9 条，一条 warn/error 都不许有。
+   topic 拼错的话这条会亮 —— 上面那条「形状不对不产生额外 warn」说明
+   光看日志级别是发现不了的，得反过来查 topic 本身。 */
+clearAll();
+simulate();
+check('演示数据 9 条，日志里没有 warn/error',
+  messages.filter((m) => m.level !== 'ok').length, 0);
+check('★ 演示数据发出的每条 topic 都解析得出节点名',
+  messages.every((m) => topicNode(m.topic) !== ''), true);
+check('★ 三条 topic 里认出的正是三个节点',
+  Array.from(new Set(messages.map((m) => topicNode(m.topic)))).sort(),
+  ['dorm-a', 'dorm-b', 'dorm-c']);
+
+/* 静态那一条：代码里（注释不算）只许有一处出现 dormmate/v1。
+   多出一处 = 有人在别处又拼了一条 topic，而拼错一条是**静默**的。
+   注释里的例子不算数，所以先把注释摘掉再数。 */
+const dashCode = dashText
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/^[ \t]*\/\/.*$/gm, '');
+check('★ dashboard.js 的代码里只有一处写死 dormmate/v1（注释不算）',
+  (dashCode.match(/dormmate\/v1/g) || []).length, 1);
 
 /* ============ I. 历史上限 ============ */
 console.log('\n=== I. 历史上限 ===');
@@ -979,7 +1016,7 @@ clearAll();
   ['dorm-b', 31, 60, '20:00:00'], ['dorm-b', 31, 60, '20:07:00'],
   ['dorm-c', 25, 80, '20:00:00'], ['dorm-c', 25, 80, '20:05:00'],
 ].forEach(([id, t, h, hm]) => {
-  handleMessage('dormmate/' + id + '/env', mk(id, t, h, undefined, T(hm)));
+  handleMessage('dormmate/v1/nodes/' + id + '/telemetry', mk(id, t, h, undefined, T(hm)));
 });
 check('★ 场景一：三段各 2 条，时长 3 / 7 / 5 分钟',
   ids.map((id) => nodes[id].abnormalCount + ' 条'), ['2 条', '2 条', '2 条']);
@@ -997,22 +1034,26 @@ clearAll();
   ['dorm-b', 31, 60, '20:00:00'], ['dorm-b', 31, 60, '20:03:00'], ['dorm-b', 31, 60, '20:06:00'],
   ['dorm-c', 25, 80, '20:00:00'], ['dorm-c', 25, 80, '20:06:00'],
 ].forEach(([id, t, h, hm]) => {
-  handleMessage('dormmate/' + id + '/env', mk(id, t, h, undefined, T(hm)));
+  handleMessage('dormmate/v1/nodes/' + id + '/telemetry', mk(id, t, h, undefined, T(hm)));
 });
 check('★ 场景二：三段的条数分别是 2 / 3 / 2',
   ids.map((id) => nodes[id].abnormalCount), [2, 3, 2]);
 check('★ 场景二：三段时长都是 6 分钟（起点 20:00、最新 20:06）',
   ids.map((id) => nodes[id].abnormalStart), [T('20:00:00'), T('20:00:00'), T('20:00:00')]);
 check('★ 场景二：条数最多的 dorm-b 胜出', pickPriority(nodes).nodeId, 'dorm-b');
+/* 点名的那个是 dorm-c 不是 dorm-a：三段时长一样，第 3 步比严重度时
+   dorm-c（偏湿）排在 dorm-a（偏冷）前面，所以「最强的那个同长对手」是 dorm-c。
+   理由对着**跟它最接近的那个**说，而不是随便挑一个同长的 ——
+   挑 dorm-a 的话，看的人会问「那 dorm-c 呢」。 */
 check('★ 场景二：原因如实说赢在次数，不写「持续时间最长」',
   pickPriority(nodes).reason,
-  'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-a 一样长，异常次数最多');
+  'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长，异常次数最多');
 
 console.log('  -- 场景三：全部正常 --');
 clearAll();
 [['dorm-a', 25, 60, '20:00:00'], ['dorm-b', 25, 60, '20:00:00'], ['dorm-c', 25, 60, '20:00:00']]
   .forEach(([id, t, h, hm]) => {
-    handleMessage('dormmate/' + id + '/env', mk(id, t, h, undefined, T(hm)));
+    handleMessage('dormmate/v1/nodes/' + id + '/telemetry', mk(id, t, h, undefined, T(hm)));
   });
 check('★ 场景三：数据都收下了（不是被拦掉才显得「全正常」）',
   ids.map((id) => nodes[id].history.length + ' / ' + nodes[id].latest.status),

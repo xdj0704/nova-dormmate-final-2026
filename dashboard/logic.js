@@ -308,8 +308,35 @@ export function closeEvent(event, time) {
   return { recoverTime: time, result: '已恢复' };
 }
 
+/* ---------- 优先关注 ---------- */
+
 /**
- * 把「当前在异常中的节点」按那三步排好序，交给调用方。
+ * 严重度权重：数字越大越该先看。
+ *
+ * 这一档只在「连续异常时长和异常条数都打平」时才轮得到 —— 出现得很少，
+ * 但前两步分不出胜负时，总得有个确定的说法，不能看谁先被遍历到。
+ *
+ * 取值不是随手定的，跟 `web/style.css` 里那四档状态色的角色是同一个意思：
+ *   偏热 = critical / 偏湿 = serious / 偏冷 = warning / 正常 = good
+ * 「正常」给 0 只是一个占位：它压根不会进这个排序（见 ranked）。
+ *
+ * ⚠ 这份表和 Python 侧 `rules.py` 的 SEVERITY_WEIGHTS 是同一套东西，
+ * 而且 `core/config.json` 里还能改。两边的**行为**由
+ * `tests/fixtures/priority_cases.json` 钉住 —— 那份文件 Python 和 Node
+ * 各读一遍、逐条对上才算过。改了这里，那份 json 和 rules.py 要一起改。
+ */
+const SEVERITY = { '偏热': 3, '偏湿': 2, '偏冷': 1, '正常': 0 };
+
+/**
+ * 查一个状态的严重度。不认识的状态当 0：不猜、也不炸 ——
+ * 状态是从报文里读来的，宁可排在后面，也不要让整个页面停摆。
+ */
+function severityOf(status) {
+  return SEVERITY[status] || 0;
+}
+
+/**
+ * 把「当前在异常中的节点」按那四步排好序，交给调用方。
  *
  * 抽出来是因为有四个地方要用这份排序：pickPriority（对外那一份）、
  * B1 总览里那句「是当前重点」（8-3 之后归 report.html）、B2 依据（同上）、
@@ -317,10 +344,10 @@ export function closeEvent(event, time) {
  * 而且四份都「看着挺对」，对不上的时候没有任何地方会报错，
  * 只是页面上那一行说的是 dorm-b、语音念的是 dorm-c。
  *
- * 排序的三步和判据见 pickPriority 的注释。
+ * 排序的四步和判据见 pickPriority 的注释。
  *
  * @param {Object} nodes
- * @returns {Array<{nodeId: string, status: string, count: number, duration: number}>}
+ * @returns {Array<{nodeId: string, status: string, count: number, duration: number, severity: number}>}
  *          全是异常节点，最该先看的排在第一个；都在正常时是空数组
  */
 function ranked(nodes) {
@@ -337,12 +364,14 @@ function ranked(nodes) {
       status: node.latest.status,
       count: node.abnormalCount,
       duration: abnormalDuration(node),
+      severity: severityOf(node.latest.status),
     });
   });
 
   list.sort(function (a, b) {
     if (a.duration !== b.duration) return b.duration - a.duration;
     if (a.count !== b.count) return b.count - a.count;
+    if (a.severity !== b.severity) return b.severity - a.severity;
     if (a.nodeId === b.nodeId) return 0;
     /* 不用 localeCompare：它跟着运行环境的区域设置走，同一个数组在不同机器上
        可能排出不同结果。这里要的是固定的字典序。 */
@@ -387,7 +416,17 @@ function basisFor(winner, list) {
     return head + '，持续时间和 ' + tied[0].nodeId + ' 一样长，异常次数最多';
   }
 
-  return head + '，和 ' + tied[0].nodeId + ' 完全并列，按节点名顺序排在前面';
+  /* 再只跟**时长和次数都一样**的那些比严重度。同样不能跟所有人比 ——
+     条数比它多的那些压根没走到这一步。 */
+  const same = tied.filter(function (o) { return o.count === winner.count; });
+  if (same.length > 0 && winner.severity > same[0].severity) {
+    return head + '，持续时间和 ' + same[0].nodeId + ' 一样长、异常次数也一样，'
+      + '但' + winner.status + '比' + same[0].status + '更要紧';
+  }
+
+  /* 四步全平。这里已经是最后的兜底，写的就是实话。 */
+  const peer = same.length > 0 ? same[0].nodeId : tied[0].nodeId;
+  return head + '，和 ' + peer + ' 完全并列，按节点名顺序排在前面';
 }
 
 /**
@@ -404,11 +443,12 @@ function reasonFor(winner, list) {
  * 它是 nextAbnormal 维护的，在这里再按 latest.status 复核一遍只会多出一个
  * 可能跟它打架的判据。这两个字段的对应关系由 dashboard 那边的测试钉住。
  *
- * 比较顺序是固定的三步：
+ * 比较顺序是固定的四步：
  *   1) 连续异常时长，长的优先
  *   2) 时长一样，比这段里的消息条数，多的优先
- *   3) 还一样，按 nodeId 字母顺序
- * 第 3 步不是为了「更准」，是为了**确定**：同样一份数据永远得到同一个结果，
+ *   3) 还一样，比严重度：偏热 > 偏湿 > 偏冷（见上面的 SEVERITY）
+ *   4) 全部并列，按 nodeId 字母顺序
+ * 第 4 步不是为了「更准」，是为了**确定**：同样一份数据永远得到同一个结果，
  * 不会因为对象键的遍历顺序变了就换了个人。
  *
  * @param {Object} nodes 形如 { 'dorm-a': { latest, abnormalStart, abnormalCount }, ... }
@@ -559,6 +599,12 @@ function lostTo(other, top) {
   }
   if (other.count < top.count) {
     return '也' + other.status + '，持续时间和它一样长，但只有 ' + other.count + ' 条异常数据';
+  }
+  /* 严重度比的是**已经算好的 severity**，不是拿 status 现查一遍 ——
+     权重表只有一份，现查等于给「判谁优先」和「说为什么」各留了一个出处。 */
+  if (other.severity < top.severity) {
+    return '也' + other.status + '，时长和次数都跟它一样，'
+      + '但' + other.status + '没有' + top.status + '要紧';
   }
   return '也' + other.status + '，时长和次数都跟它一样，按节点名顺序排在后面';
 }

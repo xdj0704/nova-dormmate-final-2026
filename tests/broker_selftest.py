@@ -10,8 +10,8 @@ LISTENING。这里真的发一条、真的等回一条，两条链路各自闭�
 （协议升级、路径、代理），出问题时现象是「网页上啥也不动」，比 MQTTX 难查。
 
 两个刻意的选择：
-  * topic 用 dormmate/_selftest/echo，不用 dormmate/<nodeId>/env —— 后者会被
-    看板当成真实环境数据显示出来，自检不该往业务 topic 里灌假数据。
+  * topic 用 dormmate/_selftest/echo，不用 dormmate/v1/nodes/<nodeId>/telemetry
+    —— 后者会被看板当成真实环境数据显示出来，自检不该往业务 topic 里灌假数据。
   * 走的是 paho 的 transport="websockets"，也就是替浏览器把那条路先验了。
 
 文件名不以 test_ 开头是有意的：unittest discover 默认只收 test*.py，
