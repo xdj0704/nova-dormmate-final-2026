@@ -74,6 +74,19 @@
      `tests/config.test.js` 会去 events.py 里把那行抠出来对一次。 */
   const CMD_ACTION = 'handle';
 
+  /* 「把焦点切到这个宿舍」那个动作的名字。**只有移动端发**它（看板故意不发：
+     两个端都能改焦点的话，两个人一起看就会互相抢），发完 core 把它记进快照的
+     `focus` 那三个字段，看板和 3D 跟着切过去。
+
+     同一个节点再发一次是**取消**（core 里写的）—— 手机上「再点一下收起」不用
+     另发一条指令，所以这里也只有一个动作名。
+
+     对应 core 侧的 `FOCUS = "focus"`（在 core.py 里，不在 config.py：它是
+     **动作**不是配置）。它进了 `COMMANDS`（`events.COMMANDS + (FOCUS,)`），
+     所以 `validate_command` 那六道判据对它一样适用。
+     `tests/config.test.js` 会去 core.py 里把那行抠出来对一次。 */
+  const CMD_ACTION_FOCUS = 'focus';
+
   /* ---- 函数 ---- */
 
   /**
@@ -129,6 +142,7 @@
     RETAIN: RETAIN,
     CMD_RETAIN: CMD_RETAIN,
     CMD_ACTION: CMD_ACTION,
+    CMD_ACTION_FOCUS: CMD_ACTION_FOCUS,
     topicFor: topicFor,
     brokerUrl: brokerUrl,
     brokerUrlFor: brokerUrlFor,

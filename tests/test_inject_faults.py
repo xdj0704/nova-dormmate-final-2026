@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -229,16 +230,16 @@ class TestFaultList(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class TestFrontEndsDifferOnUnknownNode(unittest.TestCase):
-    """节点名单在两边的来路不一样：`web/` 自己收遥测攒，`dashboard/` 只认快照。
+    """节点名单在三个页面里的来路不一样：`web/` 自己收遥测攒，另两个只认快照。
 
     Step E3-2 之前，看板里有一份写死的 NODE_IDS 名单（三节点横向对比，版面就是
     三张卡），收到名单外的节点直接挡掉。那一轮看板改成**只订 core 的快照**，
     名单跟着没了 —— 「现在有哪几个节点」是 core 说了算（快照里的 nodes 数组），
-    页面按那个数组画，一个不多一个不少。
+    页面按那个数组画，一个不多一个不少。E3-3 的移动端走的是同一条路。
 
-    所以两边的差别从「谁有名单」变成了「谁在管节点」：`web/` 是从一条条遥测
-    报文里**现攒**出节点清单（所以来几个画几个，多一个也画得下）；看板是等
-    core 算好整帧发过来（所以它连一个节点名都不认识）。
+    所以差别从「谁有名单」变成了「谁在管节点」：`web/` 是从一条条遥测报文里
+    **现攒**出节点清单（所以来几个画几个，多一个也画得下）；看板和移动端是等
+    core 算好整帧发过来（所以它们连一个节点名都不认识）。
 
     README 上写着这句话，所以这里拿源码把它钉住 —— 哪天有人又在前端写死一份
     名单，这一条会红，提醒去把文档一起改。"""
@@ -253,6 +254,32 @@ class TestFrontEndsDifferOnUnknownNode(unittest.TestCase):
         src = (ROOT / "web" / "script.js").read_text(encoding="utf-8")
         self.assertNotIn("NODE_IDS", src)
         self.assertIn("telemetry", src)
+
+    def test_mobile_renders_from_the_snapshot_too(self):
+        """移动端（E3-3）：和看板同一个来路，而且**共用同一份判断**。
+
+        这里查的是「有没有第二条实现」这件事 —— 页面各有各的皮，但
+        「谁是重点、处理到哪一步」只能有一份代码。logic.js 里那几个是纯函数，
+        复制一份到 mobile/ 下面也跑得起来，跑起来之后两个屏幕的说法迟早会岔开，
+        而岔开的那一刻没有任何报错（两边都在正常显示，只是显示的结论不一样）。"""
+        src = (ROOT / "mobile" / "mobile.js").read_text(encoding="utf-8")
+        self.assertNotIn("NODE_IDS", src)
+        self.assertIn("snapshot.nodes", src)
+        # 复用的是看板那一份，不是第二份实现
+        self.assertIn("from '../dashboard/logic.js'", src)
+        for name in ("readSnapshot", "focusBanner", "actionState"):
+            self.assertNotIn(f"function {name}", src, f"mobile.js 里不该有第二份 {name}")
+
+    def test_mobile_page_has_no_way_to_type_data_in(self):
+        """E3 的硬约束「禁止两边手动输入数据伪造同步效果」，落在页面上就是：
+        这个页面里不能有任何地方能敲数字进去。
+
+        查的是**去掉注释之后**的那一份：这个页面的注释里到处在讲「不许手动
+        输入」「不要伪造同步」，拿原文去查，讲解这件事的句子自己就会命中。"""
+        html = (ROOT / "mobile" / "index.html").read_text(encoding="utf-8")
+        html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+        for tag in ("<input", "<textarea", "<select", "<form"):
+            self.assertNotIn(tag, html, f"移动端页面上出现了 {tag}：数据只能来自 core")
 
 
 # --------------------------------------------------------------------------

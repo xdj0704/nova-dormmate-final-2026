@@ -24,6 +24,7 @@ three.js —— 都各留了一份本地副本，默认走 CDN，现场没网时
 | **业务大脑（`core.py` + `rules.py`）** | ✅ 已完成（Phase2） | 独立进程订阅 `dormmate/v1/nodes/+/telemetry`，逐条**校验**（九道判据，topic 里的 nodeId 和报文里的必须一致，非法报文发去 `dormmate/v1/log/reject`；清 retained 的那条空报文除外）、按统一规则**判状态**（`status` 对不上只记一笔，不拒收）、按节点**存历史**、算出**优先关注**（时长 → 条数 → 严重度 → 字典序，每一步都带一句人话理由），并把全局快照 retained 发到 `dormmate/v1/state`。带遗嘱 LWT：core 一掉线，broker 立刻在 `dormmate/v1/core/status` 上报 `offline`。全部可调参数在 `core/config.json`，启动时与规则真源逐项核对，对不上就拒绝启动 |
 | 实时看板（`web/`） | ✅ 已完成（M1） | 通过 WebSocket 订阅 `dormmate/v1/nodes/+/telemetry`，显示温湿度与状态徽章。状态用**颜色 + 图标**双重编码，不靠颜色单独表意；支持深 / 浅色主题 |
 | 多节点看板（`dashboard/`） | ✅ 已完成（Step 5-3 / 5-4，**Step E3-2 起只订快照**） | Step E3-2 之前订阅遥测通配符、自己复核状态；现在只订 `dormmate/v1/state`（core 发布的全局快照），`dorm-a` / `dorm-b` / `dorm-c` 各一张状态卡 + 一张趋势图（温湿度分两张，不用双 Y 轴）。三个节点各存一份互不相干的状态，改一个不动另外两个 |
+| **移动端 H5（`mobile/`）** | ✅ 已完成（Step E3-3） | 手机上那一版：只留「谁该管、点一下看他、按开始处理」三件事。和看板**订同一条快照**（`dormmate/v1/state`），判断也是**同一份代码**（从 `dashboard/logic.js` import，不是第二份实现）。它比看板多一样东西：**它会发 `focus`** —— 点一下某个宿舍就往 `dormmate/v1/cmd` 发一条指令，core 把它记进快照，看板和 3D 跟着切过去。点完页面上一个字都不改，等 core 发回新快照 |
 | 3D 宿舍实景 | ✅ 已完成（Step 6-1 ~ 6-3） | Three.js 场景嵌在看板里，跟着**当前选中的节点**走：点卡片切节点时，画面、标签、风扇一起切 |
 | 优先关注 | ✅ 已完成（Step 7-1，**栏本身已被 8-3 换成顶部那一行**） | 从三个节点里挑出最该先看的那个：先比连续异常时长，一样长比这段的消息条数，还一样按 nodeId 定序。挑法一个字没变（还是 `pickPriority`），只是顶上换成了 8-3 那一行；点它 = 点对应那张卡片，这个行为也留着 |
 | 处理动作 | ✅ 已完成（Step 7-2，D3 起还会发指令） | 详情区「开启风扇 / 通风」按钮。按下后节点记「处理中｜风扇已开启」，动作之后收到的数据决定转「已恢复」还是留在「处理中」。卡片、详情区、3D 风扇读的是同一份节点数据。**Step D3 起这一下还会往 `dormmate/v1/cmd` 发一条 `handle`**，core 那边的事件跟着进「处理中」—— 但「好没好」由 core 后面收到的数据判，页面上按不出「已恢复」 |
@@ -111,16 +112,17 @@ nova-dormmate-final-2026/    # 仓库根
 │   │                        #   Step E3-1 补了 26 条：focus 指令 + 快照的 events / rejects / history 三块
 │   ├── test_rules_priority.py # Phase2：rules.py 的四步排序 + 理由措辞 + 「不许写死节点名」的静态检查（29 条）
 │   ├── test_scenarios.py    # Phase2：把 d2_case1/2/3 逐帧喂给 core，断言「优先关注」的换人轨迹（15 条）
-│   ├── test_inject_faults.py # Step D4：故障清单逐条对 core 的判据，外加两个前端「节点名单从哪来」的差异（37 条，不连 broker）
+│   ├── test_inject_faults.py # Step D4：故障清单逐条对 core 的判据，外加三个前端「节点名单从哪来」的差异（39 条，不连 broker）
 │   ├── test_events.py       # Step D3：事件状态机 / 落盘读取 / 指令校验 / D3 剧本重放 / 四条红线的静态检查（164 条，不连 broker）
 │   │                        #   Step E3-1 补了 19 条：Event.view() 的列 + mark_priority()
 │   ├── fixtures/
 │   │   └── priority_cases.json # Python 与 Node 共读的期望表（排序四步 + 时长措辞）
 │   ├── rules.test.js        # shared/rules.js 的测试（31 条，纯 Node 无依赖）
 │   ├── miniapp-rules.test.js # 小程序 rules.js ↔ shared/rules.js 交叉比对（48 条）
-│   ├── config.test.js       # Step E3-1：shared/config.js ↔ config.py 双向核对常量 + brokerUrl 不写死端口 + 动作名和 events.py 的 HANDLE 是同一个词（43 条）
+│   ├── config.test.js       # Step E3-1：shared/config.js ↔ config.py 双向核对常量 + brokerUrl 不写死端口 + 动作名和 events.py 的 HANDLE / core.py 的 FOCUS 是同一个词（46 条）
 │   ├── logic.test.js        # Step E3-2：dashboard/logic.js 的纯函数 —— 读快照 / 取节点 / 事件措辞 / 按钮按不按得动 / 风扇 / 趋势 / 顶部那一行 / 语音那句 / 快照摘要 / ML 那几句 / 指令发出去之后那行说明（251 条）
 │   ├── dashboard.test.js    # Step E3-2：dashboard.js 只订 state —— 启动 / 只订一条 topic / 画快照 / 拦下非快照 topic 与坏快照 / 「快照说什么就是什么」/ 点卡片 / 事件表与 CSV 导出 / 被拒绝消息面板 / 清空 / 3D 接线 / 语音提醒 / 连接开关 / ML 那一段 / 源码里的硬约定（238 条，假 DOM + 假 mqtt + 假 fetch）
+│   ├── mobile.test.js       # Step E3-3：mobile.js 只订 state + 两条指令（focus / handle）的报文形状 + 「点完屏幕上什么都不变」+ 表格里那几条硬约定（105 条，假 DOM + 假 mqtt）
 │   ├── scene3d.test.js      # 3d/scene.js 与 3d/index.html 的结构（224 条，假 three 模块 + 假 DOM）
 │   ├── scene3d-page.test.js # 3d/index.html 里那段模块脚本：MQTT 驱动 3D（65 条）
 │   └── script.test.js       # 前端回归测试（150 条，纯 Node 无依赖）
@@ -138,6 +140,10 @@ nova-dormmate-final-2026/    # 仓库根
 │   └── lib/
 │       ├── mqtt.min.js      # 本地引用：它挂了就一条数据都收不到，所以不走 CDN
 │       └── chart.umd.min.js # 备用：Chart.js 默认走 CDN，断网时改成引用这个
+├── mobile/                  # Step E3-3 移动端 H5（纯静态，必须走 http 服务器）
+│   ├── index.html           # viewport + 连接状态 + 优先关注大卡片 + 宿舍迷你列表 + 开始处理；没有 3D / 趋势图 / 事件表
+│   ├── style.css            # 手机优先：可点的地方最小 48px、安全区、状态色靠 [data-status="…"] 挑
+│   └── mobile.js            # ES 模块，只订阅 dormmate/v1/state；判断从 ../dashboard/logic.js import；会发 focus（看板故意不发）
 ├── 3d/                      # M6 三维场景（ES Module + importmap，必须走 http 服务器）
 │   ├── index.html           # 容器 + importmap + 节点选择（dorm-a/b/c）+ 订阅 MQTT 筛给当前节点，另留 4 个手动预览按钮
 │   ├── scene.js             # createDorm3D(container)：宿舍 + updateScene(status) / setFanOn / setLabel / setFocus（当前重点那圈环）
@@ -438,22 +444,23 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 ## 跑测试
 
 ```bash
-py -3.14 -m unittest discover -s tests -t . -v   # ①②③⑪⑫⑬⑭⑮⑯⑰⑱⑲，共 942 条
+py -3.14 -m unittest discover -s tests -t . -v   # ①②③⑪⑫⑬⑭⑮⑯⑰⑱⑲，共 944 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
-node tests/config.test.js                         # ⑳ 前端配置 ↔ config.py 双向核对，43 条
+node tests/config.test.js                         # ⑳ 前端配置 ↔ config.py 双向核对，46 条
 node tests/scene3d.test.js                        # ⑧ 3D 场景，224 条
 node tests/scene3d-page.test.js                   # ⑨ 3D 页面的 MQTT 接线，65 条
 node tests/miniapp-rules.test.js                  # ⑥ 两份规则实现交叉比对，48 条
 node tests/dashboard.test.js                      # ⑦ 多节点看板（只订 state），238 条
 node tests/logic.test.js                          # ⑩ 快照 -> 人话那一层，251 条
+node tests/mobile.test.js                         # ㉑ 移动端（只订 state + focus 指令），105 条
 node tests/script.test.js                         # ⑤ 页面 JS 侧，150 条
 ```
 
 `unittest discover` 会把 `tests/` 下十二个 `test_*.py` 一起收进来
-（23 + 206 + 54 + 30 + 123 + 124 + 22 + 115 + 29 + 15 + 37 + 164 = 942 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib，
+（23 + 206 + 54 + 30 + 123 + 124 + 22 + 115 + 29 + 15 + 39 + 164 = 944 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib，
 ⑫ 那 124 条还要 scikit-learn（没装的话，要真跑模型的那几类会被整类 `skipUnless` 跳过，
 纯函数那批照样跑 —— 输出里是 `s` 不是失败）。
-`node` 那八条不需要任何依赖，也不用起服务器。
+`node` 那九条不需要任何依赖，也不用起服务器。
 
 画图那几只测试在开头 `skipUnless(HAS_MPL)`：没装 matplotlib 时会**跳过**
 （输出里是 `s` 不是 `.`）而不是报一堆错 —— 读 CSV、统计、复核这几步没它也
@@ -471,7 +478,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，150 条
 | ⑮ 115 条 | Phase2 的 `core.py`（业务大脑）。用假客户端顶掉真连接，走的是真的 `on_message` 那条路（不是直接调内部函数）。**导入陷阱**——`find_spec('core').origin` 必须以 `core.py` 结尾、`core/` 里不许有 `__init__.py`、`core/` 下只该有 `config.json` 一个文件（`core/` 一旦变成包，`import core` 拿到的是那个包而且**不报错**，几千行业务逻辑整段失效）；**topic 解析**——严格五段、多一段少一段都不认、`+` 通配符不算节点名；**报文校验**——九道判据各来一遍（非 JSON / 不是对象 / 缺字段 / 类型不对 / NaN / Infinity / `true` 混进数字 / `time` 少秒 / 日期不存在 / 未知节点 / topic 与报文 nodeId 不一致 / status 与重算不符），**拒收的才发 reject**、reject 的 `retain` 必须是 `False`、payload 超长要截断、`status` 对不上只记 `statusMismatch` 不拒收（数据本身没错，丢掉反而少一条读数）、老师给的 4 条回归数据故意把 status 写错喂进去，四条全被判为「不一致」；**状态机**——首条开一段、起点不动、段内从偏热漂到偏湿仍是同一段、**连续 N 条正常才算结束**、中间插一条异常只清计数不动起点、`normals_until_recovery` 在没有开着的段时是 `None`；**恢复路上的那两条读数**——`status` 是最新读数（正常）而优先关注用的是 `abnormal_status`（偏热），且严重度那一步也按后者比（按前者比的话，一个还在异常里的宿舍理由会写成「已连续正常 7 分钟」，**而且不报错**）；**优先排序**——离线的节点不参与但仍在快照里、`tick()` 只在「收到过又安静了」时报掉线（从没来过的节点是「还不知道」，不是「掉了」）、同一次只报一遍、权重从配置里取、**日志只在换人时打**（比的是节点 id 不是整句话 —— 整句话里嵌着越来越长的时长，拿它当判据每一条都「变了」）；以及一条静态检查：`core.py` 的源码里不许出现任何节点名；**快照**——五块的字段名与类型、全部正常时 `priority` 是 `null`、内容变了才发、`force=True` 例外；**遗嘱**——LWT 在 `connect()` **之前**就设好了（paho 2.x 里遗嘱存在 `_will_topic` / `_will_payload`，`_will` 只是个 bool）、掉线发 `offline`、启动发 `online`；**配置核对**——阈值 / 节点列表 / 恢复条数分别改坏，三种都拒绝启动并且**说的是改哪一边**；**命令行**——`--check` 对得上返回 0 并打出摘要、对不上返回 1 且不连 broker；**清 retained 的空报文**（`--clear` 发的那条）——空 payload 判成 `ignored` 而**不拒收**、`rejected` 和 `received` 都不动、reject topic 一条没有、节点历史与开着的那一段一个字不动、也不因此多发一次快照、计数进 `counters.retainedCleared`、日志打的是 `[保留]` 而不是 `[拒绝]`；**只认长度 0**（空白字符仍按坏报文拒收），topic 形状不对时先报 topic（先确认这条消息是不是我们这一路的）。**Step E3-1 补的 26 条**：`focus` 指令——它走的是和 `handle` 同一个 `validate_command`（不是另开一条路，所以十几种坏指令的判据自动适用）、`focus` 只改 `self.focus` 这三个字段（`nodeId` / `by` / `at`）而**一个节点、一条事件都不动**、同一个节点再发一次是**取消**（前端「再点一下收起」不用另发一条指令）、它**不能开案**（对着一个没有事件的宿舍发 `focus` 不会凭空造出一条 `HANDLING`）、也不改「谁是重点」（那由数据判，不由点击判）、来多少条遥测之后 `focus` 都还在（它不属于任何一段数据）、重启之后 `focus` 是 `null`（**不落盘**——它是「现在在看哪个」，不是历史）；快照的三块新内容——`events` 那一块永远在（哪怕一条事件都没有，前端不用判 `undefined`）、`summary.total` 是**真总数**而 `events` 数组只留最近 20 条、`rejects` 那一块 `{total, kept, items}` 三个数各说各的（环形缓冲满了之后 `total` 还在涨而 `kept` 封顶）、**`items` 里那条 `payload` 和真发出去的那条一个字节都不差**（前端要把原文摆出来给人看，转义过或者截断过就废了）、`history` 每条只有四个字段（时刻 / 温度 / 湿度 / 状态）；以及三处**重发快照**——拒收一条要重发（否则「被拒绝消息」那块面板永远是空的，而且**静悄悄地空着**）、按一下 `handle` 要重发（否则看板上事件状态要等下一条遥测才变）、清 retained 也要重发（`counters.retainedCleared` 变了，快照却停在旧数上）。**这一条是拿真 broker 跑出来的，不是想出来的** —— 拒收不重发快照这个洞，光看代码看不出来，因为 `publish_reject` 里每一步都对，是**少了一步** |
 | ⑯ 29 条 | Phase2 的 `rules.py`。`judge_status` **就是** `status_rules.compute_status` 那个对象本身（`assertIs`，转发写成「重抄一遍」这里就红）；`rank_priority` 的四步：时长决出、时长打平比条数、条数也平比严重度、全平按字典序，**只有进到某一步的节点才参与那一步的比较**（时长不同的那些根本不该出现在比条数的名单里）、传进来的东西一个都不改、空输入返回空表、`format_duration` 的边界（59.9 秒说「不到 1 分钟」、非数 / 负数 / NaN / 无穷一律「不到 1 分钟」）、理由的两半（第一名说凭什么赢、其余说输在哪一步，都不许含糊成「它更严重」）；**权重可覆盖**（改了权重赢家和措辞一起变）；以及那条静态检查：把注释和**文档字符串**用 `ast` + `tokenize` 剥掉之后，源码里不许出现任何节点名 —— 但**其他字符串字面量要留着**（写死节点名最典型的形态就是 `if node_id == "dorm-a"`，一起删掉这个检查就永远绿了），所以配了一条元测试：只有注释的代码必须通过、`node.node_id == "dorm-a"` 必须被抓出来 |
 | ⑰ 15 条 | Phase2 的三套剧本（`simulator/scenarios/d2_case*.json`）。不是给人读的演示稿，是**能被断言**的：每一帧逐帧喂给 core，记下每一步的结论，跟预期的**换人轨迹**对。只记「换人」那几步（同一个人连续领先不重复记），因为「没有乱跳」也是结论的一部分。`d2_case1`：空 → dorm-b → dorm-c → 空（时长决出、靠恢复交接），并断言 20:07 / 20:08 那两条正常**没有**触发换人；`d2_case2`：dorm-a → dorm-b → dorm-a → dorm-b → dorm-a → 空，而且每一步的理由必须是真的那一步（第 2 步赢的那行要提「异常次数最多」，第 1 步赢的那几行才提「持续时间最长」）；`d2_case3`：dorm-a → dorm-b → dorm-a → 空，第 2 步赢的那行要提「偏湿比偏冷更要紧」，第一条理由必须是「唯一的异常节点」而不是「持续时间最长」（只有一个异常节点时，比时长那一步根本没发生过）。另有四条件对所有剧本都成立：三个节点都用上、**同一个节点的时间必须往前走**（core 用报文时间算时长，倒着来的时间会算出负数被夹到 0，「持续了多久」就成了空话而且不报错）、**至少换两次人**（只换一次证不了「跟着数据自己变」）、**结尾必须是三个都正常**（收尾状态要看得见，方便截图） |
-| ⑱ 37 条 | Step D4 的故障注入清单（`simulator/inject_faults.py` + `tests/test_inject_faults.py`）。**不连 broker** —— 连真 broker 的那种自检是脚本自己的 `--verify`。这一批测的是**清单站不站得住**：每一条逐条喂给 `core.validate_message`，结论必须和清单上写的那个 `outcome` 对上（`reject` → `ok is False` 且 `ignored is False`；`pass` → `ok is True`；`silent` → `ignored is True` 且发出去的就是空串；`unrouted` → `ok is False` 且理由里有「topic 形状不对」）。**理由关键词也钉住**：第 3 条（topic 和报文对不上）如果是因为 JSON 写坏了才被拒，光数条数照样绿，而演示时那句理由是当着人念出来的。清单本身的性质：编号唯一且递增、每条都写了期望、**只有 `reject` 才带理由关键词**、有一条确定能通过的当对照（全都能拦住也可能是「什么都拦」）、每条参数 `publish_one` 都吃得下、**只有清 retained 那条带 retain**（故障消息被 retained 的话，之后每开一次看板都先看到它）。逐条验它宣称的性质：第 1 条真的 `json.loads` 就报、第 2 条是合法 JSON 只是缺字段、第 3 条 topic 里的节点和报文里的确实不一样**而报文本身是完好的**（所以看板那边只警告不丢弃）、第 4 条的节点确实不在 `config.NODE_IDS` 里、**第 5 条 99℃/200% 被如实收下且判成偏热**（core 里没有任何范围校验）、第 6 条 `[1,2,3]` 是合法 JSON 但不是对象、第 7 条的段数和订阅 pattern 对不上**且 pattern 里没有 `#`**（有 `#` 的话段数规则就不成立了）。两个前端的**节点名单来路**拿源码钉住：`dashboard/dashboard.js` 里不许有写死的名单（它按快照里的 `nodes` 画，连一个节点名都不认识）、`web/script.js` 里也不许有（它自己订通配符现攒）—— README 上写着这是设计如此，哪天有人又在哪一边写死一份，这一条会红。命令行的几条路（`--list` / `--dry-run` **压根不建客户端**、`--only 99` 返回 2、连不上返回 3 并告诉人怎么起 broker，都是拿一个「一被调用就报错」的假 Client 顶着的）。最后是一整条 `run()`：拿假 Client **顺便扮一下 core**（订上 reject 之后，`publish` 时按 topic + payload 回一条 reject），于是「拒了但拒错了原因也要红」「core 没起时不能喊拦住」「放行的不该收到 reject」「不投递那条说的是收不到」「清 retained 那条说的是 `[保留]` 且确实带了 retain」这些都能在不起 broker 的情况下跑；另有一组直接测比对函数：**比的是 topic + payload 全文，不是「有几条 reject」** —— 连着跑九条，只数条数的话「第 2 条没被拒、第 3 条被拒了两次」总数照样对得上 |
+| ⑱ 39 条 | Step D4 的故障注入清单（`simulator/inject_faults.py` + `tests/test_inject_faults.py`）。**不连 broker** —— 连真 broker 的那种自检是脚本自己的 `--verify`。这一批测的是**清单站不站得住**：每一条逐条喂给 `core.validate_message`，结论必须和清单上写的那个 `outcome` 对上（`reject` → `ok is False` 且 `ignored is False`；`pass` → `ok is True`；`silent` → `ignored is True` 且发出去的就是空串；`unrouted` → `ok is False` 且理由里有「topic 形状不对」）。**理由关键词也钉住**：第 3 条（topic 和报文对不上）如果是因为 JSON 写坏了才被拒，光数条数照样绿，而演示时那句理由是当着人念出来的。清单本身的性质：编号唯一且递增、每条都写了期望、**只有 `reject` 才带理由关键词**、有一条确定能通过的当对照（全都能拦住也可能是「什么都拦」）、每条参数 `publish_one` 都吃得下、**只有清 retained 那条带 retain**（故障消息被 retained 的话，之后每开一次看板都先看到它）。逐条验它宣称的性质：第 1 条真的 `json.loads` 就报、第 2 条是合法 JSON 只是缺字段、第 3 条 topic 里的节点和报文里的确实不一样**而报文本身是完好的**（所以看板那边只警告不丢弃）、第 4 条的节点确实不在 `config.NODE_IDS` 里、**第 5 条 99℃/200% 被如实收下且判成偏热**（core 里没有任何范围校验）、第 6 条 `[1,2,3]` 是合法 JSON 但不是对象、第 7 条的段数和订阅 pattern 对不上**且 pattern 里没有 `#`**（有 `#` 的话段数规则就不成立了）。三个前端的**节点名单来路**拿源码钉住：`dashboard/dashboard.js` 和 `mobile/mobile.js` 里不许有写死的名单（它们按快照里的 `nodes` 画，连一个节点名都不认识）、`web/script.js` 里也不许有（它自己订通配符现攒）；移动端另有一条：`mobile.js` 里不许出现第二份 `focusBanner`，`from '../dashboard/logic.js'` 得在—— README 上写着这是设计如此，哪天有人又在哪一边写死一份，这一条会红。命令行的几条路（`--list` / `--dry-run` **压根不建客户端**、`--only 99` 返回 2、连不上返回 3 并告诉人怎么起 broker，都是拿一个「一被调用就报错」的假 Client 顶着的）。最后是一整条 `run()`：拿假 Client **顺便扮一下 core**（订上 reject 之后，`publish` 时按 topic + payload 回一条 reject），于是「拒了但拒错了原因也要红」「core 没起时不能喊拦住」「放行的不该收到 reject」「不投递那条说的是收不到」「清 retained 那条说的是 `[保留]` 且确实带了 retain」这些都能在不起 broker 的情况下跑；另有一组直接测比对函数：**比的是 topic + payload 全文，不是「有几条 reject」** —— 连着跑九条，只数条数的话「第 2 条没被拒、第 3 条被拒了两次」总数照样对得上 |
 | ⑲ 164 条 | Step D3 的事件状态机（`events.py` + `core.py` 的那几处接线 + `simulator/send_cmd.py` + `d3_event.json`）。**也不连 broker** —— 状态机是纯的，喂数据就行。**开案**：节点第一次异常开一条 `OPEN`、`start_time` 取的是**报文里的 `time`** 不是墙上时间（拿墙上时间的话，剧本里 20:00 那段会被记成今天下午）、同一段里再来异常不另开（`abnormal_count` 不是 1 就一定还在原来那段里）、恢复正常这条事件还挂着（要等连续 N 条正常，不是一条）、开案快照里 `durationText` 是 `null`（起点就是它自己，写「0 分钟」是在说一件没发生过的事）。**处理**：`handle` 把 `OPEN` 推成 `HANDLING` 并在 `actions` 里记一笔、`verify_from` 记的是「从第几条验证数据之后开始算」、在已经 `HANDLING` 的事件上再点一次只多记一笔动作而**不动 `verify_from`**（动了的话验证窗口会被第二次点击推走，前面收的正常数据白算）。**恢复**：要连续 N 条正常（N 取自 `core/config.json`）、恢复那一刻写的是最后那条正常数据的 `time`、`recovered_at` 与 `result` 一起填上、结案快照的 `durationText` 是「起点到这条」的时长。**未恢复**：处理之后连着 N 条还是异常就结案成 `UNRESOLVED`、`recovered_at` 保持 `null`（**不是**写一个空串，看板那边判的是 `null`）、`result` 里说的是最后那条是什么状态。**判据不能被存档数拖累**：`events_verify_max=2` 而门槛是 3 时照样判得出 `UNRESOLVED`（数存档里最后几条的话，第 3 条早就被挤掉了，而 `verify_dropped` 还是 0 —— 这条是真跑出来的，见下）、来一条正常就把这个计数清零（不清零的话「异常 正常 异常 异常」会被算成连着三条异常）。**落盘**：写 `<名>.tmp` 再 `os.replace`、`newline="\n"`、`load()` 把读不动的文件改名成 `.bad` 而不是覆盖掉、坏的那几条跳过并报数、**启动时读到还没结案的事件一律按 `UNRESOLVED` 收尾并在 `result` 里说明是重启造成的**（不然它会永远挂在「处理中」，重启一次变一次）、**验证数据在结案之前就得到文件里**（不是只有开案/结案那两下才写 —— 一条迟迟结不了案的事件，中间收的验证数据要是只在内存里，core 一被杀就全没了，而 `verify` 正是「处理之后好了几条」的唯一凭证；这条是拿真文件读回来断言的，把 `observe()` 末尾那次节流写删掉就红）。**四条红线的静态检查**（拿 `ast` 抠出函数体、剥掉函数自己的 docstring 再查文本）：`apply_action` 里对 `event.state` 只有一处赋值而且是 `= HANDLING`、`event.state = RECOVERED` 这个字符串**只出现在 `_close_recovered` 里**而 `_close_recovered` 只被 `observe` 调、`Core.handle_command` 的函数体里**一次都不出现 `self.nodes`**。**指令校验**：十几种坏指令（topic 不对 / 不是 JSON / 缺 `nodeId` / 缺 `action` / 未知 action / 未知节点 / `time` 写坏）各来一遍，理由清一色带「指令」两个字（不然和报文那条路的拒收理由糊在一起）；`action` **不做大小写归一**（`Handle` 不认，理由里明说了要小写 —— 悄悄认下的话，前端写错了永远没人发现）。**接线**：收到指令只多 `commands` 计数、`core` 收到指令**不发快照**（这一轮事件还没进快照，发了等于说「什么都没变」）、`on_connect` 订的是两个 topic、`on_message` 拿**全等**分路而不是 `startswith`（`dormmate/v1/cmd/foo` 这种长得像的不该被当成指令）。**配置**：`core/config.json` 少了 `events` 那一块时拒绝启动、三个数都得是 ≥1 的整数。**剧本重放**：`d3_event.json` 那 14 帧（3 偏热 → handle → 3 正常 → 3 偏湿 → handle → 3 偏湿）离线喂给一个真 `Core`，断言第一幕 `RECOVERED`、第二幕 `UNRESOLVED`，并且**两幕分别属于哪 7 帧**（`[:7]` 全是 dorm-b、`[7:]` 全是 dorm-c）。`send_cmd.py` 那几条：默认不 retain、`--clear` 必须带 retain、`--raw` 原样发、参数错了返回 2 且一条都不发。**Step E3-1 补的 19 条**：`Event.view()` 那十三个键逐个点名（列名和看板那张表的表头、CSV 表头是同一套，改一边不改另一边这里就红）、`action` / `actionTime` / `actionSource` 取的是**第一条被接受的动作**（`actions` 里可能有好几笔，第二次点击不该顶掉第一次的时刻）、`verify` 和 `snapshots` **故意不出现**（那是内部凭证，几 KB 一条，塞进快照每发一次都是一份）、`mark_priority()` 只记第一次（第二次返回 `None` 且原值不动）、空时刻不写（写下去的话看板上会多出一个叫 `null` 的时刻）、没开着的段时返回 `None` 而不是报错（优先关注每一轮都会调它，没有事件是常态）、写了之后确实落盘；以及那条**搬过家的不变量**：`handle_command` 的函数体里只许出现 `self.event_book` 相关的东西，`self.nodes` 和 `node.apply*` 一个都不许有 —— 这一条原先挂在「收到指令不发快照」上，E3-1 起 `handle` **要**发快照了（看板靠它当场变），所以判据改成直接钉「不许碰节点」，而不是钉「不许发快照」那种一改需求就失效的间接性质 |
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
 | ⑤ 150 条 | `validateInput` 的判序、`analyze` 的四种状态与配色 class、`formatTime` 的格式与补零、录入历史的追加与倒序、CSV 的表头/BOM/CRLF/行顺序/空状态、HTML 与 JS 的 id 是否对得上、broker 地址按访问地址拼（本机 / 局域网 IP / 空 hostname）、源码里不再有写死的 `ws://localhost:9001`；Step 3-1 的摄像头：起手标记、`takeSnapshot()` 的三种失败路径与成功路径、画布取视频原始像素而不是 CSS 尺寸、`drawImage` 的实参、第二次拍照是覆盖不是追加、关摄像头时每条 track 都被 `stop()`、`pagehide` 自动关；Step 3-2 的语音：浏览器不支持、`lang`/`continuous`/`interimResults` 三个参数、重复点击被忽略、三个固定指令各自的走向、「拍照」在摄像头没开时走 `takeSnapshot` 的失败分支、字面匹配的边界（「拍张照」不算）、三种错误码都出现在页面上、表里没有的码不被吞、离开页面时 `abort` 且不报错；Step 3-3 的语音播报：一个节点都没收到时念「还没有收到任何节点的数据」而不是「都正常」、按 nodeId 排序（不是按收到的先后）、小数照 `fmt` 的格式念（25.5 不写成 25.50）、**念的是报文里的 `status` 而不是页面自己重算的**（故意把 31℃/78% 那条写成偏湿，规则上它该是偏热 —— 前端重算的话这一条就红）、说「朗读」走完整条链路真的调了 `speak()`、念的就是当前状态那句话、`lang` 是 `zh-CN`、**先 `cancel()` 再 `speak()`**、页面上显示的就是要念的那一句、utterance 留着一个引用（被 GC 掉的话 Chrome 念到一半会停）、第二个节点收到数据之后下一句立刻带上它（不缓存上一句）、浏览器不支持时返回 `{ok:false}` 而不抛异常、不支持时照样把要念的内容写在页面上且压根没碰 `speechSynthesis`、**只有 `speechSynthesis` 没有 `SpeechSynthesisUtterance` 也算不支持**（少查一个就是一条未捕获的 TypeError）、`onerror` 把原始错误码覆盖到页面上（不留一句「正在朗读」的假话）、连错误码都没有时写 `unknown` 不写 `undefined` |
@@ -480,7 +487,8 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，150 条
 | ⑧ 224 条 | `3d/scene.js` 配假 `three` 模块 + 假 DOM 实跑（模块里的裸名字 `three` 是不认 importmap 的，测试把那一行 import 改写成指向本地假模块的绝对 file:// URL）：容器查找与报错、renderer 的像素比封顶与尺寸、宿舍每部分的几何 / 朝向 / 摞放关系（床垫正好压在床架上、3 片扇叶互成 120°、窗扇挂在铰链的一侧、支架不在会转的那个 Group 里）、两盏灯与阴影相机、相机参数与 `lookAt`、`updateScene` 四种状态各自改了什么以及切回来有没有残留、不认识的 status 退回「正常」并在控制台警告、`setFanOn` 的归一化与「关掉不归零」、`setLabel` 的覆盖层、动画循环随 dt 累加（**验证转动快慢与帧率无关**）、resize 自适应与 0×0 容器不产生 NaN、dispose 是否真的回收了几何体 / 材质 / 监听（**包括嵌在 Group 里的零件**）、index.html 的 importmap（合法 JSON、出现顺序比的是**标签**位置、版本号）与 4 个按钮的接线、覆盖层那两条关键 CSS、以及 `lib/` 里那份的大小与自包含性；Step 8-3 的「当前重点」那圈环：`focusRing` 存在且 `RingGeometry` 的内半径小于外半径、环比房间小一圈（拿 `floor` 的宽算出一半宽再比）、平躺（绕 X 转 -90°）、抬离地面（免得和地板共面闪烁）、`transparent` + `opacity < 1`、`DoubleSide`、一开始不亮、用的是**不受光的** `MeshBasicMaterial`、颜色**不在**四个状态色里（`style.css` 里那四个值抄进测试里比）、`setFocus` 把传进来的值归一化成布尔再返回（传 `''` / `0` / `undefined` 回来的是 `false`）、只动 `visible`（背景色 / 地板色 / 转轴角度 / 风扇转角 / 覆盖层文字一个都不碰）、来回调是幂等的、`updateScene` 之后环的状态不受影响。22 + 10 个变异（含「灯不能和相机同侧」「改完阴影相机范围要重算投影矩阵」「假模块的 traverse 退回只走一层」「环一开始就亮着」「环借用了状态色」）逐个塞回源码验证过，全部被抓住 |
 | ⑨ 65 条 | `3d/index.html` 里那段 `<script type="module">`：**从 HTML 里抠出来**，摘掉 import 换成打桩的 `createDorm3D`，配上假 `mqtt` 和假的按钮桩实跑。盯的就是 Step 6-3 那条规则 —— **画面跟的是「当前选中的宿舍」，不是「最后一个发消息的宿舍」**：给 dorm-b 发消息时 3D 一次都不许被调、切过去才画、而且画的是它最新那条；没收到数据的节点退回「正常」的外观并在覆盖层上如实说明；报文里写错的 `status` 一律以规则算出的为准；脏数据四条（非 JSON / 缺字段 / 类型不对 / 未知节点）一条都不许改到画面；`shared/rules.js` 必须是普通 script 且排在模块之前；6-2 留下的 4 个手动预览按钮仍然可用，且会被下一次真数据顶掉 |
 | ⑩ 251 条 | Step E3-2 起 `dashboard/logic.js` 只剩「读快照字段 + 把它们摆成人话」，这一批把它逐个钉住。**模块形状**（纯函数的硬约束）：导出就这 18 个（`SNAPSHOT_VERSION` + 17 个函数）、没有 `export default`、内部件一个都不导出、源码里不许出现 `document` / `window` / `innerHTML` / 定时器 / `Date.now(`、不许有 `judgeStatus`、**不许出现 18 / 30 / 75 这三个阈值**、**不许出现「偏冷 / 偏热 / 偏湿」这三个状态名**、**不许出现任何 `dorm-` 开头的节点名**（节点名一律从快照里读，写死一个就是一个假绿）。**`readSnapshot`**：前端唯一的入口校验 —— `v` 必须是 2、`nodes` 必须是数组、`events` / `rejects` 两块必须都在，缺一块就不放行；坏数据返回 `{ok: false, reason}` 而不是抛（抛的话页面整块不渲染，一行说明都留不下）。**`nodeOf`**：从快照里按 id 取节点那一行，取不到返回 `null`（不是 `undefined`，也不是造一个空壳出来）。**事件那一组**：`openEvent` 找这个节点现在开着的那条、`latestEvent` 找最近的一条、`eventStateText` 把 core 的状态名翻成人话、`handlingOf` 从事件里读出「按过没有、什么时候按的、之后又收到几条异常」；**读出来的是事件本体那个引用，不是副本**（存副本的话页面上看不出来，只有导出的 CSV 会是空的）。**`actionState`**：按钮按不按得动的**唯一**判据 —— 还没有收到 core 的快照 / core 还没收到这个节点的数据 / 状态正常时都按不动，且各自给出原因；有「待处理」的事件时可按；已经「处理中」时按不动，并说「再按一次只会多记一笔动作」**再补一句「（之后又收到 N 条异常）」**；状态是异常但 core 还没开事件时按不动，并如实说「要连续收到几条异常才开一条（现在连着 N 条）」—— 这块的措辞一个字都不在 `dashboard.js` 里拼（灰按钮不说明原因，用的人只会以为页面坏了）。**`fanOn`**：判据是 **core 的事件里真记着那笔动作**，不是页面自己记的「按过没有」；而且只看**当前这个节点**（别的节点按过不算，也不许把偏热本来就转着的按停）。**`trendOf` / `trendText`**：只看最近两条（前面跌得再狠、最近一次是涨的就是上升）、比的是精确值**不设容差**（差 0.1℃ 也算上升）、只有一条记录时是空串而**不是「持平」**（一条数据说不出「在往哪走」，说成持平就是把「不知道」说成了「没变」）。**`calmLine` / `focusBanner`**：横幅三种模式（被点名 / 是重点 / 平静）各自的措辞、**身份那一步读的是节点那一行而不是 `priority` 里那份副本**（两处各读一份的话迟早给出两个说法）、平静时说的是哪句、没有重点时说的不是「都正常」而是「还不知道」。**`alertLine`**：要念的那一句 —— 「谁、什么状态、持续了多久」、有趋势就跟着念、正在处理就念出处理状态、**里面一个 ｜ 都没有**（那是给眼睛看的符号，念出来是「竖线」两个字）、每次都句号收尾（要念出来得自成一句）。**`snapshotSummary`**：日志里那一行摘要，逐段比（含 `·` 前后的空格 —— 少了空格就是两句话黏在一起）。**`buildMlNote` / `mlFetchFailed`**：ML 那一段的三样字，键名给死了（页面照着这三个名字取，改成别的名字页面上会静悄悄写上去一个 `undefined`，只有这条挡得住）、结论那句是从那份 JSON 里原样搬的、**判的不是看板上这些实时读数**、两个方向分开报（只有反向时不能说成「一条都没差」）、九种坏数据一律降级成一句「这一段没跑」且一样不抛。**`cmdNote`**：按下「开始处理」之后那行说明（发出去了 / 没连上 / 没发出去分别说什么），措辞一个字都不在 `dashboard.js` 里拼。**纯函数**：每个函数拿同一份输入算两遍结果一字不差，而且**都不改传进来的对象**（比的是 `JSON.stringify` 前后 —— `logic.js` 不是严格模式，`Object.freeze` 拦不住悄悄写进去，所以只能这么验）。**变异**：参数是真跑一遍看结果变不变，不是看代码猜 |
-| ⑳ 43 条 | Step E3-1 的 `shared/config.js`。这不是「跑一遍看看」那类测试，它是一份**双向核对**：`config.py` 里的 topic 字面量（从源码里抠出来，**跳过带 `{` 的模板串**并反过来断言那个模板确实见过 —— `topic_for()` 那条 f-string 要是被当成字面量收进来，它和 `TOPIC_PATTERN` 永远对不上）必须在 `shared/config.js` 里有一个同名的常量，反过来 `config.js` 里的每个常量也必须能在 `config.py` 里找到出处（**少一个方向就等于允许两边各写各的**）。逐常量钉：ws 端口 9001、tcp 端口 1883、五个 topic 串、QoS、`RETAIN=true` 而 `CMD_RETAIN=false`（指令被 retained 的话，下次起 core 会凭空把某条事件推进处理中）、`TIME_FORMAT`；`topicFor()` 拼出来的和 `config.py` 的 `topic_for()` 逐字节相同。**`brokerUrl()` 不许写死端口**：把源码里那行 `const MQTT_WS_PORT = 9001;` 换成 `19001` 再跑一遍（第二个 vm 上下文），拼出来必须跟着变 —— 只断言「返回 `ws://x:9001`」的话，`return 'ws://' + host + ':9001'` 这种写法照样绿，而端口恰好就是那份配置最容易被抄错的地方。另外：整个对象是 `Object.freeze` 的（前端不许在运行时改 topic）、空 hostname 退回 `localhost`（`file://` 打开时 `location.hostname` 就是空串）、`brokerUrlFor()` 读的是 `location.hostname`（手机连局域网 IP 时不能还连自己的 127.0.0.1）。最后是几条**不许**：源码里不许出现 `document` / `window` / `fetch`（它是纯配置，要能在没有 DOM 的 node 里跑）、不许 `export`（三个使用者里有两个是普通 script，模块语法会让它们整文件解析失败）、不许 `require`（同一个理由）、以及**句子里不许再出现一套阈值判断**（`18` / `30` / `75` / `偏冷` 这些词的检查）—— 配置和规则是两件事，规则那份在 `shared/rules.js`，只许有一份。Step E3-2 又补了两条，盯的是**动作名**：`CMD_ACTION` 必须和 `events.py` 里的 `HANDLE` 是同一个词（从 `events.py` 源码里把那个字面量抠出来比，看板发出去的 `handle` 和 core 认的那个词稍有出入就是一条「发出去没人认」的死指令），而且那个词确实在事件那一层的动作清单 `COMMANDS` 里（不是个没人认的词） |
+| ⑳ 46 条 | Step E3-1 的 `shared/config.js`。这不是「跑一遍看看」那类测试，它是一份**双向核对**：`config.py` 里的 topic 字面量（从源码里抠出来，**跳过带 `{` 的模板串**并反过来断言那个模板确实见过 —— `topic_for()` 那条 f-string 要是被当成字面量收进来，它和 `TOPIC_PATTERN` 永远对不上）必须在 `shared/config.js` 里有一个同名的常量，反过来 `config.js` 里的每个常量也必须能在 `config.py` 里找到出处（**少一个方向就等于允许两边各写各的**）。逐常量钉：ws 端口 9001、tcp 端口 1883、五个 topic 串、QoS、`RETAIN=true` 而 `CMD_RETAIN=false`（指令被 retained 的话，下次起 core 会凭空把某条事件推进处理中）、`TIME_FORMAT`；`topicFor()` 拼出来的和 `config.py` 的 `topic_for()` 逐字节相同。**`brokerUrl()` 不许写死端口**：把源码里那行 `const MQTT_WS_PORT = 9001;` 换成 `19001` 再跑一遍（第二个 vm 上下文），拼出来必须跟着变 —— 只断言「返回 `ws://x:9001`」的话，`return 'ws://' + host + ':9001'` 这种写法照样绿，而端口恰好就是那份配置最容易被抄错的地方。另外：整个对象是 `Object.freeze` 的（前端不许在运行时改 topic）、空 hostname 退回 `localhost`（`file://` 打开时 `location.hostname` 就是空串）、`brokerUrlFor()` 读的是 `location.hostname`（手机连局域网 IP 时不能还连自己的 127.0.0.1）。最后是几条**不许**：源码里不许出现 `document` / `window` / `fetch`（它是纯配置，要能在没有 DOM 的 node 里跑）、不许 `export`（三个使用者里有两个是普通 script，模块语法会让它们整文件解析失败）、不许 `require`（同一个理由）、以及**句子里不许再出现一套阈值判断**（`18` / `30` / `75` / `偏冷` 这些词的检查）—— 配置和规则是两件事，规则那份在 `shared/rules.js`，只许有一份。Step E3-2 又补了两条，盯的是**动作名**：`CMD_ACTION` 必须和 `events.py` 里的 `HANDLE` 是同一个词（从 `events.py` 源码里把那个字面量抠出来比，看板发出去的 `handle` 和 core 认的那个词稍有出入就是一条「发出去没人认」的死指令），而且那个词确实在事件那一层的动作清单 `COMMANDS` 里（不是个没人认的词） |
+| ㉑ 105 条 | Step E3-3 的 `mobile/mobile.js`。假 DOM（十二个 id）+ 假 `mqtt`，加载的是**真文件**（`shared/config.js` + `dashboard/logic.js` + `mobile/mobile.js`，脚本里那条相对 import 是剥掉之后手工接上去的）。盯六件事：**只订一条**（`dormmate/v1/state`，不是遥测通配符，而且只订一次）；**只认快照**（别的 topic、坏 JSON、`v` 对不上的快照一律拦下写进日志、不重画）；**快照说什么就显示什么**（`台风` / 99℃ 照显示，缺字段显示 `—`，没有数据时不写「正常」）；**点完屏幕上什么都不变**（只有 `#cmd-note` 那一行说明会动，改 DOM 的只能是后续那条快照）；**两条指令的报文**（`focus` 不带 `time`、`handle` 带，都不带结论，都带 `source: 'mobile'`）；**和看板共用同一份 `logic.js`**（不出现第二个 `readSnapshot` / `focusBanner` / `actionState`，而且 status 一个词都不在 JS 里）。 |
 
 ⑤ 的做法是把**真实的** `script.js` 加载进一个最小 DOM 桩里直接调函数，
 不是另写一份等价逻辑——否则测的是抄来的那份，不是线上那份。它同时充当
@@ -490,7 +498,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，150 条
 ② 和 ⑤ 各踩过一次**「检查匹配到自己的注释」**的坑（注释里写了 `export`、
 `toLocaleString`，检查就报失败），所以两处都是先把注释剥掉再查语法。
 
-**改 `status_rules.py` 要跑 ①（②③ 顺带一起跑）；改 `shared/rules.js` 要跑 ④，改 `miniapp/utils/rules.js` 要跑 ⑥（两次改完都再确认 ⑤ 还绿）；改 `config.py` 里的 topic / 端口 / QoS 要跑 ⑳（它管的就是「前端那份配置有没有跟上」）。**
+**改 `status_rules.py` 要跑 ①（②③ 顺带一起跑）；改 `shared/rules.js` 要跑 ④，改 `miniapp/utils/rules.js` 要跑 ⑥（两次改完都再确认 ⑤ 还绿）；改 `config.py` 里的 topic / 端口 / QoS 要跑 ⑳（它管的就是「前端那份配置有没有跟上」）；改 `mobile/` 下的东西要跑 ㉑（它盯的是「移动端真的只订 state、真的只渲染」）；改 `dashboard/` 下的东西要跑 ⑦⑩。**
 
 ## simulator/ 常用参数
 
@@ -4273,18 +4281,20 @@ py -3.14 -m simulator.inject_faults --dry-run  # 打印要发什么，不连 bro
 灌进来。清单里这一条标的是 `[不投递]`，跑起来会明说「没人拒收（正确：这条落在
 core 的订阅之外）」，不会让人去找一条根本不存在的 reject。
 
-**两个前端的节点名单来路不一样，这是设计如此。** `web/script.js` 自己订通配符、从
-一条条遥测报文里**现攒**出节点清单（来几个画几个，多一个也画得下）；`dashboard/`
-只订 `dormmate/v1/state`，**它连一个节点名都不认识** —— 有哪几个节点是 core 说了算
-（快照里的 `nodes` 数组），页面照着那个数组画，一个不多一个不少。
+**三个前端的节点名单来路不一样，这是设计如此。** `web/script.js` 自己订通配符、从
+一条条遥测报文里**现攒**出节点清单（来几个画几个，多一个也画得下）；`dashboard/` 和
+`mobile/` 只订 `dormmate/v1/state`，**它们连一个节点名都不认识** —— 有哪几个节点是
+core 说了算（快照里的 `nodes` 数组），页面照着那个数组画，一个不多一个不少。
 
 （Step E3-2 之前看板里有一份写死的 `NODE_IDS`，遇到 `dorm-z` 记一条「未知节点」不画
 卡。那一轮改成只订快照之后名单跟着没了，因为「未知节点」这件事在 core 那一关就拦住了
 —— 看板收到的快照里不可能出现一个 core 不认识的节点。）
 
-`tests/test_inject_faults.py` 拿源码把这条差异钉住了：`dashboard/dashboard.js` 里
-**不许再出现一份写死的节点名单**（而且画卡片必须是按 `snapshot.nodes` 画的），
-`web/script.js` 也不许有 —— 哪天有人又在某一边写死一份，那条会红，提醒顺手改文档。
+`tests/test_inject_faults.py` 拿源码把这条差异钉住了：`dashboard/dashboard.js` 和
+`mobile/mobile.js` 里**不许再出现一份写死的节点名单**（而且画卡片必须是按
+`snapshot.nodes` 画的），`web/script.js` 也不许有 —— 哪天有人又在某一边写死一份，
+那条会红，提醒顺手改文档。移动端还多一条：`mobile.js` 里不许出现
+`function focusBanner` 这种第二份实现，`from '../dashboard/logic.js'` 必须在。
 
 ### 为什么要核对，不是光发
 
@@ -4308,7 +4318,7 @@ core 的订阅之外）」，不会让人去找一条根本不存在的 reject�
 
 ### 测试
 
-`tests/test_inject_faults.py`，**37 条，不连 broker**（连真 broker 的那种自检是
+`tests/test_inject_faults.py`，**39 条，不连 broker**（连真 broker 的那种自检是
 脚本自己的 `--verify`）。详表见上面 ⑱ 那一行。
 
 ## Step E3-1：快照扩展 + shared/config.js
@@ -4422,8 +4432,8 @@ hostname 拼（手机连局域网 IP 时不能还连自己的 `127.0.0.1`）。�
 
 ```bash
 cd "nova-dormmate-final-2026"
-py -3.14 -m unittest discover -s tests -t . -v   # 942 条
-node tests/config.test.js                         # 41 条
+py -3.14 -m unittest discover -s tests -t . -v   # 944 条
+node tests/config.test.js                         # 46 条
 ```
 
 看快照里那几块新内容（core 起着，另开一个终端）：
@@ -4448,9 +4458,9 @@ py -3.14 simulator/send_cmd.py --node dorm-b --action focus --source mobile
 
 ### 自测清单
 
-- [ ] `py -3.14 -m unittest discover -s tests -t .` 全绿（942 条）
-- [ ] `node tests/config.test.js` 41 通过 / 0 不通过
-- [ ] 另外七个 `node tests/*.test.js` 全绿（改 `shared/` 会影响 ⑤ 和 ⑥）
+- [ ] `py -3.14 -m unittest discover -s tests -t .` 全绿（944 条）
+- [ ] `node tests/config.test.js` 46 通过 / 0 不通过
+- [ ] 另外八个 `node tests/*.test.js` 全绿（改 `shared/` 会影响 ⑤ 和 ⑥）
 - [ ] MQTTX 订 `dormmate/v1/state`，`v` 是 `2`，`focus` / `events` / `rejects` / `history` 四样都在
 - [ ] 发一条坏报文，`rejects.total` 加一、`items[0].payload` 是**原文**
 - [ ] 点一次 focus 再点一次，`focus` 从对象变成 `null`
@@ -4469,9 +4479,9 @@ py -3.14 simulator/send_cmd.py --node dorm-b --action focus --source mobile
    配上 MQTTX 上对应的三次快照更新（时间戳挨着）。
 4. **focus 的跨端前置**：连发两次同一条 focus，截 `focus` 从对象变 `null` 那两张。
 5. **`shared/config.js` 和 `config.py` 并排**：两份文件都截出来，五个 topic
-   常量一行一行对得上 —— 这就是 41 条测试在验的那件事。
-6. **测试输出**：`py -3.14` 那条的 `Ran 942 tests ... OK`，以及
-   `node tests/config.test.js` 的最后一行「41 通过，0 不通过」。
+   常量一行一行对得上 —— 这就是 46 条测试在验的那件事。
+6. **测试输出**：`py -3.14` 那条的 `Ran 944 tests ... OK`，以及
+   `node tests/config.test.js` 的最后一行「46 通过，0 不通过」。
 
 ### 这一步对测试桩的改动
 
@@ -4488,7 +4498,7 @@ py -3.14 simulator/send_cmd.py --node dorm-b --action focus --source mobile
   `mark_priority` 那几条走的是真的 `Sim` + 真 `hot()`，不是直接改
   `node.abnormal_count`：直接改的话，测的是「字段能不能存」，
   而不是「core 真的会去调它」。
-- **`tests/config.test.js`**（新，41 条）：跑在 node 里，双向核对 config.py。
+- **`tests/config.test.js`**（新，41 条；E3-3 补到 **46 条**）：跑在 node 里，双向核对 config.py。
   它不是「跑一遍看看」那类测试 —— 见上面 ⑳ 那一行。
 
 ### 变异测试
@@ -4584,7 +4594,7 @@ core 手里那份毫无关系，屏幕上却看不出区别。E3 的硬约束里
 这一半做完（看板会切到被点名的那个宿舍、顶栏那行写明是谁发的）。
 
 看板自己**不发** focus：两边都能改焦点的话，两个人一起看就会互相抢。这一半在
-E3-3 的移动端上。
+E3-3 的移动端上（见下面 E3-3 那一节，这一半已经做完了）。
 
 「跟着切」和「用户自己点」的优先级也得说清楚：**焦点变了就跟着切，跟过之后就不
 再抢** —— 比的是「这个目标跟过了没有」，不是「这一帧里有没有焦点」。不然用户点
@@ -4606,7 +4616,9 @@ E3-3 的移动端上。
 
 - **`tests/dashboard.test.js`**：127 → **238 条**。整套重写，见上面 ⑦ 那一行。
 - **`tests/logic.test.js`**：408 → **251 条**。整套重写，见上面 ⑩ 那一行。
-- **`tests/config.test.js`**：41 → **43 条**，补了动作名的交叉校验。
+- **`tests/config.test.js`**：41 → **43 条**，补了 `CMD_ACTION` 的交叉校验（E3-3 又
+  补到 **46 条**：`CMD_ACTION_FOCUS` 和 `core.py` 的 `FOCUS` 逐字比一次，并确认它真
+  的进了 `COMMANDS`）。
 - **`tests/test_inject_faults.py`**：条数不变，两个测试改成钉新的契约。
 
 ### 变异测试
@@ -4654,8 +4666,8 @@ E3-3 的移动端上。
 
 ### 自测清单
 
-- [ ] `py -3.14 -m unittest discover -s tests -t .` 全绿（942 条）
-- [ ] 八份 `tests/*.test.js` 全绿（⑦ 238、⑩ 251、⑳ 43 条）
+- [ ] `py -3.14 -m unittest discover -s tests -t .` 全绿（944 条）
+- [ ] 九份 `tests/*.test.js` 全绿（⑦ 238、⑩ 251、⑳ 46、㉑ 105 条）
 - [ ] 打开看板 Console 里订阅列表**只有一条**，是 `dormmate/v1/state`
 - [ ] 停掉 core 再刷新页面：卡片区写「还没有收到 core 的快照」、一个数字都不出现
 - [ ] `simulator/` 发数据时三张卡的数字和 core 终端上那三行一致
@@ -4663,6 +4675,165 @@ E3-3 的移动端上。
       有对应的 `[指令] … handle（dashboard）`
 - [ ] 发一条 `{not json`，「被拒绝消息」面板上摆的是原文，卡片纹丝不动
 - [ ] 页面底部那句话是「由 core 执行、页面只负责画」，不是「一律用规则复核」
+
+## Step E3-3：移动端，和跨端联动的那一半
+
+E3 的最后一步。E3-1 把 core 那边缺的东西补齐（`focus` / `events` / `rejects` /
+`history`），E3-2 把看板接到快照上、做完了**跟随焦点**那一半，这一节补上
+**发焦点**的那一半（`mobile/`）—— 跨端联动到这里才闭环。
+
+### 一条指令怎么走完全程
+
+```
+   手机上点一下 dorm-b
+        │
+        ├─ publish  dormmate/v1/cmd
+        │           {"nodeId":"dorm-b","action":"focus","source":"mobile"}
+        │           （retain=False：指令是一次性的，留在 broker 上等于下次
+        │             起 core 时凭空切一次焦点）
+        ▼
+   core.py  validate_command -> handle_command -> self.focus = {…}
+        │           （「同一个宿舍再点一次就是取消」判在 core 里，
+        │             页面不自己记「我刚才点的是哪个」）
+        ├─ 终端：[指令] dorm-b focus（mobile）-> 接受：焦点切到 dorm-b
+        ▼
+   publish  dormmate/v1/state（retained）   focus: {nodeId, by:"mobile", at}
+        │
+        ├─> mobile     大卡片换成 dorm-b、列表那一行点亮、日志记一行
+        ├─> dashboard  顶栏标签变「跨端焦点」、趋势图切过去、日志记一行
+        └─> 3D         场景切到 dorm-b
+```
+
+**点完那一刻页面上一个字都不改**：`tapNode` 只做两件事 —— 把指令发出去、把那一行
+说明写出来（`#cmd-note`）。焦点归谁要等 core 把新快照发回来。本地先把那一行点亮
+就是「伪造同步」，而 E3 的硬约束里点名的正是这件事（「禁止两边手动输入数据伪造
+同步效果」）。所以移动端这一版**连一个输入框都没有**，有测试盯着。
+
+### 为什么 `focus` 只有移动端能发
+
+看板上点卡片是 `selectNode`（换个视角），它**不发任何消息** —— 想看哪个宿舍是自己
+屏幕上事。两个端都能改焦点的话，两个人一起看就会互相抢：甲点 dorm-b、乙点 dorm-c，
+屏幕在两边跳。约定写在 `shared/config.js` 的 `CMD_ACTION_FOCUS` 那段注释里，也在
+`mobile.js` 的 `sendFocus` 上方。
+
+### 移动端砍掉了什么
+
+趋势图、事件表、被拒绝消息面板、3D、语音提醒 —— 全留在看板上。手机上只留三件事：
+**谁该管**（大卡片）、**点一下看它**（迷你列表）、**按开始处理**。这是信息分工，
+不是做不完：手机在演示里的角色是「人在宿舍里随手看一眼」，不是「坐下来分析」。
+
+大卡片和列表里那一行**都能点**，做的事完全一样（`#app` 上一次事件委托，找
+`[data-focus-node]`）——不写两份处理。
+
+### 判断只有一份：`mobile.js` 从 `dashboard/logic.js` import
+
+「谁是重点、处理到哪一步、按钮能不能按」如果各写一份，两块屏幕迟早会说两套话，
+而且**分叉的时候不报错**：两边都在正常显示，只是结论不一样。所以 `logic.js` 里那
+七个纯函数（`readSnapshot` / `nodeOf` / `focusBanner` / `handlingOf` / `actionState` /
+`cmdNote` / `snapshotSummary`）由两个页面共用（它是纯函数：不碰 DOM、不读全局、
+不调 `Date.now`，共用是安全的）。
+
+代价是 `mobile/` 的 import 是一条相对路径 `../dashboard/logic.js` —— 两个目录从此
+有关系了。换来的东西更值：**同一帧快照在两个屏幕上永远是同一句话**。
+
+### 状态词一个都不进 JS：配色交给 `[data-status]`
+
+`mobile.js` 把 core 发来的 status **原样写进属性**，由 `style.css` 的
+`[data-status="偏热"] { --c: … }` 挑颜色。好处是那个文件里**一个状态词都没有**
+（`LEVEL_TEXT` 里「正常」那一档都特意改成「收到」——它标的是日志级别，不是宿舍
+状态），于是「这里没有第二份规则」这条不用靠人去读，一条断言就够：
+
+```js
+/正常|偏冷|偏热|偏湿/.test(去掉注释之后的 mobile.js)   // 必须是 false
+```
+
+认不出来的状态（`台风`）属性照样写上去，样式落到底部那一档，字面照常显示 —— 和看板
+「不认识的状态原样显示」是同一个行为。
+
+属性挂在**卡片那一层**而不是里面那个按钮上。第一版写成
+`.big:has(.big-hit[data-status="偏热"])`，功能一样，但 `:has()` 在旧一点的浏览器里
+**整条规则会被丢掉** —— 丢掉的正好是「偏热的卡片是红的」这件事，页面看着照常，
+没人会发现。这种错法太安静，所以换了个写法。
+
+### 改了哪些文件
+
+| 文件 | 改了什么 |
+|---|---|
+| `mobile/index.html` | 新建。viewport、顶部连接状态、优先关注大卡片、宿舍迷你列表、开始处理、消息日志；引 `shared/config.js` 和 `../dashboard/lib/mqtt.min.js`（和 `3d/` 一样借看板那份，不拷第二份） |
+| `mobile/mobile.js` | 新建。`handleMessage` 是唯一的消息入口（和看板同一套判据），只订 `dormmate/v1/state`；`sendFocus` / `sendHandle` 两条指令；整页只有 `#app` 上一处事件委托 |
+| `mobile/style.css` | 新建。手机优先的版面：可点的地方最小 48px、刘海屏安全区、状态色按 `[data-status]` 挑 |
+| `shared/config.js` | 加 `CMD_ACTION_FOCUS`（`'focus'`），三个前端共用 |
+| `tests/mobile.test.js` | 新建，105 条 |
+| `tests/config.test.js` | 43 → **46 条**：焦点动作名和 `core.py` 的 `FOCUS` 逐字比，并确认它在 `COMMANDS` 里 |
+| `tests/test_inject_faults.py` | 37 → **39 条**：移动端也走「不许写死节点名单」那一条；另外钉住「页面里没有任何能敲数据进去的地方」 |
+
+### 测试
+
+- **`tests/mobile.test.js`**：新建，105 条。假 DOM + 假 mqtt，加载的是**真文件**
+  （`shared/config.js` + `dashboard/logic.js` + `mobile/mobile.js`）。盯六件事：
+  只订一条 topic；拦下非快照 topic 和坏快照；快照说什么就显示什么（`台风` / 99℃
+  都照显示，没有数据时显示 `—` 而不是「正常」）；点一下**屏幕上什么都不变**；
+  两条指令的报文形状；和看板共用同一份 `logic.js`。
+- **`tests/config.test.js`**：43 → **46 条**。`CMD_ACTION_FOCUS` 的出处是 `core.py`
+  的 `FOCUS`（不是 `events.py`：焦点是 core 自己的概念，不属于任何一条事件），
+  所以多读了一个文件来对账。
+- **`tests/test_inject_faults.py`**：37 → **39 条**。
+
+### 变异测试
+
+每条都是**真塞回去跑一遍**，确认被抓住（其中第一条是写测试的时候就这么发现的）：
+
+| 变异 | 被谁抓 |
+|---|---|
+| `logLine` 里去掉 `renderLog()` | ㉑ 的「拦下之后日志里写的是 JSON 解析失败」——**真 bug**：被拒绝的报文走的是提前 `return` 那几条岔路，而整页重画只发生在收下快照之后。手机上 Console 是看不见的，那块日志是唯一的线索，它偏偏什么都没写 |
+| 点一下顺手把那一行点亮 | ㉑ 的「点完屏幕上别的地方一个字都没动」 |
+| `sendFocus` 里带上 `time` 或 `status` | ㉑ 的「报文里没有 time / 没有结论」 |
+| `sendFocus` 里加一句「同一个 nodeId 就取消」 | ㉑ 的「再点一下还是发」——取消判在 core 里，页面自己判就多了一份本地状态 |
+| 订阅改回遥测通配符 | ㉑ 的「只订一条、而且不是遥测通配符」 |
+| `mobile.js` 里塞一个 `temperature < 18` | ㉑ 的「没有比较运算符配阈值」+「18/30/75 只出现在日志上限和心跳那两行」 |
+| 把 `focusBanner` 抄一份到 `mobile.js` | ㉑ 的「没有第二份实现」+ ⑯ 的同类检查（Python 侧） |
+| `mobile/index.html` 里加一个 `<input>` | ㉑ 的「没有任何输入框」+ ⑯ 的同类检查 |
+| `CMD_ACTION_FOCUS` 改成 `'setFocus'` | ⑳ 的「和 `core.py` 的 `FOCUS` 是同一个词」 |
+
+### 拿真 broker 核对过的那几条
+
+起 Mosquitto → `py -3.14 core.py` → 拿一个假的 MQTT 客户端**按手机的方式**发
+`focus`，再把 retained 的快照读回来对。**这一节说的是「真跑起来之后看到的东西对不对」，
+不是「渲染对不对」** —— 渲染那一半由 ㉑ 那 105 条盯着（它加载的是真页面文件）。
+
+1. **发一条 `{"nodeId":"dorm-c","action":"focus","source":"mobile"}`**（就是
+   `sendFocus` 拼出来的那一串），快照里 `focus` 变成
+   `{"nodeId": "dorm-c", "by": "mobile", "at": "2026-09-30 14:30:56"}` ——
+   `by` 就是报文里的 `source`，页面拿它写「跨端焦点」，看板拿它写日志。
+2. **同一个宿舍再发一条** → `focus` 变回 `null`。core 终端上那句话是
+   `[指令] dorm-c focus（mobile）-> 接受：取消焦点（同一个人点了第二次）` ——
+   **「再点一下是取消」确实是 core 判的**，页面只管把事实说出去。
+3. **快照的形状**：顶层八块 `counters` / `events` / `focus` / `nodes` / `priority` /
+   `rejects` / `time` / `v`（`v` 是 2），节点那一行 13 个字段 ——
+   和 `tests/mobile.test.js` 里那份 fixture 逐字对得上（fixture 和真报文对不上的话，
+   测的是「我以为 core 发什么」）。
+4. **`/mobile/` 那三个文件在静态服务器上都是 200**（`index.html` / `mobile.js` /
+   `style.css`），另外确认 `../dashboard/logic.js`、`../shared/config.js`、
+   `../dashboard/lib/mqtt.min.js` 这三条相对路径也拿得到 —— 模块那条 import 一旦
+   404，页面是**整页白屏**，而报错在 Console 里。
+
+**没有**拿真手机按过。要看渲染，按下面的自测清单走一遍。
+
+### 自测清单（手机）
+
+- [ ] 电脑上 `start_web.bat` + `mosquitto` + `py -3.14 core.py` 都起着，`simulator/` 在发数据
+- [ ] 手机浏览器打开 `http://<你的局域网 IP>:8000/mobile/`（不是 `localhost`），
+      顶部胶囊从「连接中…」变成「已连接」
+- [ ] 大卡片上是 core 选出来的重点（标签「当前重点」），温度和 core 终端那行一致
+- [ ] 点列表里另一个宿舍：**手机上一个字都不变**，只有按钮下面那行说明多出来；
+      过一拍之后大卡片换人、那一行加上描边，电脑上的看板和 3D 同时切过去
+- [ ] 同一个宿舍再点一下：看板顶栏那行从「跨端焦点」回落成「当前重点」
+- [ ] 按「开始处理」：当场什么都不变，过一拍出现「处理中」，core 终端上有一条
+      `[指令] … handle（mobile）`
+- [ ] 把 core 停掉再刷新手机页面：大卡片写「还没有收到 core 的快照」，
+      一个数字都不出现（不是「都正常」）
+- [ ] 断网（关掉手机 WiFi）点一下宿舍：下面那行说明写的是「这条指令没发出去」，
+      页面上其余部分纹丝不动
 
 ## 已知限制
 
@@ -4693,7 +4864,9 @@ E3-3 的移动端上。
 | `load()` 现在拒收温湿度列里的非数字格 | 判据是「**能直接比大小**」，所以带引号的 `'25'` 也拒收（虽然它转得成数字）。空着可以（缺失单独算一档）。这是有意的：不拦的话 `不热` 会一路走到 `rules.judge_status`，在 `temperature < 18` 那行崩成一个看不出哪一行哪一列的 `TypeError`；拦在这里，analysis / daily_summary / ml 三条路都受益 |
 | **core 不做范围校验**，99℃ / 200% 会被如实收下 | 九道判据管的是「这是不是我们要的那种数据」（形状 / 类型 / 来路），不管这个数在物理上合不合理 —— 所以 D4 第 5 条发出去之后，看板上 `dorm-c` 那张卡真的会显示 99℃ / 200% / 偏热，reject 上一条都没有。要拦得先定下来「合理范围」是哪个范围、超了算拒收还是打标（那就不该叫拒收），是另一套需求。手动录入那一侧有 -20~60℃ / 0~100% 的校验，因为那是人手打的字，打字会打错 |
 | 恢复判据现在只有一份：`core.py` 的「连续 3 条正常」 | Step E3-2 之前 `dashboard/logic.js` 里还有第二套（一条正常就结束），同一个宿舍在同一时刻可能有两个说法。看板改成只订快照之后它自己那套没了 —— `logic.js` 里连 `nextAbnormal` 这种函数都不存在（导出清单和「不许有阈值 / 状态名」的静态检查都盯着）。`web/` 是 M1~M3 的单节点页面，它那边从来没有「事件」这一套，不受影响 |
-| `mobile/` 还没读 `dormmate/v1/state` | E3-2 已经把看板接上了（`dashboard/` 只订这一条，快照里每一块都用上了：节点 / 历史 / 重点 / 事件 / 被拒绝的消息）。**移动端是 E3-3**。在那之前手机上看不到 core 的快照 —— 这是步子还没走到，不是哪边漏改 |
+| `mobile/` 上没有趋势图、事件表、3D、语音 | 那些留在 `dashboard/` 上，是**信息分工**不是漏做：手机在演示里的角色是「人在宿舍里随手看一眼」。数据本身一条不少（都在同一份快照里），要加只是加 DOM —— 但加完之后两个页面的分工就没了，而看板那块大屏幕存在的意义正是「坐下来看」 |
+| `mobile/` 里那个「大卡片上是谁」决定了开始处理作用在谁身上 | 看板有 `selected`（点卡片换视角），移动端没有这一层：焦点 / 重点是谁，按钮就作用在谁身上（和顶部卡片说的是同一个宿舍）。代价是**没法在大卡片说 A 的时候去处理 B** —— 要去 B 就先点一下 B。这一个取舍换来的是「手机上只有一处说得出『现在在看哪个宿舍』」 |
+| 移动端的 `focus` 指令**只有移动端会发** | 看板上点卡片只是换视角（`selectNode` 不发任何消息）。两边都能改焦点的话，两个人一起看就会互相抢：甲点 dorm-b、乙点 dorm-c，屏幕在两边跳。这条约定写在 `shared/config.js` 的 `CMD_ACTION_FOCUS` 那段注释里 |
 | 事件只落盘 + 打日志，**快照里只有最近 20 条** | Step E3-1 起 `dormmate/v1/state` 里有 `events` 这一块（`summary` 是真总数，`events` 数组留最近 20 条，和 `eventsMax` 是两回事）。**要完整的历史还是得开 `data/events.json`** —— 快照是「一帧」，是给前端画表格用的，不是档案。两个数混成一个的话，环形缓冲一满，看板上「共 N 条」就会跟着数组一起封顶 |
 | 「处理中」是**事件**的状态，不是节点的状态 | 节点那边只有「这一段现在是不是异常」，从来没有多过「处理中」这一档。前端按一下按钮，core 记的是「这条事件开始验证了」，而 dorm-b 那个节点的 `status` 该是偏热还是偏热、该不该参与优先排序也不受影响。两套状态混成一套的话，「处理中」会被当成一种环境状况去和「偏湿」比严重度 —— 那是两个维度的事 |
 | 前端那条指令和 core 那边的事件，**E3-2 起是一本账了** | 看板上的表格和导出的 CSV 里每一条事件都来自 core 的快照（`snapshot.events.events`），不再是自己攒的那一本 —— 以前两边的开案时刻、结案判据、ID 形状都不一样，同一段时间在屏幕上和在 `data/events.json` 里是两个说法。**代价**：core 没起的时候看板上一片空白（以前本地那本账还能自己走），这是有意的，见上面「core 停了页面也不会空」那节。完整历史仍然只有 `data/events.json` 里有（快照只留最近 20 条，那是另一条限制） |
@@ -4706,7 +4879,7 @@ E3-3 的移动端上。
 | core 没有乱序保护，和前端那条限制是同一个 | `latest` 一律被最后收到的那条顶掉。剧本里同一个节点的时间必须是递增的（`tests/test_scenarios.py` 有一条守着），因为倒着来的时间会让「持续了多久」算出负数被夹到 0 —— 不报错，只是数字变得没意义 |
 | 一个节点一段异常里从偏热漂到偏湿，理由说的是**最近**那条异常 | 「已连续偏热 7 分钟」里的状态取的是这一段**最后一条异常**的状态，不是最早那条、也不是峰值。取最早那条的话，段里早就漂到偏湿了、理由还在说偏热；取峰值则要额外定义「差不多严重时怎么办」。三种都有道理，这里选了最好解释的那一种 |
 | `web/` 和 `dashboard/` 的语音合成各写了一份 | 两页不共用代码：`web/` 是"说一句朗读"，`dashboard/` 是一个按钮，各自十来行 DOM 接线。抽成共享模块要再加一个跨页面的依赖，而这个项目里共享的只有 `shared/rules.js` —— 那是因为**规则算错了不报错**，代价完全不同。两处各有测试盯着（⑤ 和 ⑦），跟「规则有两份实现」不是一回事 |
-| `handle` 这个协议串仍然写在两种语言里，但现在有交叉校验 | JS 那一份从 `dashboard.js` 顶上搬到了 `shared/config.js` 的 `CMD_ACTION`（E3-2 起三个前端共用），Python 那一份是 `events.HANDLE`。`tests/config.test.js` 把 `events.py` 里那个字面量从源码抠出来逐字比，并确认它确实在 `COMMANDS` 里 —— 写错一个字母这条就红（不然就是「按了没反应」，而 core 只会说一句「未知 action」）。**topic 那边仍然是两处各写一份**（`shared/config.js` 的 `CMD_TOPIC` 和 `config.CMD_TOPIC`），靠 ⑳ 的双向核对盯住。剩下钉不住的只有一件事：真 mqtt.js 收不收这个调用形状，只有拿真页面按一次才算数 |
+| `handle` 这个协议串仍然写在两种语言里，但现在有交叉校验 | JS 那一份从 `dashboard.js` 顶上搬到了 `shared/config.js` 的 `CMD_ACTION`（E3-2 起三个前端共用），Python 那一份是 `events.HANDLE`。`tests/config.test.js` 把 `events.py` 里那个字面量从源码抠出来逐字比，并确认它确实在 `COMMANDS` 里 —— 写错一个字母这条就红（不然就是「按了没反应」，而 core 只会说一句「未知 action」）。**topic 那边仍然是两处各写一份**（`shared/config.js` 的 `CMD_TOPIC` 和 `config.CMD_TOPIC`），靠 ⑳ 的双向核对盯住。剩下钉不住的只有一件事：真 mqtt.js 收不收这个调用形状，只有拿真页面按一次才算数。**焦点那个动作名走的是同一条路**：`shared/config.js` 的 `CMD_ACTION_FOCUS` ↔ `core.py` 的 `FOCUS`，⑳ 里那两条把它和 `COMMANDS` 一起钉住了（出处不是一个文件：`handle` 出自事件那一层的 `events.py`，焦点是 core 自己的概念）|
 | 假 `mqtt` 桩**不校验** `publish` 的调用形状 | `dashboard.test.js` 里的客户端是桩：有 `publish`，但它只把参数记下来，不检查签名对不对。所以「真 mqtt.js 收不收这个 `(topic, message, opts)`」这件事，**测试全绿也说明不了**。这不是能靠加断言补上的（补了也还是桩），只能拿真页面验一次 |
 | 按一下「开始处理」，页面上**当场什么都不变** | 这是 E3-2 的红线落在界面上的样子：点击只往 `dormmate/v1/cmd` 发一条 `handle`，卡片上那行「处理中」要等 core 把新快照发回来才出现。所以按下去之后会「过一拍才变」，那一拍就是 core 的往返。代价是**在那一拍里看不出按没按到**，所以按钮下面那行说明（`#cmd-note`）是必须的 —— 它直接回答「那条指令发给 core 没有」，而那正是页面上唯一会变的东西 |
 | 指令里的 `time` 是**快照里那个节点的最新时刻**，不是按按钮那一刻 | 三台机器的钟不一定对得上，所以用数据自己的时刻（和「处理动作记的是报文时刻」同一个口径）。代价：如果这个节点已经 20 分钟没来新数据，core 事件里 `actions[0].time` 就是 20 分钟前那个时刻。演示里数据 5 秒一条，看不出来；真拿旧数据做演示时要知道这件事 |

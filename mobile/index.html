@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 手机页面**必须**有这一行。少了它，手机浏览器会按 980px 的桌面宽度排版，
+     再整页缩到屏幕上 —— 字小到看不清、按钮细到按不准，而 PC 上打开
+     一切正常，所以这类问题只会在真机上暴露。
+     不写 maximum-scale / user-scalable=no：那会把双指放大也禁掉，
+     视力不好的人就彻底没辙了（这一点和「不靠颜色单独表意」是同一条原则）。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 手机浏览器顶部那条状态栏的颜色。跟 style.css 里的 --page 一致，
+     不然会出现一条突兀的白边。 -->
+<meta name="theme-color" content="#f9f9f7">
+<title>DormMate 移动端</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- #app 是**唯一**挂点击的地方（事件委托）。卡片和列表每收到一帧快照
+     就整块重画，给每次新生成的按钮单独绑监听是绑不完的，而且旧节点上的
+     监听会跟着字符串一起被丢掉。 -->
+<div id="app" class="wrap">
+
+  <header class="top">
+    <h1>DormMate</h1>
+    <!-- 连接状态。手机上这一条格外要紧：连不上时页面上一片「还没有收到
+         core 的快照」，而到底是「broker 没起」还是「core 没发」还是
+         「手机连的是自己的 localhost」，全靠这一行区分。 -->
+    <span id="conn" class="conn conn--pending">
+      <span class="conn-dot"></span><span id="conn-text">未连接</span>
+    </span>
+  </header>
+
+  <!-- 优先关注大卡片（Step E3-3）。整块由 mobile.js 的 renderFocus() 现贴，
+       说什么由 dashboard/logic.js 的 focusBanner() 决定 —— 和看板顶部那一行
+       是**同一个函数**，所以两个屏幕对「现在该看谁」永远是一致的说法。
+
+       内容有两个来源，看左上角那个标签就分得出来：
+         [跨端焦点]  有人（多半是这台手机）发过 focus 指令点名的
+         [当前重点]  core 按数据排出来的（rules.rank_priority）
+
+       ★ 它**自己也能点**：点一下 = 把焦点切到它身上，等于在下面的列表里
+         点同一个宿舍。这是移动端唯一会发 focus 的地方，看板故意不发 ——
+         两个端都能改焦点的话，两个人一起看就会互相抢。 -->
+  <section id="focus" class="big"></section>
+
+  <!-- 宿舍迷你列表。一行一个，点一行 = 把焦点切过去（再点一下取消）。
+       ★ 点完**屏幕上什么都不变**：焦点归属要等 core 把新快照发回来
+         （快照里的 focus 字段变了，这一行才会加上 is-watching）。
+         本地先把那一行点亮是「伪造同步」，E3 明确禁止。 -->
+  <section class="panel">
+    <h2 class="panel-head">宿舍 <span id="node-count" class="count"></span></h2>
+    <div id="nodes" class="nodes"></div>
+  </section>
+
+  <!-- 处理动作。作用在**大卡片上那个宿舍**（core 说的焦点 / 重点），
+       和看板上那个按钮走的是同一条路：只往 dormmate/v1/cmd 发一条 handle，
+       屏幕上别的一个字都不改。
+
+       红线在这儿：按一下就把事件置成已恢复是不行的，页面连「处理中」都不许
+       自己写 —— 那三个字要等 core 发回新快照。能不能按由 core 的事件说了算
+       （这个宿舍有一条「待处理」的事件才能按），按不动的原因写在按钮旁边。 -->
+  <section class="panel">
+    <div class="action-bar">
+      <button id="action-handle" class="primary" type="button">开始处理</button>
+      <span id="action-state" class="action-state"></span>
+    </div>
+    <!-- 按下去之后这一行才出现。它说的是「那条指令发给 core 没有」——
+         发不出去的时候页面上其余部分完全看不出区别，不写就成了「按了没反应」。
+         focus 那条指令的说明也写在这里（手机屏幕小，不为两句话各留一行）。 -->
+    <p id="cmd-note" class="note cmd-note"></p>
+  </section>
+
+  <!-- 消息日志。比看板上那份短得多（手机上没法滚一张大表），但**必须有**：
+      PC 上能开 F12 看 Console，手机上不行。连没连上、快照到没到、
+      焦点有没有跨过来，全指望这几行。 -->
+  <section class="panel">
+    <h2 class="panel-head">消息日志 <span id="log-count" class="count"></span></h2>
+    <ul id="log-body" class="log"></ul>
+  </section>
+
+  <!-- 认账用的一句话。和看板 body 末尾那段是同一个口径：
+      这一页从头到尾没有算过任何一个状态。 -->
+  <footer class="foot">
+    这一页只订阅 <code>dormmate/v1/state</code>，只负责画。状态、优先关注、
+    事件、时长都是 core 算完发过来的 —— 页面连温度阈值都不认识，
+    读的都是 <code>dormmate/logic.js</code> 里那几个纯函数。
+  </footer>
+
+</div>
+
+<!-- 脚本顺序不能换。三件事按顺序：
+       1) mqtt.js —— mobile.js 打开页面就会调 connect()，那时得已经有 mqtt
+       2) shared/config.js —— 同上，那一刻就得能读到 DormMateConfig
+       3) mobile.js 本身（type="module"）
+
+     和看板不同，这一页**不需要 importmap**：唯一的 import 是相对路径
+     '../dashboard/logic.js'，只有裸名字（'three' 那种）才要去映射表里查。
+     也不需要 Chart.js / three.js —— 趋势图和 3D 留在看板上，手机这一版
+     刻意只留「谁该管、点一下看他、按开始处理」三件事。 -->
+
+<!-- mqtt.js 5.10.1：直接借 dashboard/lib/ 里那份，不再拷一份到 mobile/。
+     和 3d/index.html 的做法一样（那个文件里也写了同样一条）——
+     同一份 vendored 文件在仓库里出现两次，迟早会有一次只更新了其中一个，
+     而两个页面连的是同一个 broker，出问题时根本想不到是版本不一样。 -->
+<script src="../dashboard/lib/mqtt.min.js"></script>
+
+<!-- Broker 的 WebSocket 地址 + topic 常量。三个前端共用这一份（Step E3-1）。
+     地址跟着**访问地址**走（config.js 里的 brokerUrlFor 读 location.hostname）
+     —— 手机用局域网 IP 打开时才连得回来；写死 localhost 的话，手机上的
+     localhost 指的是手机自己。 -->
+<script src="../shared/config.js"></script>
+
+<!-- mobile.js 是 type="module"，所以这一页必须走 http 服务器打开
+     （file:// 下模块会被 CORS 拒掉）：http://<你的局域网 IP>:8000/mobile/
+     模块默认 defer，脚本执行时 DOM 一定已经就绪。 -->
+<script type="module" src="mobile.js"></script>
+</body>
+</html>

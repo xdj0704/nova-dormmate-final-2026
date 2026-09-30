@@ -1,0 +1,409 @@
+/* DormMate 移动端（Step E3-3）
+   颜色 token 和 dashboard/style.css 是同一套 —— 两个屏幕放在一起看时，
+   同一个状态必须是同一个颜色，否则现场会有人问「手机上怎么是黄的」。
+
+   【这一份里为什么会出现四个状态词】
+   `[data-status="偏热"]` 这种选择器里有中文，看着像把规则抄了一份，其实不是：
+   这几个选择器**只决定颜色**，不产生状态。属主（mobile.js）把 core 发来的
+   那个字符串原样写进 data-status，这里按字面挑一档配色 —— 认不出来的值
+   （core 以后加了个新的，或者报文是坏的）落到底部那一档，字照常显示。
+   换句话说：阈值（18 / 30 / 75）一个都不在这里，这里连「多少度算热」都不知道。 */
+
+:root {
+  color-scheme: light;
+
+  --page:           #f9f9f7;
+  --surface-1:      #fcfcfb;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --hairline:       #e1e0d9;
+  --border:         rgba(11, 11, 11, 0.10);
+
+  /* 固定四档，不随主题变，永远配文字，不靠颜色单独表意 */
+  --status-good:     #0ca30c;   /* 正常 */
+  --status-warning:  #fab219;   /* 偏冷 */
+  --status-serious:  #ec835a;   /* 偏湿 */
+  --status-critical: #d03b3b;   /* 偏热 */
+
+  /* 可点的东西最小 44px 高（苹果 / 谷歌都给的这条线）。
+     手指按不准是手机上最常见的「页面坏了」—— 其实只是目标太小。 */
+  --tap: 48px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page:           #0d0d0d;
+    --surface-1:      #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --hairline:       #2c2c2a;
+    --border:         rgba(255, 255, 255, 0.10);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 16px;   /* 手机上不小于 16px：小一号的字看着「精致」，读起来费眼 */
+  line-height: 1.6;
+  /* 页面本身不许左右晃 —— 一个横向能拖的页面，纵向滚动会跟着变别扭 */
+  overflow-x: hidden;
+}
+
+code, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.wrap {
+  max-width: 560px;   /* 比手机宽一点：横屏和折叠屏不至于拉成一条 */
+  margin: 0 auto;
+  /* 左右留出安全区（刘海屏横屏时那是被切掉的一块）；
+     底部多留一点，别让最后一行压在浏览器的工具栏下面。 */
+  padding: 16px calc(14px + env(safe-area-inset-left)) calc(32px + env(safe-area-inset-bottom))
+           calc(14px + env(safe-area-inset-right));
+}
+
+/* ---------- 顶栏 ---------- */
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.top h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.conn--on { color: var(--text-primary); border-color: var(--text-muted); }
+.conn--on .conn-dot { background: var(--status-good); }
+.conn--pending .conn-dot { background: var(--status-warning); }
+.conn--off .conn-dot { background: var(--status-critical); }
+
+/* ---------- 大卡片（优先关注 / 跨端焦点） ---------- */
+
+.big {
+  --c: var(--text-muted);
+  margin-bottom: 18px;
+  padding: 16px 16px 14px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-left: 5px solid var(--c);
+  border-radius: 14px;
+}
+
+/* 整张卡片就是按钮（点它 = 把焦点切过去），所以要把按钮的默认样式清掉 */
+.big-hit {
+  display: block;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  /* 手指按下去要有反馈。手机上没有 hover，唯一能给的即时反应就是这个。 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+.big-hit:active { opacity: 0.6; }
+
+/* 状态色只染左边那条竖线和徽章 —— 整块底色跟着状态变的话，
+   一条卡片会让整个屏幕的颜色都跳一下，看久了很累。
+   属性写在**卡片那一层**（mobile.js 的 renderFocus 里那句 dataset.status）：
+   第一版写成 `.big:has(.big-hit[data-status="偏热"])`，功能一样，但 :has()
+   在旧一点的浏览器里整条规则会被丢掉 —— 而丢掉的正好是
+   「偏热的卡片是红的」这件事，页面看着照常，没人会发现。 */
+.big[data-status="正常"] { --c: var(--status-good); }
+.big[data-status="偏冷"] { --c: var(--status-warning); }
+.big[data-status="偏湿"] { --c: var(--status-serious); }
+.big[data-status="偏热"] { --c: var(--status-critical); }
+
+.big-tag {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--text-primary);
+  color: var(--page);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.big-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.big-node {
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: 0.3px;
+}
+
+/* 状态徽章。**永远带字**（正常 / 偏热 / …）—— 颜色只是让它三步之外
+   也看得见，不是唯一的信息来源。 */
+.badge {
+  padding: 2px 10px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--c);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.big-line {
+  display: block;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.big-why, .big-cross {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.big-cross { color: var(--text-muted); }
+
+/* 「点这张卡片 = …」。弱色、小一号：它是教怎么用，不是每时每刻都要读的现状。 */
+.big-hint {
+  margin: 10px 0 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* 平静时候那张卡片不是按钮，所以 --c 不走状态色 */
+.big--calm { --c: var(--text-muted); }
+.big--calm .big-line { margin: 0; color: var(--text-secondary); font-size: 15px; }
+
+/* ---------- 面板通用 ---------- */
+
+.panel {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  background: var(--surface-1);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.count, .note { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+
+/* ---------- 宿舍迷你列表 ---------- */
+
+.nodes-empty {
+  margin: 0;
+  padding: 12px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.node {
+  --c: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  text-align: left;
+  background: var(--page);
+  border: 1px solid var(--hairline);
+  border-left: 4px solid var(--c);
+  border-radius: 11px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.node:last-child { margin-bottom: 0; }
+
+.node:active { opacity: 0.6; }
+
+/* 认不出来的状态落这一档：中性色，字照常显示 */
+.node[data-status="正常"] { --c: var(--status-good); }
+.node[data-status="偏冷"] { --c: var(--status-warning); }
+.node[data-status="偏湿"] { --c: var(--status-serious); }
+.node[data-status="偏热"] { --c: var(--status-critical); }
+
+.node-name {
+  flex: 0 0 auto;
+  min-width: 62px;
+  font-weight: 600;
+}
+
+.node-read {
+  flex: 1 1 auto;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: var(--font-mono);
+}
+
+/* 「待处理 / 处理中」—— 来自 core 的事件，不是这边判的 */
+.node-flag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+/* 大卡片正在说的那个宿舍。用中性描边而不是状态色 —— 状态色是「它在报警」，
+   描边是「我在看它」，两件事不能长成一个样子（和看板卡片选中同一条原则）。 */
+.node.is-watching {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 1px var(--text-primary) inset;
+}
+
+/* ---------- 处理动作 ---------- */
+
+.action-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.primary {
+  min-height: var(--tap);
+  padding: 0 20px;
+  background: var(--text-primary);
+  border: 1px solid var(--text-primary);
+  border-radius: 11px;
+  color: var(--page);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.primary:active { opacity: 0.75; }
+
+/* 按不动的时候必须看得出是「按不动」，而不是「坏了」——
+   原因写在旁边那行字里（由 actionState 给，一个结论都不是这一页下的）。 */
+.primary:disabled {
+  background: var(--surface-1);
+  border-color: var(--hairline);
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.action-state {
+  flex: 1 1 160px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.cmd-note {
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.cmd-note:empty { display: none; }
+
+/* ---------- 消息日志 ---------- */
+
+.log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.log-empty { color: var(--text-muted); font-size: 13px; }
+
+.log-row {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.log-row:last-child { border-bottom: 0; }
+
+.log-time {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.log-level { flex: 0 0 auto; color: var(--text-secondary); }
+.log-row--warn .log-level { color: var(--status-warning); }
+.log-row--error .log-level { color: var(--status-critical); }
+
+.log-text {
+  flex: 1 1 auto;
+  color: var(--text-secondary);
+  /* 手机上一条长报文不许把版面撑破：折行，不横向滚 */
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 页脚 ---------- */
+
+.foot {
+  margin-top: 20px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.75;
+}

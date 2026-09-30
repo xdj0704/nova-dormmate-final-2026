@@ -135,6 +135,21 @@ check('★ 动作名和 events.py 的 HANDLE 是同一个词', C.CMD_ACTION,
 check('★ 而且这个动作确实在事件那一层的动作清单里（不是个没人认的词）',
   /^COMMANDS\s*=\s*\(\s*HANDLE\s*,?\s*\)/m.test(EVENTS), true);
 
+/* 焦点那个动作名。它和 handle 不一样的地方在于**出处不是一个文件**：
+   handle 的出处是 events.py 的 HANDLE（事件那一层的事），焦点是 core.py 的
+   FOCUS（「现在在看哪个」是 core 记的，不属于任何一条事件）。
+   两个动作名从此都有交叉校验，谁都不用靠「我记得是这么写的」。 */
+const CORE = fs.readFileSync(path.join(ROOT, 'core.py'), 'utf8');
+check('★ 焦点动作名和 core.py 的 FOCUS 是同一个词', C.CMD_ACTION_FOCUS,
+  (CORE.match(/^FOCUS\s*=\s*"([^"]*)"/m) || [])[1]);
+/* 光比字面量不够：那个词还得真的进了 core 认的动作清单，否则发过去是一句
+   「不认识的 action」。清单是拼出来的（`events.COMMANDS + (FOCUS,)`），
+   所以查的是那一行 —— 盯着「FOCUS 出现过」等于什么都没查，它在注释里也出现。 */
+check('★ 而且它确实在 core 认的动作清单里（不是个没人认的词）',
+  /^COMMANDS\s*=\s*events\.COMMANDS\s*\+\s*\(FOCUS\s*,?\s*\)/m.test(CORE), true);
+check('★ 两个动作名不是同一个词（焦点和开始处理是两件事）',
+  C.CMD_ACTION_FOCUS === C.CMD_ACTION, false);
+
 /* ============ C. topicFor 的形状 ============ */
 
 console.log('\n=== C. topicFor ===');
