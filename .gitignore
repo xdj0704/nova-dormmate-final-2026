@@ -10,3 +10,11 @@ venv/
 # 每个人机器上都不一样，官方模板默认也是忽略它的。
 # project.config.json 要提交，这个不用。
 miniapp/project.private.config.json
+
+# broker/mosquitto.conf 是 mosquitto/dormmate.conf 的手抄副本（只有 5 行、
+# 没注释也没开日志），真正在用的是 mosquitto/dormmate.conf，
+# start_broker.bat 指向的也是那一份。这两份要是都入库，早晚会有人改了其中
+# 一份、另一份悄悄跑偏，所以这里让副本保持不跟踪。
+# 写进忽略列表而不是只靠「记得别 add」，是为了防 git add -A 手滑把它带进去。
+# 哪天真要收编它，用 git add -f broker/mosquitto.conf 就行。
+broker/
