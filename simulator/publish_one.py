@@ -4,7 +4,7 @@
     py -3.14 -m simulator.publish_one --node dorm-b --temperature 33 --humidity 55
     py -3.14 -m simulator.publish_one --node dorm-b --temperature 25 --humidity 60
 
-故意发坏的（D4 用，看板应该挡住，只记一条错误日志）：
+故意发坏的（D4 用，core 会拒收并往 log/reject 记一条）：
     # 1) 非法 JSON
     py -3.14 -m simulator.publish_one --node dorm-a --raw '{这不是 json'
     # 2) 合法 JSON 但缺字段
@@ -14,8 +14,16 @@
         --raw '{"nodeId":"dorm-b","temperature":25,"humidity":60,"status":"正常","time":"2026-09-22 20:00:00"}'
     # 4) 未知节点
     py -3.14 -m simulator.publish_one --node dorm-z --temperature 25 --humidity 60
-    # 5) 数值离谱
-    py -3.14 -m simulator.publish_one --node dorm-a --temperature 99 --humidity 200
+
+拦住它们的是 **core.py**，不是看板 —— 看板只是渲染，坏报文根本到不了它手里
+（第 4 条例外：看板自己也有一份节点名单，会记一条「未知节点」）。
+
+**数值离谱不是坏报文**：`--temperature 99 --humidity 200` 会被如实收下、判成
+偏热。判据管的是「这是不是我们要的那种数据」（形状 / 类型 / 来路），不管这个数
+在物理上合不合理 —— core 里没有任何范围校验。
+
+上面这几条只是各自的单发命令。整批发 + 当场核对 core 有没有真的拦住，走
+`py -3.14 -m simulator.inject_faults`（那份清单是唯一的出处，本文件不再列一遍）。
 
 清掉一条 retained 消息（发过 retained 才需要）：
     py -3.14 -m simulator.publish_one --clear --node dorm-b
