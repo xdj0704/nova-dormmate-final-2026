@@ -20,6 +20,10 @@ const WEB = path.join(__dirname, '..', 'web');
 const SCRIPT = path.join(WEB, 'script.js');
 const HTML = path.join(WEB, 'index.html');
 const RULES = path.join(__dirname, '..', 'shared', 'rules.js');
+const CONFIG = path.join(__dirname, '..', 'shared', 'config.js');
+/* E2 起 multimodal.js 也是这个页面的一个 script（type="module"），
+   它的 id 也要和 index.html 对得上（第 8 节）。 */
+const MULTIMODAL = path.join(WEB, 'multimodal.js');
 
 /* ---------- DOM 桩 ---------- */
 
@@ -48,15 +52,24 @@ let capturedBlob = null;
    桩里给 localhost，等价于"在本机浏览器里打开"。 */
 global.location = { hostname: 'localhost' };
 
-/* 快照用的 canvas 桩：记下宽高和 drawImage 的参数，
-   这样能验"画布是按视频原始像素开的、画的是整个画面"。 */
+/* 快照用的 canvas 桩：记下宽高、drawImage 的参数、以及**画上去的字**。
+   - drawCalls 能验「画布是按视频原始像素开的、画的是整个画面」
+   - texts 能验水印（Phase6 E2）—— 那是这一步唯一能在 Node 里自动验的东西：
+     真拍一张没法在这里看图，但「往画面上写了哪几行字」是能验的。
+   - toDataURL 给一段**能解码的数**：'QUJDREU=' 是 'ABCDE'，5 个字节。
+     随便给个 'STUB' 的话，字节数那条断言算出来的 3 是个巧合，验不出什么。 */
 let lastCanvas = null;
 
 function canvasStub() {
   const canvas = {
-    width: 0, height: 0, drawCalls: [],
-    getContext: () => ({ drawImage: (...args) => canvas.drawCalls.push(args) }),
-    toDataURL: (type) => `data:${type};base64,STUB`,
+    width: 0, height: 0, drawCalls: [], fills: [], texts: [],
+    getContext: () => ({
+      drawImage: (...args) => canvas.drawCalls.push(args),
+      fillRect: (...args) => canvas.fills.push(args),
+      fillText: (text, x, y) => canvas.texts.push({ text, x, y }),
+      font: '', textBaseline: '', fillStyle: '',
+    }),
+    toDataURL: (type) => `data:${type};base64,QUJDREU=`,
   };
   lastCanvas = canvas;
   return canvas;
@@ -116,52 +129,8 @@ function installMediaDevices(mode) {
   });
 }
 
-/* ---------- 语音识别桩 ----------
-
-   window.SpeechRecognition 换成假的构造函数。new 出来的实例记下
-   lang / continuous，start() 会立刻回调 onstart（真浏览器也是这样），
-   测试再手动 say() / fail() 模拟"识别到了什么"和"出了什么错"。
-
-   supported=false 时两个前缀都不挂，等价于不支持的浏览器。 */
-let lastRecognition = null;
-
-function fakeRecognition() {
-  return {
-    lang: '', continuous: true, interimResults: true,
-    started: 0, aborted: 0,
-    onstart: null, onresult: null, onerror: null, onend: null,
-    start() { this.started += 1; if (this.onstart) this.onstart(); },
-    stop() {},
-    abort() { this.aborted += 1; if (this.onend) this.onend(); },
-    /* 模拟"识别出一句话"，然后会话结束 */
-    say(text) {
-      if (this.onresult) {
-        this.onresult({ resultIndex: 0, results: [[{ transcript: text }]] });
-      }
-      if (this.onend) this.onend();
-    },
-    /* 模拟"识别失败" */
-    fail(code) {
-      if (this.onerror) this.onerror({ error: code });
-      if (this.onend) this.onend();
-    },
-  };
-}
-
-function installSpeechRecognition(supported) {
-  lastRecognition = null;
-  const Ctor = supported
-    ? function SpeechRecognitionStub() {
-      lastRecognition = fakeRecognition();
-      return lastRecognition;   // 构造函数返回对象时，new 的结果就是它
-    }
-    : undefined;
-  for (const key of ['SpeechRecognition', 'webkitSpeechRecognition']) {
-    Object.defineProperty(global.window, key, {
-      value: Ctor, configurable: true, writable: true,
-    });
-  }
-}
+/* 语音识别和语音合成的桩跟着那两块代码一起搬去了 tests/multimodal.test.js
+   （Phase6 E2 把 ASR / TTS 从 web/script.js 挪进了 web/multimodal.js）。 */
 
 installMediaDevices('ok');
 /* window 上的事件也要能挂：script.js 在 pagehide 时关摄像头。
@@ -183,53 +152,19 @@ global.localStorage = { getItem: () => null, setItem() {} };
 global.URL.createObjectURL = (blob) => { capturedBlob = blob; return 'blob:fake-url'; };
 global.URL.revokeObjectURL = () => {};
 
-/* ---------- 语音合成桩（Step 3-3） ----------
+/* 语音合成的桩同样搬去了 tests/multimodal.test.js（见上面那段说明）。 */
 
-   window.speechSynthesis 换成假的：speak() 只把 utterance 记下来（不真念），
-   cancel() 数次数。utterance 上的 fireError(code) 模拟"念到一半出错"——
-   真浏览器走的是它的 onerror 回调。
-
-   三种模式，对应"浏览器支持到什么程度"：
-     'ok'      speechSynthesis 和 SpeechSynthesisUtterance 都在
-     'partial' 只有前者，没有那个构造函数（Chrome 上这两个是分开的两样东西）
-     'off'     两个都没有
-
-   默认装 'ok'（和上面 installMediaDevices('ok') 一个道理）：3-2 那批测的是
-   **识别**，不该被"这台浏览器支不支持合成"干扰。 */
-let spokenTexts = [];
-let cancelCount = 0;
-
-function fakeUtterance(text) {
-  return {
-    text, lang: '',
-    onerror: null,
-    fireError(code) { if (this.onerror) this.onerror({ error: code }); },
-  };
-}
-
-function installSpeechSynthesis(mode) {
-  spokenTexts = [];
-  cancelCount = 0;
-  const synth = {
-    speak(u) { spokenTexts.push(u); },
-    cancel() { cancelCount += 1; },
-  };
-  const Ctor = mode === 'ok'
-    ? function UtteranceStub(text) { return fakeUtterance(text); }
-    : undefined;
-  Object.defineProperty(global.window, 'speechSynthesis', {
-    value: mode === 'off' ? undefined : synth, configurable: true, writable: true,
-  });
-  Object.defineProperty(global.window, 'SpeechSynthesisUtterance', {
-    value: Ctor, configurable: true, writable: true,
-  });
-}
-
-installSpeechSynthesis('ok');
-
-// 顺序同 index.html：先 rules.js，再 script.js
+// 顺序同 index.html：先 config.js + rules.js，再 script.js
+vm.runInThisContext(fs.readFileSync(CONFIG, 'utf8'), { filename: CONFIG });
 vm.runInThisContext(fs.readFileSync(RULES, 'utf8'), { filename: RULES });
+/* 真浏览器里 window 就是 globalThis，config.js 挂上去的那个对象页面直接就读到。
+   这个桩里 window 是**另一个对象**（为了让下面能替换 location / isSecureContext），
+   所以得把同一个引用搬一份过去 —— 不搬的话 script.js 会当场报「没引 config.js」，
+   而那是测试桩的构造问题，不是页面的问题。 */
+global.window.DormMateConfig = global.DormMateConfig;
 vm.runInThisContext(fs.readFileSync(SCRIPT, 'utf8'), { filename: SCRIPT });
+
+const CFG = global.DormMateConfig;
 
 /* 只在这一个 VM 上下文里求值，方便拿到 script.js 内部的绑定 */
 const run = (code) => vm.runInThisContext(code);
@@ -541,27 +476,43 @@ const exportedNote = els['export-note'].textContent;
 
   const html = fs.readFileSync(HTML, 'utf8');
   const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]));
-  const used = [...new Set([...fs.readFileSync(SCRIPT, 'utf8')
-    .matchAll(/getElementById\(['"]([^'"]+)['"]\)/g)].map((m) => m[1]))];
+  /* 两个文件都要查：E2 起语音那几样（voice-start / voice-heard …）是
+     multimodal.js 取的，只查 script.js 的话，那些 id 被改掉了也照样绿。 */
+  const used = [...new Set([SCRIPT, MULTIMODAL]
+    .flatMap((file) => [...fs.readFileSync(file, 'utf8')
+      .matchAll(/getElementById\(['"]([^'"]+)['"]\)/g)].map((m) => m[1])))];
   const missing = used.filter((id) => !ids.has(id));
-  check('script.js 引用的 id 在 index.html 里都存在', missing.length === 0,
+  check('script.js / multimodal.js 引用的 id 在 index.html 里都存在', missing.length === 0,
     '缺失: ' + missing.join(', '));
   check('index.html 加载的是 script.js', html.includes('src="script.js"'));
+  check('index.html 也挂了 multimodal.js（type="module"）',
+    /<script\s+type="module"\s+src="multimodal\.js">/.test(html),
+    '语音和拍照上报那一半没被加载');
 
-  /* ---------- 9. Broker 地址跟着访问地址走 ---------- */
+  /* ---------- 9. Broker 地址和 topic 都来自 shared/config.js ---------- */
 
-  // 写死 localhost 的话，手机打开页面时 localhost 指的是手机自己，连不回来
-  check('本机打开时还是 ws://localhost:9001',
-    run('brokerUrl("localhost")') === 'ws://localhost:9001');
-  check('按访问用的主机名拼地址（手机/别的电脑）',
-    run('brokerUrl("10.102.196.160")') === 'ws://10.102.196.160:9001');
+  /* 写死 localhost 的话，手机打开页面时 localhost 指的是手机自己，连不回来。
+     E3 起地址的唯一出处是 shared/config.js，script.js 只转述它的值。 */
+  check('本机打开时连 ws://localhost:9001',
+    run('BROKER_URL') === 'ws://localhost:9001', run('BROKER_URL'));
+  check('按访问用的主机名拼地址（手机/别的电脑连得回来）',
+    CFG.brokerUrl('10.102.196.160') === 'ws://10.102.196.160:9001',
+    CFG.brokerUrl('10.102.196.160'));
   check('hostname 是空串时退回 localhost（file:// 直开的情况）',
-    run('brokerUrl("")') === 'ws://localhost:9001');
-  check('页面真的用了 brokerUrl(location.hostname)，不是写死的',
-    run('BROKER_URL === brokerUrl(location.hostname)'));
+    CFG.brokerUrl('') === 'ws://localhost:9001', CFG.brokerUrl(''));
+  check('页面用的是 CFG.brokerUrlFor(location)，不是自己拼的',
+    /BROKER_URL\s*=\s*CFG\.brokerUrlFor\(location\)/.test(CODE));
   check('源码里不再有写死的 ws://localhost:9001',
     !CODE.includes("ws://localhost:9001"),
     'broker 地址又被写死了，手机打开会连回手机自己');
+  check('两条 topic 都从 CFG 取，没有写死',
+    run('TOPIC') === CFG.TOPIC_PATTERN && run('STATE_TOPIC') === CFG.STATE_TOPIC,
+    run('TOPIC') + ' / ' + run('STATE_TOPIC'));
+  /* 顺序错了 script.js 起手就 throw（它是故意的），但那样子报出来的是一句
+     「需要 window.DormMateConfig」，很容易被当成 config.js 本身坏了。 */
+  check('index.html 在 script.js 之前引入 ../shared/config.js',
+    html.indexOf('src="../shared/config.js"') < html.indexOf('src="script.js"'),
+    'config.js 必须排在 script.js 前面');
 
   /* ---------- 10. 现场快照（摄像头） ---------- */
 
@@ -582,7 +533,7 @@ const exportedNote = els['export-note'].textContent;
   check('有 video 预览区', /<video id="cam-video"/.test(html));
   check('有快照显示区', /<img id="cam-image"/.test(html));
 
-  check('takeSnapshot 是顶层函数，语音指令能直接调',
+  check('takeSnapshot 是顶层函数（拍照按钮和多模态那边都调它）',
     run('typeof takeSnapshot') === 'function', run('typeof takeSnapshot'));
 
   /* 没开摄像头就拍（语音指令很可能在这个状态下被喊到）：要拒绝得干脆，
@@ -639,6 +590,54 @@ const exportedNote = els['export-note'].textContent;
     lastCanvas.width === 640 && lastCanvas.height === 480,
     `${lastCanvas.width}x${lastCanvas.height}`);
 
+  /* ---- E2：水印和文件信息 ----
+     拍下来的**那张图**在 Node 里没法看，但「往画面上写了哪几行字」「报了多大的
+     文件」是能验的 —— 而这两样正是 core 收的东西。 */
+
+  const plain = run('takeSnapshot()');
+  check('不传 overlay 时一个字的字都不写（「拍照」按钮那条预览路）',
+    lastCanvas.texts.length === 0 && lastCanvas.fills.length === 0,
+    JSON.stringify(lastCanvas.texts));
+
+  const marked = run("takeSnapshot(['dorm-b · 事件 ev-1 · 2026-09-22 20:31:00', '温度 31℃'])");
+  check('★ 传了 overlay 就把那几行字画进画面',
+    lastCanvas.texts.map((t) => t.text).join('|')
+      === 'dorm-b · 事件 ev-1 · 2026-09-22 20:31:00|温度 31℃',
+    JSON.stringify(lastCanvas.texts.map((t) => t.text)));
+  check('水印下面垫了一条半透明黑带（浅色墙面上也看得清）',
+    lastCanvas.fills.length === 1
+    && lastCanvas.fills[0][0] === 0 && lastCanvas.fills[0][2] === 640,
+    JSON.stringify(lastCanvas.fills));
+  check('水印画在**画面底部**，不压住中间的拍摄内容',
+    lastCanvas.texts.every((t) => t.y > 480 / 2),
+    JSON.stringify(lastCanvas.texts.map((t) => t.y)));
+  check('空行被丢掉（不会在画面上留一条空带）',
+    run("takeSnapshot(['只有一行', ''])") && lastCanvas.texts.length === 1,
+    JSON.stringify(lastCanvas.texts.length));
+
+  check('★ 返回的 meta 就是拼 snapshot 指令要的那几个数',
+    ['stamp', 'width', 'height', 'bytes', 'ext'].every((k) => k in marked.meta)
+    && marked.meta.width === 640 && marked.meta.height === 480
+    && marked.meta.ext === '.png',
+    JSON.stringify(marked.meta));
+  check('★ bytes 是按 base64 长度算出来的真字节数（桩里那段解出来是 5 字节）',
+    marked.meta.bytes === 5, String(marked.meta.bytes));
+  check('stamp 是 core 那边认的时刻写法',
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(marked.meta.stamp), marked.meta.stamp);
+
+  /* 这四种是 base64 长度换算最容易错的地方：带一个 = 的、带两个 = 的、
+     不带补位的、和空的。差的那一两个字节不影响 core（它只判断正不正），
+     但算错了说明这个函数写错了，而它是要长期用的。 */
+  check('pngByteLength：带 1 个 = / 带 2 个 = / 不带 / 空串',
+    run("pngByteLength('data:image/png;base64,QUJDREU=')") === 5
+    && run("pngByteLength('data:image/png;base64,QUJDRA==')") === 4
+    && run("pngByteLength('data:image/png;base64,QUJDREVG')") === 6
+    && run("pngByteLength('')") === 0,
+    [run("pngByteLength('data:image/png;base64,QUJDREU=')"),
+      run("pngByteLength('data:image/png;base64,QUJDRA==')"),
+      run("pngByteLength('data:image/png;base64,QUJDREVG')"),
+      run("pngByteLength('')")].join(','));
+
   /* ---- 关闭 ---- */
 
   run('closeCamera()');
@@ -684,222 +683,20 @@ const exportedNote = els['export-note'].textContent;
     streamBeforeHide.stopped.length === 1 && video.srcObject === null,
     JSON.stringify(streamBeforeHide.stopped));
 
-  /* ---------- 11. 语音指令（ASR） ---------- */
+  /* ---------- 11. 语音指令（ASR）/ 语音播报（TTS）：搬去 multimodal.test.js ----------
 
-  const voiceBtn = els['voice-start'];
-  const voiceError = () => els['voice-error'].textContent;
-  const voiceAction = () => els['voice-action'].textContent;
+     Phase6 E2 把 ASR（原来的 3-2）和 TTS（原来的 3-3）从 web/script.js 整块挪进了
+     web/multimodal.js，理由写在那个文件头上：要算「这一句念什么」得用
+     dashboard/logic.js 里的纯函数，而 logic.js 是 ES 模块 —— 进不了经典 script。
+     script.js 又是必须留在经典 script 里的（本文件用 vm.runInThisContext 整个
+     跑它，顶层出现 import 会让它整个废掉）。
 
-  check('页面有「语音指令」按钮', /id="voice-start"[^>]*>语音指令</.test(html));
-  check('页面有识别文字显示区', /id="voice-heard"/.test(html));
-  check('页面有执行结果显示区', /id="voice-action"/.test(html));
-  check('speakStatus 是顶层函数，指令表能直接引用它',
-    run('typeof speakStatus') === 'function', run('typeof speakStatus'));
+     原来这里的五十来条断言**一条没丢**，整段搬去了 tests/multimodal.test.js，
+     而且是接着往上加的：那边除了「说『朗读』真的念了」，还测了 E2 新加的四条
+     指令、宿舍名的中文别名、以及「拍完不能在本地写已登记」。
 
-  /* ---- 浏览器不支持 ---- */
-
-  installSpeechRecognition(false);
-  voiceBtn.fire('click');
-  check('不支持时给出明确原因，而不是点了没反应',
-    voiceError().includes('SpeechRecognition'), voiceError());
-
-  /* ---- 正常走一遍 ---- */
-
-  installSpeechRecognition(true);
-  voiceBtn.fire('click');
-  const rec = lastRecognition;
-  check('确实 new 了 SpeechRecognition', !!rec);
-  check('lang 是 zh-CN', (rec && rec.lang) === 'zh-CN', rec && rec.lang);
-  check('只识别一句（continuous=false）',
-    rec && rec.continuous === false, rec && String(rec.continuous));
-  check('不要中间稿（interimResults=false）',
-    rec && rec.interimResults === false, rec && String(rec.interimResults));
-  check('按钮变成「正在听…」', voiceBtn.textContent === '正在听…', voiceBtn.textContent);
-
-  voiceBtn.fire('click');
-  check('正在听时重复点击被忽略（不会开出第二个会话）',
-    lastRecognition === rec, '又 new 了一个');
-
-  /* ---- 固定指令 ---- */
-
-  rec.say('朗读一下。');
-  check('识别到的文字显示在页面上',
-    els['voice-heard'].textContent === '朗读一下。', els['voice-heard'].textContent);
-  check('「朗读」走 speakStatus（显示的是它自己的返回值）',
-    voiceAction().includes('朗读'), voiceAction());
-  check('说完一句会话就结束，按钮恢复',
-    voiceBtn.textContent === '语音指令', voiceBtn.textContent);
-
-  /* 「拍照」得真的调到 takeSnapshot：先开摄像头，再喊拍照 */
-  installMediaDevices('ok');
-  await run('openCamera()');
-  voiceBtn.fire('click');
-  lastRecognition.say('帮我拍照吧');
-  check('「拍照」调到 takeSnapshot（页面上出现拍摄时间）',
-    voiceAction().includes('已拍照'), voiceAction());
-  check('识别文字也换成这一句',
-    els['voice-heard'].textContent === '帮我拍照吧', els['voice-heard'].textContent);
-
-  /* 摄像头没开时说「拍照」：走的是 takeSnapshot 自己的失败分支，
-     原因照样显示出来 —— 这正是它返回 {ok, message} 的用处。 */
-  run('closeCamera()');
-  voiceBtn.fire('click');
-  lastRecognition.say('拍照');
-  check('没开摄像头时说「拍照」会提示先开摄像头',
-    voiceAction().includes('先点「打开摄像头」'), voiceAction());
-
-  /* ---- 未识别 ---- */
-
-  voiceBtn.fire('click');
-  lastRecognition.say('今天天气不错');
-  check('不认识的指令把原话回显出来',
-    voiceAction() === '未识别的指令：今天天气不错', voiceAction());
-
-  /* 固定指令是字面子串匹配，不是同义词理解：「拍张照」里没有「拍照」
-     这三个字，就走不到 takeSnapshot。这是这一步的约定行为（要求就是
-     "包含拍照"），不是 bug —— 但演示时得照约定说「拍照」。 */
-  voiceBtn.fire('click');
-  lastRecognition.say('拍张照');
-  check('关键词按字面包含判断，同义词不算（"拍张照" ≠ "拍照"）',
-    voiceAction() === '未识别的指令：拍张照', voiceAction());
-
-  voiceBtn.fire('click');
-  lastRecognition.say('朗读并且拍照');
-  check('一句话里两个关键词都在时，按固定顺序取第一条（朗读）',
-    voiceAction().includes('朗读'), voiceAction());
-
-  /* ---- 错误：event.error 必须露在页面上 ---- */
-
-  voiceBtn.fire('click');
-  lastRecognition.fail('not-allowed');
-  check('麦克风被拒：页面上有具体的 event.error',
-    voiceError().includes('not-allowed'), voiceError());
-  check('麦克风被拒：同时给人话解释',
-    voiceError().includes('权限'), voiceError());
-
-  voiceBtn.fire('click');
-  lastRecognition.fail('network');
-  check('network 错误：页面上有具体的 event.error',
-    voiceError().includes('network'), voiceError());
-
-  voiceBtn.fire('click');
-  lastRecognition.fail('no-speech');
-  check('没听到声音：也有对应的提示',
-    voiceError().includes('no-speech'), voiceError());
-
-  check('表里没有的错误码也照样显示出来，不吞掉',
-    run('voiceErrorMessage("weird-new-code")') === '语音识别出错（weird-new-code）',
-    run('voiceErrorMessage("weird-new-code")'));
-
-  /* ---- 离开页面 ---- */
-
-  voiceBtn.fire('click');            // 顺便把上一条错误清掉
-  const listening = lastRecognition;
-  check('重新开始会把上一次的错误清掉', voiceError() === '', voiceError());
-  fireWindow('pagehide');
-  check('离开页面时掐掉还在听的会话（否则麦克风一直开着）',
-    listening.aborted === 1, String(listening.aborted));
-  check('自己主动中止不会被当成错误显示出来',
-    voiceError() === '', voiceError());
-
-  /* ---------- Step 3-3：语音播报 ---------- */
-
-  /* 念的那句话单独拿出来测：它是"哪些字会进到耳朵里"的唯一出处，
-     不该只有"走没走到 speak()"这一条。 */
-
-  run('nodes.clear()');
-  check('一个节点都没收到时念「还没有收到」，不念「都正常」',
-    run('statusReadout()') === '还没有收到任何节点的数据', run('statusReadout()'));
-
-  run(`
-    nodes.set('dorm-b', { temperature:31, humidity:78, status:'偏热' });
-    nodes.set('dorm-a', { temperature:25, humidity:60, status:'正常' });
-  `);
-  check('按 nodeId 排序，不是按收到的先后（后到的 dorm-b 排在后面）',
-    run('statusReadout()') === 'dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热',
-    run('statusReadout()'));
-
-  run("nodes.set('dorm-c', { temperature:25.5, humidity:60, status:'正常' })");
-  check('小数照 fmt 的格式念（25.5 不写成 25.50）',
-    run('statusReadout()').includes('dorm-c 25.5℃ 60% 正常'), run('statusReadout()'));
-
-  /* 前端**不许**重算状态：规则只有 Python 侧那一份实现。31℃/78% 规则上算
-     偏热，这里故意把报文的 status 写成偏湿 —— 念出来的必须是报文里那个。 */
-  run("nodes.clear(); nodes.set('dorm-a', { temperature:31, humidity:78, status:'偏湿' })");
-  check('念的是报文里的 status，不是页面自己重算的',
-    run('statusReadout()') === 'dorm-a 31℃ 78% 偏湿', run('statusReadout()'));
-
-  /* ---- 说「朗读」真的念出来（走完整条链路） ---- */
-
-  run(`
-    nodes.clear();
-    nodes.set('dorm-a', { temperature:25, humidity:60, status:'正常' });
-    nodes.set('dorm-b', { temperature:31, humidity:78, status:'偏热' });
-  `);
-  installSpeechSynthesis('ok');
-
-  voiceBtn.fire('click');
-  lastRecognition.say('朗读');
-  check('说「朗读」真的调了 speak()', spokenTexts.length === 1, String(spokenTexts.length));
-  check('念的就是当前状态那句话',
-    spokenTexts[0] && spokenTexts[0].text === 'dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热',
-    spokenTexts[0] && spokenTexts[0].text);
-  check('lang 是 zh-CN', spokenTexts[0] && spokenTexts[0].lang === 'zh-CN',
-    spokenTexts[0] && spokenTexts[0].lang);
-  check('念之前先 cancel（否则第二句要排队等第一句念完）',
-    cancelCount === 1, String(cancelCount));
-  check('页面上显示的就是要念的那一句（静音时只能靠它确认念了什么）',
-    voiceAction() === '正在朗读：dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热', voiceAction());
-  check('utterance 留着一个引用（被 GC 掉的话 Chrome 念到一半会停）',
-    run('speaking') === spokenTexts[0], String(run('speaking') === spokenTexts[0]));
-
-  /* ---- 每次现算，不缓存上一句 ---- */
-
-  run("nodes.set('dorm-c', { temperature:16, humidity:60, status:'偏冷' })");
-  voiceBtn.fire('click');
-  lastRecognition.say('朗读');
-  check('第二句照样先 cancel 再 speak',
-    cancelCount === 2 && spokenTexts.length === 2,
-    `cancel=${cancelCount} speak=${spokenTexts.length}`);
-  check('新收到的节点立刻进下一句（念的是此刻的数据，不是上一次那份）',
-    spokenTexts[1].text.includes('dorm-c 16℃ 60% 偏冷'), spokenTexts[1].text);
-
-  /* ---- 浏览器不支持 ---- */
-
-  installSpeechSynthesis('off');
-  const unsupported = run('speakStatus()');
-  check('不支持时返回 {ok:false} 而不是抛异常',
-    unsupported && unsupported.ok === false, JSON.stringify(unsupported));
-  check('不支持时把要念的内容照样写在页面上',
-    unsupported.message.includes('不支持') && unsupported.message.includes('dorm-c'),
-    unsupported.message);
-  check('不支持时压根没碰 speechSynthesis',
-    spokenTexts.length === 0 && cancelCount === 0,
-    `speak=${spokenTexts.length} cancel=${cancelCount}`);
-
-  installSpeechSynthesis('partial');
-  check('只有 speechSynthesis、没有那个构造函数，也算不支持（少查一个就是 TypeError）',
-    run('speechSupported()') === false, String(run('speechSupported()')));
-  check('这种浏览器里说「朗读」不抛异常，照样返回 {ok:false}',
-    (() => {
-      try { const r = run('speakStatus()'); return r && r.ok === false; } catch (e) { return false; }
-    })(), '抛了异常');
-
-  /* ---- 念的时候出错 ---- */
-
-  installSpeechSynthesis('ok');
-  voiceBtn.fire('click');
-  lastRecognition.say('朗读');
-  const speakingNow = spokenTexts[spokenTexts.length - 1];
-  speakingNow.fireError('not-allowed');
-  check('朗读失败：原始的 event.error 露在页面上',
-    voiceAction().includes('not-allowed'), voiceAction());
-  check('朗读失败：把「正在朗读」覆盖掉，不留一句假话',
-    !voiceAction().includes('正在朗读') && voiceAction().includes('朗读失败'), voiceAction());
-
-  speakingNow.fireError(undefined);
-  check('连错误码都没有时写 unknown，不写 undefined',
-    voiceAction().includes('（unknown）'), voiceAction());
+     留这一段是为了让「语音的测试去哪了」有一个能被 grep 到的答案，
+     不然下一个人翻到这里会以为语音那次改动把测试一起删了。 */
 
   /* ---------- 报告 ---------- */
 

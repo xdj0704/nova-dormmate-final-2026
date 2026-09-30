@@ -1,22 +1,41 @@
 'use strict';
 
-/* DormMate 前端：通过 WebSocket 订阅 MQTT，实时渲染各宿舍环境状态。
+/* DormMate 前端：通过 WebSocket 订 MQTT，实时渲染各宿舍环境状态。
    注意：MQTT 数据的 status 一律以发布端发来的字段为准，前端不重算规则。
    唯一的例外是「手动录入分析」——那份数据不经过发布端，只能在前端算，
    用的是 shared/rules.js 的 judgeStatus() / getAdvice()。
-   规则不要在本文件或任何页面里再抄一份。 */
+   规则不要在本文件或任何页面里再抄一份。
 
-/* Broker 地址跟着页面的访问地址走：本机打开就是 ws://localhost:9001，
-   手机用 http://10.102.196.160:8000/web/ 打开就是 ws://10.102.196.160:9001。
-   写死 localhost 的话，手机浏览器里的 localhost 指的是手机自己，连不回来。
-   （file:// 直开时 hostname 是空串，退回 localhost —— 那种打开方式本来就
-   连不上 WebSocket，这里只是别让它拼出 ws://:9001 这种烂地址。） */
-function brokerUrl(hostname) {
-  return `ws://${hostname || 'localhost'}:9001`;
+   【Phase6 E2 从这个文件里搬走了什么】
+   语音那整块（ASR、中文别名、TTS、拍照上报）搬去了 web/multimodal.js。
+   搬的理由一句话：那份代码要用 dashboard/logic.js 里的纯函数来算「朗读什么」，
+   而 logic.js 是 ES Module —— 在**经典 script** 顶层写 import 是语法错误，
+   而这个文件必须留在经典 script 里（tests/script.test.js 用 vm 加载它，
+   顶层出现 import 同样整个文件废掉）。所以拆成两份，中间用 window.DormMateBridge
+   接一根线：这个文件管「收数据、画页面、握摄像头」，那边管「听人话、念出来」。
+
+   搬走之后这里只剩三件事：
+     1) 把 MQTT 收下来（遥测 + 状态快照两条 topic）
+     2) 把遥测画成卡片和表格
+     3) 把摄像头这块硬件握在手里（开 / 关 / 抓一张，包括画水印）  */
+
+/* 地址和 topic 的真源是 ../shared/config.js（E3 起四端共用那一份）。
+   这里**不再写死端口和 topic 字符串** —— 写死一次就是又开了一处出处，
+   而 tests/config.test.js 盯的正是「同一个字面量只该有一处」。
+   （3-1 那一版这里有个本地 brokerUrl()，E3 之后 config.js 里有一份更好的，
+   它带 brokerUrlFor(location)，所以那个本地版本删掉了。） */
+const CFG = typeof window !== 'undefined' ? window.DormMateConfig : null;
+if (!CFG) {
+  /* 没引 config.js 就连不上，而且报出来的会是「Cannot read properties of
+     undefined」这种看不出所以然的东西。与其那样，不如当场点名缺了什么。
+     顺序在 index.html 里：先 ../shared/config.js，再这份 script.js。 */
+  throw new Error('web/script.js 需要 window.DormMateConfig：'
+    + 'index.html 里要先引 ../shared/config.js。');
 }
 
-const BROKER_URL = brokerUrl(location.hostname);
-const TOPIC = 'dormmate/v1/nodes/+/telemetry';
+const BROKER_URL = CFG.brokerUrlFor(location);
+const TOPIC = CFG.TOPIC_PATTERN;      // 遥测通配符
+const STATE_TOPIC = CFG.STATE_TOPIC;  // core 的全局快照
 
 const MAX_ROWS = 20;        // 「最近消息」表最多显示多少行
 const MAX_MESSAGES = 2000;  // 内存里最多留多少条 MQTT 消息（防止挂机把内存吃光）
@@ -91,11 +110,9 @@ const el = {
   camImage: document.getElementById('cam-image'),
   camShotHint: document.getElementById('cam-shot-hint'),
   camCaption: document.getElementById('cam-caption'),
-  voiceStart: document.getElementById('voice-start'),
-  voiceNote: document.getElementById('voice-note'),
-  voiceError: document.getElementById('voice-error'),
-  voiceHeard: document.getElementById('voice-heard'),
-  voiceAction: document.getElementById('voice-action'),
+  /* 语音那五样（voice-start / voice-note / voice-error / voice-heard /
+     voice-action）E2 起由 web/multimodal.js 自己取，不在这里缓存 ——
+     两个文件各缓存一份的话，谁先跑、谁把它换了，都不好查。 */
 };
 
 function esc(value) {
@@ -430,10 +447,11 @@ function exportCSV() {
 
      openCamera()    打开摄像头，成功返回 true
      closeCamera()   关掉，把摄像头指示灯熄灭
-     takeSnapshot()  拍一张，返回 {ok, message}
+     takeSnapshot()  拍一张，返回 {ok, message, meta}
 
-   下一步的语音指令「拍照」直接调 takeSnapshot() 就行，用返回的 message
-   做播报 / 提示，不用自己去分辨是没开摄像头还是画面没就绪。
+   语音那边（web/multimodal.js）通过 DormMateBridge.capture(overlay) 调第三个，
+   用返回的 meta 拼一条 snapshot 指令发给 core。这里**不判断**那张照片该挂到
+   哪条案卷上 —— 那是快照里的事件说了算，这边连快照长什么样都不知道。
 
    只保存一张：snapshot 每次被覆盖，不做连续采集，也不把视频帧留在内存里。 */
 
@@ -568,23 +586,86 @@ function closeCamera() {
 }
 
 /**
+ * 水印那一行行字画到画布上（Phase6 E2）。
+ *
+ * **只负责画，不负责决定画什么。** 那两三行字是 multimodal.js 从快照里算出来的
+ * （宿舍名、事件编号、快门时刻、当时的温湿度），从这里传进来。这个文件不认识
+ * 快照，也不该认识 —— 它要是开始自己拼水印，就会出现「照片上写 dorm-b、
+ * 发出去的指令说 dorm-c」这种只有对图才能发现的分家。
+ *
+ * 字号按画布宽度算，不写死像素：640 宽的摄像头和 1920 宽的，同一号字一个看不清、
+ * 一个占掉半幅。下面铺一条半透明黑带，浅色墙面上也能看清。
+ *
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {number} width
+ * @param {number} height
+ * @param {string[]} overlay 每一行
+ */
+function drawOverlay(ctx, width, height, overlay) {
+  const lines = (Array.isArray(overlay) ? overlay : [])
+    .map((line) => String(line == null ? '' : line))
+    .filter((line) => line !== '');
+  if (lines.length === 0) return;
+
+  const size = Math.max(12, Math.round(width / 38));
+  const pad = Math.round(size * 0.6);
+  const lineHeight = Math.round(size * 1.35);
+  const bandHeight = lineHeight * lines.length + pad * 2;
+
+  ctx.font = `${size}px -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif`;
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.62)';
+  ctx.fillRect(0, height - bandHeight, width, bandHeight);
+
+  ctx.fillStyle = '#ffffff';
+  /* 第一行（宿舍 + 事件编号 + 时刻）加粗：它是这条证据的**身份**，
+     后面那行读数变了没关系，这一行是事后拿它对账的。 */
+  lines.forEach((line, i) => {
+    ctx.font = `${i === 0 ? 'bold ' : ''}${size}px -apple-system, "Segoe UI",`
+      + ' "Microsoft YaHei", sans-serif';
+    ctx.fillText(line, pad, height - bandHeight + pad + i * lineHeight);
+  });
+}
+
+/* PNG data URL 解码之后有多少字节。
+   画布不留 blob，所以没有更准的途径 —— 差几十字节无所谓，core 那边只拿它
+   判断「这是不是一个正常的文件」（0 字节和 3 字节的东西它拒收）。
+   base64 的长度关系是 4 个字符换 3 个字节，末尾的 = 是补位，不算。 */
+function pngByteLength(dataUrl) {
+  const base64 = String(dataUrl).slice(String(dataUrl).indexOf(',') + 1);
+  if (!base64) return 0;
+  const padding = base64.endsWith('==') ? 2 : (base64.endsWith('=') ? 1 : 0);
+  return Math.floor(base64.length * 3 / 4) - padding;
+}
+
+/**
  * 拍一张快照，显示在右边的快照区，覆盖上一张。
  *
  * 画布尺寸取 videoWidth / videoHeight（视频的原始像素），不是 CSS 显示尺寸 ——
  * 显示尺寸跟着窗口宽度变，用它会拍出一会儿大一会儿小、甚至被拉伸的图。
  *
- * @returns {{ok: boolean, message: string}} ok 为 false 时 message 是原因，
- *          语音指令直接播报它就行。
+ * @param {string[]} [overlay] 画在画面下方那几行字（E2 的水印）。不给就不画 ——
+ *        「拍照」按钮那条预览路就是这么调的。
+ * @param {string} [stamp] 这一张的时刻。**给了就照用**，不给才现读时钟。
+ *        调用方（web/multimodal.js）一定要给：水印上印的那个时刻和指令里报的
+ *        那个 stamp 必须是**同一个字符串**，而水印是在这里画上去的、指令是它
+ *        拼的 —— 各自读一次钟就会差上一两秒，事后拿照片跟案卷对账的人会以为
+ *        有两张照片。
+ * @returns {{ok: boolean, message: string, meta: Object|null}}
+ *          ok 为 false 时 message 是原因，直接播报就行。
+ *          meta 是**发指令要用的那几个数**：{stamp, width, height, bytes, ext}
+ *          —— 「哪张照片」由它说清楚，照片本身留在浏览器里。
  */
-function takeSnapshot() {
+function takeSnapshot(overlay, stamp) {
   if (!el.camVideo) {
-    return { ok: false, message: '这个页面没有快照区' };
+    return { ok: false, message: '这个页面没有快照区', meta: null };
   }
 
   if (!cameraStream) {
     const message = '摄像头还没打开，先点「打开摄像头」';
     setCameraError(message);
-    return { ok: false, message };
+    return { ok: false, message, meta: null };
   }
 
   const width = el.camVideo.videoWidth;
@@ -592,16 +673,19 @@ function takeSnapshot() {
   if (!width || !height) {
     const message = '画面还没准备好，等一秒再拍';
     setCameraError(message);
-    return { ok: false, message };
+    return { ok: false, message, meta: null };
   }
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   // 画布不进 DOM，纯粹当一次性的转换工具用
-  canvas.getContext('2d').drawImage(el.camVideo, 0, 0, width, height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(el.camVideo, 0, 0, width, height);
+  drawOverlay(ctx, width, height, overlay);
 
-  const time = formatTime(new Date());
+  /* 时刻：调用方给了就用它给的（见上面那段说明），没给才现读。 */
+  const time = typeof stamp === 'string' && stamp ? stamp : formatTime(new Date());
   const dataUrl = canvas.toDataURL('image/png');
   snapshot = { dataUrl, time };   // 覆盖，所以永远只有一张
 
@@ -615,261 +699,118 @@ function takeSnapshot() {
 
   setCameraError('');
   setCameraNote(`已拍下 1 张（${time}）`);
-  return { ok: true, message: `已拍照，${time}` };
+  return {
+    ok: true,
+    message: `已拍照，${time}`,
+    meta: {
+      stamp: time,
+      width,
+      height,
+      /* 后缀要小写：文件名的另一半（宿舍名 + 时刻）在 multimodal.js 那边拼，
+         它拿到的已经是这一份 meta。 */
+      bytes: pngByteLength(dataUrl),
+      ext: '.png',
+    },
+  };
 }
 
-/* ---------- 语音指令（Step 3-2） ----------
+/* ---------- 语音指令 / 语音播报（Phase6 E2 搬走了） ----------
 
-   用浏览器自带的 SpeechRecognition（Chrome / Edge 上带 webkit 前缀）。
-   每次点击只识别一句：continuous = false，拿到结果或出错都让它结束。
-   不做连续听 —— 连续模式下"一句话说完了"由引擎自己判断，教室里一吵
-   就会把旁边的闲聊也识别进来。 */
+   Step 3-2 的识别和 Step 3-3 的播报原本在这个位置，现在整体搬进了
+   web/multimodal.js。
 
-const VOICE_LANG = 'zh-CN';
+   搬走的理由不是「这个文件太长了」，是**数据来源不同**：那两块要回答
+   「现在念哪一间」「这张照片算谁的事件」，答案只在 core 的全局快照里
+   （焦点、开着的事件、快照登记了几张）—— 遥测里没有。而这份 script.js
+   手上的就是遥测。两块混在一个文件里，迟早有人图省事拿「最后一条遥测
+   的宿舍」凑一个「当前宿舍」出来：那是前端在替 core 判断，正是被禁的
+   那件事，而且**不会报错**，只会念错一间宿舍。
 
-/* 非空就表示"正在听"。用来挡住重复点击 —— 连点两次会走到 start() 抛
-   InvalidStateError，比直接忽略第二次点击难解释得多。 */
-let recognition = null;
+   这个文件留下的两件事：能拍一张照（takeSnapshot），能把指令发出去
+   （DormMateBridge.sendCmd）。说什么、念什么、什么时候拍，都在那边。
 
-/* 固定指令。用「包含」判断而不是整句相等：识别引擎会把标点和语气词
-   一起吐出来（"朗读一下。"、"帮我拍张照"），整句比对永远匹配不上。
-   数组顺序就是判断顺序，第一条命中的赢 —— 说"朗读并且拍照"会走朗读。 */
-const VOICE_COMMANDS = [
-  { keyword: '朗读', run: speakStatus },
-  { keyword: '拍照', run: takeSnapshot },
-];
+   为什么那边必须另开一个文件而不是接着写在这儿：那边要用
+   dashboard/logic.js 里的纯函数，而 logic.js 是 ES 模块 —— 在经典 script
+   的顶层写 import 是语法错误，而**这个文件必须是经典 script**
+   （tests/script.test.js 用 vm.runInThisContext 整个跑它，顶层一句 import
+   会让整个文件废掉）。所以 index.html 里多挂一个
+   <script type="module" src="multimodal.js">，两边靠 window.DormMateBridge 接头。*/
 
-/* 错误码 -> 人话。注意这张表只能"加一句解释"，不能拿它替掉错误码：
-   表里没有的码（浏览器各版本一直在加新的）也得照样显示出来。 */
-const VOICE_ERRORS = {
-  'not-allowed': '麦克风权限被拒绝了。点地址栏左边的图标，把「麦克风」改成「允许」，然后重试。',
-  'service-not-allowed': '浏览器拒绝了语音识别服务（策略限制，或当前不是安全上下文）。',
-  'audio-capture': '没找到麦克风。确认设备接好了、没被别的程序占用，然后重试。',
-  'no-speech': '没听到声音。靠近麦克风、说大声一点再试。',
-  network: '连不上语音识别服务（network）。Chrome 是把录音传到服务器上识别的，断网或代理拦截都会这样。',
-  aborted: '识别被中断了。再点一次「语音指令」重试。',
-  'language-not-supported': '识别服务不支持 zh-CN。',
+/* ---------- 全局快照，和给外面用的那几个口子（Phase6 E2） ----------
+
+   core 每处理完一条消息就 retained 一帧 dormmate/v1/state，里面是**它那边
+   的全貌**：焦点在哪一间、每间开着什么事件、那条事件下面挂了几张快照。
+   E2 要的东西全在这里 —— 遥测里只有「读数是多少」。
+
+   这个文件**不解析**它。收到就原样存下来，谁来问给谁。判断形状是
+   dashboard/logic.js 的 readSnapshot 的活（它认得的比这里多，而且那边有
+   一整段测试对着）。这里再写一遍「v 是不是 2、nodes 是不是数组」，就等于
+   多出一份会跟那边分家的解析器：core 加一个字段，两边对「什么叫合法」的
+   理解就不一样了，而且只有一边会报错。 */
+
+let state = null;          /* core 最近一帧快照，原样的对象；一帧都没收到过是 null */
+const stateListeners = []; /* 快照到了要通知谁（多模态那边注册进来） */
+
+function onStateMessage(payload) {
+  let snap;
+  try {
+    snap = JSON.parse(payload.toString());
+  } catch (err) {
+    console.warn('[DormMate] 丢弃一帧读不懂的快照：', err.message);
+    return;
+  }
+
+  state = snap;
+  /* 这里**不检查** snap 里有没有该有的字段 —— 原样存、原样给，
+     判断留给读的人（见上面的注释）。
+
+     一个回调抛异常不能把排在后面的回调、更不能把 MQTT 那条收包路径带走。
+     谁注册的谁负责，这里只保证「每一个都被叫到」。 */
+  stateListeners.forEach((fn) => {
+    try {
+      fn(snap);
+    } catch (err) {
+      console.error('[DormMate] 快照回调出错：', err);
+    }
+  });
+}
+
+/* 给 web/multimodal.js 用的几个口子。
+
+   一个显式的桥，而不是把内部变量挂到 window 上：那边依赖什么，在这里一眼
+   能看全；以后想少给一个，也知道该删哪一行、谁会受影响。 */
+window.DormMateBridge = {
+  /* 三个 topic 名让那边自己拿去写进说明文字，别在那边再抄一遍字面量 */
+  topics: { telemetry: TOPIC, state: STATE_TOPIC, cmd: CFG.CMD_TOPIC },
+
+  /* 「快照到了叫我」。注册的时候**先补手上这一帧**：state 是 retained 的，
+     页面一连上就会收到一帧，但那边注册的时刻和这一帧到达的时刻谁先谁后
+     不保证 —— 少补这一下，「朗读状态」第一次会念成「还没有收到数据」，
+     而屏幕上明明显示着数据。 */
+  onState(fn) {
+    if (typeof fn !== 'function') return;
+    stateListeners.push(fn);
+    if (state) fn(state);
+  },
+
+  /* 手上这一帧。还没收到过就是 null，**不是空对象** —— 空对象会被下游
+     当成「一帧内容都是空的快照」，然后一本正经地念出「还没有数据」。 */
+  latestState() { return state; },
+
+  /* 发一条指令给 core。返回的是**发出去没有**，不是 core 收没收 ——
+     那是两件事，第二件这里根本无从知道。core 那边的答复走 state 那条路：
+     发完等下一帧回来对账（红线：拍照不许在本地把事件写成「已恢复」）。 */
+  sendCmd(body) {
+    if (!client || !client.connected) return false;
+    client.publish(CFG.CMD_TOPIC, JSON.stringify(body), { qos: CFG.QOS, retain: false });
+    return true;
+  },
+
+  /* 拍一张，把 overlay 那几行字画进画面。返回 {ok, message, meta}，
+     meta 是拼那条 snapshot 指令要用的文件信息。
+     stamp 由调用方给 —— 水印上印的时刻和指令里报的必须是同一个字符串。 */
+  capture(overlay, stamp) { return takeSnapshot(overlay, stamp); },
 };
-
-function speechRecognitionCtor() {
-  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
-}
-
-/* 原始的 event.error 一定写在最前面：解释文案可能对不上，错误码不会骗人。 */
-function voiceErrorMessage(code) {
-  const name = code || 'unknown';
-  const hint = VOICE_ERRORS[name];
-  return hint ? `语音识别出错（${name}）：${hint}` : `语音识别出错（${name}）`;
-}
-
-function setVoiceError(text) { if (el.voiceError) el.voiceError.textContent = text; }
-function setVoiceNote(text) { if (el.voiceNote) el.voiceNote.textContent = text; }
-
-/* 两个结果区。isPlaceholder 由调用方明确传进来，决定用弱色还是正常墨色 ——
-   不去比较文本内容猜"这是不是占位文案"，那样迟早会被真结果撞上。 */
-function setVoiceHeard(text, isPlaceholder = false) {
-  if (!el.voiceHeard) return;
-  el.voiceHeard.textContent = text;
-  el.voiceHeard.classList.toggle('is-placeholder', isPlaceholder);
-}
-
-function setVoiceAction(text, isPlaceholder = false) {
-  if (!el.voiceAction) return;
-  el.voiceAction.textContent = text;
-  el.voiceAction.classList.toggle('is-placeholder', isPlaceholder);
-}
-
-/* ---------- 语音播报（Step 3-3） ----------
-
-   用浏览器自带的 speechSynthesis。和 Step 3-2 的识别不一样：识别要联网
-   （Chrome 是把录音传上去识别的），合成不用 —— 声音就在本机，断网也念得出来。
-
-   念的是**当前收到的所有节点**，一句话念完。念什么由下面这两个函数现算，
-   页面一个字都不拼 —— 和看板那边 8-3 的分工是同一条原则。 */
-
-const SPEECH_LANG = 'zh-CN';
-
-/* 正在念的那一句。留个引用不是"记住上一条"（每次都是现算的），是防一个真实的坑：
-   Chrome 里 utterance 被 GC 掉，念到一半会直接停。变量一直指着它，它就活着。 */
-let speaking = null;
-
-/**
- * 浏览器支不支持语音合成。
- *
- * 两个都要查：Chrome 上 speechSynthesis 一直在，但 SpeechSynthesisUtterance
- * 是个构造函数，缺了它 `new` 出来就是个 TypeError。少查一个的话，不支持的
- * 环境里说一句「朗读」就是一条未捕获的异常 —— 界面上只表现为"什么都没发生"。
- * （看板那边 8-3 查的是同样两样东西。）
- */
-function speechSupported() {
-  return typeof window.speechSynthesis !== 'undefined'
-    && typeof window.SpeechSynthesisUtterance === 'function';
-}
-
-/**
- * 要念的那句话，形如 `dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热`。
- *
- * 状态直接取报文里的 `status`，**不重算**。规则在这个项目里只有一份实现
- * （Python 侧的 `status_rules`，页面和看板都只负责渲染）；前端自己再算一遍的话，
- * 屏幕上显示的和耳朵听到的迟早会在某条边界数据上分家，而且不报错。
- *
- * 按 nodeId 排序，不是按收到的先后。同一份数据念出来的句子必须每次都一样 ——
- * 顺序跟着到达时间跑的话，连"刚才念的和现在念的是不是同一句"都没法比。
- *
- * 一个节点都没有时说的是「还没有收到」，**不是「都正常」**：页面刚打开那几秒
- * 是**不知道**，说成"正常"就是句假话（和看板 B1 / B4 同一个口径）。
- */
-function statusReadout() {
-  const lines = [...nodes.entries()]
-    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-    .map(([id, p]) => `${id} ${fmt(p.temperature)}℃ ${fmt(p.humidity)}% ${p.status}`);
-  return lines.length ? lines.join('；') : '还没有收到任何节点的数据';
-}
-
-/**
- * 把当前状态念出来。
- *
- * 返回值仍然是 `{ok, message}`，和 `takeSnapshot()` 同一个形状 ——
- * 路由层（`handleVoiceText`）不用分辨命令是谁，拿到结果直接显示就行。
- *
- * **message 就是"要念的那句话"本身**，不是另写一句提示。静音、没音箱、音量
- * 太小的场合，页面上那行字是唯一能确认"它到底念了什么"的地方；提示语和朗读
- * 内容各写各的，那行字就失去意义了（看板 8-3 也是这么处理的）。
- *
- * 先 `cancel()` 再 `speak()`：连着说两次「朗读」，第二句会老老实实排在队列里
- * 等着，等第一句念完（三个节点要好几秒）才开口，而那时候念的是**上一次算出来
- * 的**内容，早就不算数了。掐掉上一句、立刻念最新的才对。
- */
-function speakStatus() {
-  const text = statusReadout();
-
-  if (!speechSupported()) {
-    return {
-      ok: false,
-      message: '这个浏览器不支持语音合成（window.speechSynthesis 不存在）。'
-        + '要念的是：' + text,
-    };
-  }
-
-  window.speechSynthesis.cancel();
-
-  speaking = new window.SpeechSynthesisUtterance(text);
-  speaking.lang = SPEECH_LANG;
-
-  /* 出错也要说出来。这时候路由层已经把「正在朗读…」显示上去了，不覆盖的话
-     页面会一直声称它在念 —— 而实际上什么都没响。原始的错误码写在最前面：
-     解释文案可能对不上，错误码不会骗人（和 3-2 那张 VOICE_ERRORS 表、
-     看板 8-3 是同一条原则）。 */
-  speaking.onerror = function (event) {
-    const code = (event && event.error) ? event.error : 'unknown';
-    setVoiceAction(`朗读失败（${code}）。要念的是：${text}`, false);
-  };
-
-  window.speechSynthesis.speak(speaking);
-  return { ok: true, message: '正在朗读：' + text };
-}
-
-/* 把识别到的文字派发给固定指令。
-   命令自己返回 {ok, message}，这里只负责显示 —— 成功还是失败是命令
-   自己的事，路由层不替它判断。 */
-function handleVoiceText(text) {
-  const heard = String(text || '').trim();
-  setVoiceHeard(heard, false);
-
-  if (!heard) {
-    setVoiceAction('没识别到内容，再说一次', true);
-    return;
-  }
-
-  const cmd = VOICE_COMMANDS.find((c) => heard.includes(c.keyword));
-  if (!cmd) {
-    setVoiceAction(`未识别的指令：${heard}`, false);
-    return;
-  }
-
-  const outcome = cmd.run();
-  if (outcome && outcome.message) setVoiceAction(outcome.message, false);
-  else setVoiceAction(`已执行「${cmd.keyword}」`, true);
-}
-
-function resetVoiceButton() {
-  if (!el.voiceStart) return;
-  el.voiceStart.textContent = '语音指令';
-  el.voiceStart.classList.remove('is-listening');
-}
-
-function startVoiceCommand() {
-  const Ctor = speechRecognitionCtor();
-  if (!Ctor) {
-    setVoiceError(
-      '这个浏览器不支持语音识别（window.SpeechRecognition 不存在）。换新版 Chrome / Edge。',
-    );
-    return;
-  }
-  if (recognition) return;   // 正在听，忽略这次点击
-
-  setVoiceError('');
-  setVoiceNote('请说指令…');
-
-  const rec = new Ctor();
-  rec.lang = VOICE_LANG;        // 中文
-  rec.continuous = false;       // 只识别一句，说完就结束
-  rec.interimResults = false;   // 只要最终结果，不要边听边变的中间稿
-
-  recognition = rec;
-
-  rec.onstart = () => {
-    if (el.voiceStart) {
-      el.voiceStart.textContent = '正在听…';
-      el.voiceStart.classList.add('is-listening');
-    }
-    setVoiceNote('正在收音…');
-  };
-
-  rec.onresult = (event) => {
-    /* results 是个列表，每项带 isFinal。interimResults=false 时通常只有
-       一条 final，但别假设只有一条 —— 全拼起来更稳。 */
-    let text = '';
-    for (let i = event.resultIndex || 0; i < event.results.length; i++) {
-      text += event.results[i][0].transcript;
-    }
-    handleVoiceText(text);
-  };
-
-  rec.onerror = (event) => {
-    setVoiceError(voiceErrorMessage(event && event.error));
-  };
-
-  rec.onend = () => {
-    recognition = null;
-    resetVoiceButton();
-    setVoiceNote('');
-  };
-
-  try {
-    rec.start();
-  } catch (err) {
-    /* 正常走不到这里（上面已经挡住重复点击），兜个底：别让异常冒出去，
-       把按钮永远卡在"正在听"。 */
-    recognition = null;
-    resetVoiceButton();
-    setVoiceError(`启动语音识别失败：${(err && err.message) || err}`);
-  }
-}
-
-/* 离开页面时把还在听的会话掐掉，别让麦克风一直开着 */
-function stopVoiceCommand() {
-  if (!recognition) return;
-  /* 主动 abort 也会触发 onerror（error === 'aborted'），但那是我们自己
-     干的，不该当成错误显示给用户，所以先把回调摘掉再中止。 */
-  recognition.onerror = null;
-  try {
-    recognition.abort();
-  } catch (err) {
-    console.warn('[DormMate] 中止语音识别时出错：', err);
-  }
-  recognition = null;
-}
 
 /* ---------- 数据校验（MQTT 侧） ---------- */
 
@@ -895,6 +836,14 @@ function normalize(raw, topicNodeId) {
 }
 
 function onMessage(topic, payload) {
+  /* 两条 topic 走两个岔口，别合流：快照是 core 的全局视图，不是某间宿舍的
+     一条读数，塞进下面那套 normalize 只会被当成非法数据丢掉（它没有
+     temperature，还没 nodeId）。 */
+  if (topic === STATE_TOPIC) {
+    onStateMessage(payload);
+    return;
+  }
+
   // dormmate/v1/nodes/<nodeId>/telemetry —— 节点名是第 4 段（下标 3）。
   // 形状不对就交 'unknown'，让下游的一致性检查去报警，不拿猜出来的名字当数。
   const parts = topic.split('/');
@@ -919,6 +868,10 @@ function onMessage(topic, payload) {
 
 /* ---------- 连接 ---------- */
 
+/* 当前那条 MQTT 连接。没连上（或压根没加载 mqtt.js）时是 null ——
+   sendCmd 拿它做闸门，不拿"有没有加载过"猜。 */
+let client = null;
+
 function connect() {
   if (typeof mqtt === 'undefined') {
     setConn('off', '未加载 mqtt.js');
@@ -927,7 +880,9 @@ function connect() {
     return;
   }
 
-  const client = mqtt.connect(BROKER_URL, {
+  /* 模块级，不 const 在函数里：sendCmd 要用它（E2 起这个文件会发指令，
+     不再只是收）。 */
+  client = mqtt.connect(BROKER_URL, {
     clientId: `dormmate-web-${Math.random().toString(16).slice(2, 8)}`,
     clean: true,
     reconnectPeriod: 2000,
@@ -937,7 +892,10 @@ function connect() {
 
   client.on('connect', () => {
     setConn('on', '已连接');
-    client.subscribe(TOPIC, { qos: 1 }, (err) => {
+    /* 两条都订，各喂各的：遥测喂看板（卡片 / 最近消息 / CSV / 历史记录），
+       state 喂 E2 那套多模态（念哪一间、快照挂给谁、按钮该不该亮）。
+       把 state 换掉遥测是不行的 —— 快照里没有逐条消息，CSV 和历史就空了。 */
+    client.subscribe([TOPIC, STATE_TOPIC], { qos: CFG.QOS }, (err) => {
       if (err) {
         console.error('[DormMate] 订阅失败：', err);
         setConn('off', '订阅失败');
@@ -1010,26 +968,40 @@ if (el.camOpen) {
     });
   });
 
-  el.camShot.addEventListener('click', () => takeSnapshot());
+  /* E2 起这个按钮要走多模态那边：照片要带水印（宿舍 / 事件编号 / 时刻），
+     还要把文件信息发回 core 归档 —— 两件事都得先知道**当前焦点是哪一间**，
+     那在 state 里，这个文件没有。
+
+     那边没加载时就还是拍一张裸的：页面不该因为少一个可选模块，连
+     「打开摄像头看一眼」都用不了（那也是 3-1 那一步的交付物）。 */
+  el.camShot.addEventListener('click', () => {
+    const mm = window.DormMateMultimodal;
+    if (mm && typeof mm.recordScene === 'function') {
+      mm.recordScene();
+      return;
+    }
+    takeSnapshot();
+  });
 
   /* 离开页面（关标签、手机切走被回收）时把摄像头关掉。
      用 pagehide 不用 beforeunload：移动端 Safari 常常不触发后者。 */
   window.addEventListener('pagehide', closeCamera);
 }
 
-/* 语音指令。和上面两块一样先判存在性。 */
-if (el.voiceStart) {
-  el.voiceStart.addEventListener('click', startVoiceCommand);
-
-  /* 离开页面时中止会话 —— 和摄像头一样，不收拾的话麦克风会一直开着。
-     两条 pagehide 是分开注册的，互不影响。 */
-  window.addEventListener('pagehide', stopVoiceCommand);
-}
+/* 语音按钮的注册跟着那整块一起搬去了 web/multimodal.js（那边自己判
+   #voice-start 在不在，并自己挂 pagehide 收麦克风）。 */
 
 /* ---------- 启动 ---------- */
 
 document.getElementById('broker-label').textContent = BROKER_URL;
 document.getElementById('topic-label').textContent = TOPIC;
+/* E2 多出来的两条 topic 也显示出来。文案从 CFG 取 —— 页面里再写一遍
+   'dormmate/v1/state' 的话，改一处忘一处的时候页面上会挂着旧地址，
+   而那正是用来核对「到底连的是哪儿」的那行字（和 8-1 同一条口径）。 */
+const stateLabel = document.getElementById('state-label');
+if (stateLabel) stateLabel.textContent = STATE_TOPIC;
+const cmdLabel = document.getElementById('cmd-label');
+if (cmdLabel) cmdLabel.textContent = CFG.CMD_TOPIC;
 
 applyTheme(localStorage.getItem('dormmate-theme') || '');
 renderCards();

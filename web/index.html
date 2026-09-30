@@ -23,9 +23,14 @@
     </div>
   </header>
 
+  <!-- 这四行里的地址和 topic 都由 script.js 从 shared/config.js 填（起手写在
+       标签里的那串只是没跑 JS 时的兜底）。规格以 config.js 为准：同一个字面量
+       只该有一处出处，tests/config.test.js 盯的就是这个。 -->
   <p class="meta">
     Broker <code id="broker-label">ws://localhost:9001</code>
     · 订阅 <code id="topic-label">dormmate/v1/nodes/+/telemetry</code>
+    · 快照 <code id="state-label">dormmate/v1/state</code>
+    · 指令 <code id="cmd-label">dormmate/v1/cmd</code>
   </p>
 
   <section class="panel">
@@ -90,8 +95,25 @@
       </div>
     </div>
 
+    <!-- 焦点那一行由 web/multimodal.js 按 core 的快照画（focus > priority）。
+         它同时是「说『记录现场』会挂到哪一间」的答案，所以演示时先看这一行。 -->
+    <p id="voice-focus" class="voice-text is-placeholder">当前焦点：等 core 的第一帧快照…</p>
+
     <p class="voice-hint">
-      固定指令：说「朗读」播报当前状态 · 说「拍照」拍下现场画面 · 其余会提示未识别。
+      能说的四句：<b>查看 + 宿舍名</b>（切全局焦点，例：「查看 dorm-b」）·
+      <b>记录现场</b>（拍照，水印带宿舍 / 事件编号 / 时刻，文件信息发给 core）·
+      <b>朗读状态</b>（按 core 的快照念选中那间的温湿度、状态、事件）·
+      <b>开始处理</b>（把 handle 发给 core，本地不改状态）。
+      宿舍名认「dorm-b」「Dorm B」「dormb」，也认「第二个」「三号」。
+    </p>
+
+    <!-- 浏览器限制写在这里而不是只写在 README 里：人是在这个页面上踩到它的。
+         识别和摄像头都要**安全上下文** —— localhost / https 算，局域网 IP 走
+         http 不算，file:// 也不算。演示请用 http://localhost:8000。 -->
+    <p class="voice-hint">
+      ⚠ 语音识别和摄像头只在<b>安全上下文</b>下可用：<code>http://localhost:8000</code>
+      或 https 可以，<code>file://</code> 打开、以及手机扫局域网 IP（<code>http://192.168.x.x</code>）
+      会被浏览器拦掉。语音识别还要联网（Chrome 把录音传到云端识别）；语音播报在本机合成，断网也能念。
     </p>
   </section>
 
@@ -155,7 +177,16 @@
 </div>
 
 <script src="vendor/mqtt.min.js"></script>
+<!-- config.js 必须在 script.js **之前**：script.js 起手就要 window.DormMateConfig，
+     读不到会当场 throw（宁可当场点名缺了什么，也不要在后面报一句看不出所以然的
+     「Cannot read properties of undefined」）。 -->
+<script src="../shared/config.js"></script>
 <script src="../shared/rules.js"></script>
 <script src="script.js"></script>
+<!-- Phase6 E2 的多模态（语音 + 拍照上报）。type="module" 是必须的：它 import
+     ../dashboard/logic.js 里的纯函数（朗读那句、选中的是哪一间），而 logic.js
+     是 ES 模块。模块脚本天生 defer，所以它一定跑在 script.js 之后 —— 那正是它
+     需要的顺序，window.DormMateBridge 那时已经建好了。 -->
+<script type="module" src="multimodal.js"></script>
 </body>
 </html>
