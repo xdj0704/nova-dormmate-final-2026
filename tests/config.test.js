@@ -19,6 +19,9 @@ const vm = require('vm');
 const ROOT = path.join(__dirname, '..');
 const SRC = fs.readFileSync(path.join(ROOT, 'shared', 'config.js'), 'utf8');
 const PY = fs.readFileSync(path.join(ROOT, 'config.py'), 'utf8');
+/* 动作名那个常量对的是 events.py 而不是 config.py —— 「handle」这个词的出处
+   在事件那一层（`HANDLE = "handle"`），config.py 里没有它。 */
+const EVENTS = fs.readFileSync(path.join(ROOT, 'events.py'), 'utf8');
 
 let pass = 0, fail = 0;
 function check(label, actual, expected) {
@@ -120,6 +123,17 @@ check('RETAIN', C.RETAIN, pyConst('RETAIN'));
    它到底对的是谁。 */
 check('★ 被拒绝那条 topic 和 config.py 的 REJECT_TOPIC 是同一句',
   jsTopics.indexOf(pyConst('REJECT_TOPIC')) >= 0, true);
+
+/* 动作名不是 topic，上面那套「两个方向都查」碰不到它（那份清单只收 dormmate/
+   开头的字符串）。但它的性质一模一样：写错一个字，core 回一句「动作不对」，
+   而页面上看着像「点了没反应」—— 三条并发路径里错一条，只有 core 的终端知道。
+   所以单独对一次，出处是 events.py 的 HANDLE。
+   抠的是 `HANDLE = "handle"` 那一行本身，不是「events.py 里出现过 handle 这个词」——
+   后者在 COMMANDS、在动作字典、在注释里到处都是，永远为真，等于没查。 */
+check('★ 动作名和 events.py 的 HANDLE 是同一个词', C.CMD_ACTION,
+  (EVENTS.match(/^HANDLE\s*=\s*"([^"]*)"/m) || [])[1]);
+check('★ 而且这个动作确实在事件那一层的动作清单里（不是个没人认的词）',
+  /^COMMANDS\s*=\s*\(\s*HANDLE\s*,?\s*\)/m.test(EVENTS), true);
 
 /* ============ C. topicFor 的形状 ============ */
 

@@ -1,13 +1,22 @@
 // tests/dashboard.test.js
-// 校验 dashboard/dashboard.js 的 handleMessage —— 多节点看板的唯一消息入口。
+// 校验 dashboard/dashboard.js —— 多节点看板的唯一消息入口 handleMessage，
+// 以及 Step E3-2 之后它那套「只订快照、只渲染」的行为。
 //
-// 重点盯三件事：
-//   1) 不串线。往 dorm-a 发消息，dorm-b / dorm-c 的历史必须一个字都不变。
-//      这是三节点看板最容易出的错，而且出了以后图上看着还挺像样。
-//   2) 脏数据拦得住，且拦下之后不污染任何节点的历史。
-//   3) status 一律用 judgeStatus 复核，报文里写什么都不算数。
+// 重点盯五件事：
+//   1) **只认一条 topic**。除了 dormmate/v1/state，别的一律忽略，
+//      而且忽略之后页面一个字节都不能变（订到别人的 topic、端口连错，
+//      都是这么表现的）。遥测 topic 尤其要拦 —— 那是 E3 之前它订的那条。
+//   2) **不做业务计算**。快照说什么就是什么：状态是「台风」也照显示，
+//      温度是 99 也照显示，页面不修不补也不复核。
+//   3) **按下「开始处理」之后页面一个字都不改** —— 这是红线最强的表达：
+//      好没好等 core 发回下一帧快照。以前按一下就地改四个字段、
+//      屏幕上立刻写「处理中」，那正是这一轮要拆掉的东西。
+//   4) 跨端联动：快照里的 focus 一变，看板的选中项跟着走；但用户点过别处之后
+//      不再被同一条 focus 拽回去。
+//   5) 清空清的是**屏幕**，不是 core —— 下一条快照一到画面就回来。
 //
-// 做法是把 DOM 和 Chart.js 都打上桩，用 vm 把 dashboard.js 真跑起来。
+// 做法是把 DOM / Chart.js / mqtt / 3D / speechSynthesis / fetch 全打上桩，
+// 用 vm 把 shared/config.js、dashboard/logic.js（真文件）、dashboard.js 依次跑起来。
 // 不是静态检查，是让它真的执行一遍。
 //
 // 跑法：node tests/dashboard.test.js
@@ -28,37 +37,42 @@ function makeEl(id) {
        照抄这个默认值 —— 不然「刚打开时按钮是灰的」那条断言拿到的是 undefined，
        真假都测不出来。 */
     disabled: false,
+    /* dashboard.js 里那句 `el.conn.className = 'conn conn--' + kind` 直接赋值，
+       所以要有个初值能读回来。 */
+    className: '',
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
       contains: (c) => classes.has(c),
     },
     _classes: classes,
-    /* 把注册的回调留下来。「优先关注」那条栏的点击是事件委托（内容整块重画，
-       不给每次新生成的按钮单独绑），不记下来就没法触发它 —— 而
-       「点一下要切到那个节点」正是这一步的验收点之一。 */
+    /* 把注册的回调留下来。卡片和顶部那条横幅的点击都是事件委托
+       （内容整块重画，不给每次新生成的按钮单独绑），不记下来就没法触发它们 ——
+       而「点卡片换查看对象」「点横幅等于点卡片」正是要测的东西。 */
     _handlers: {},
     addEventListener(ev, fn) { (this._handlers[ev] = this._handlers[ev] || []).push(fn); },
   };
 }
 
 const els = {};
-['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state',
-  /* Step D3 收尾：按下处理按钮之后那行说明。同理必须登记 ——
-     不登记的话，测试读到的 els['cmd-note'] 和 dashboard.js 里
-     el.cmdNote 拿到的是两个对象，断言全是假绿。 */
-  'cmd-note',
-  /* Step 7-4 的三件：事件表、条数、导出按钮。
-     必须列在这里 —— getElementById 对没登记的 id 会现场造一个新的，
-     那样断言里读到的 els['event-body'] 和页面里那个就不是同一个对象了。 */
+/* 这份清单就是 dashboard/index.html 里那些 id。**一个都不能漏**：
+   getElementById 对没登记的 id 会现场造一个新的，那样测试读到的
+   els['event-body'] 和 dashboard.js 里 el.evBody 拿到的就不是同一个对象，
+   断言全是假绿 —— 页面上明明没变，测试却看见变了。 */
+['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta',
+  'action-handle', 'action-state', 'cmd-note', 'chart-note',
+  'scene3d', 'focus', 'speak', 'speak-note',
   'event-body', 'event-count', 'export-events',
-  /* Step 8-3 的三件：顶上那一行、语音按钮、按钮下面那行说明。同理必须登记。 */
-  'focus', 'speak', 'speak-note',
-  /* Step 9-3 进阶项的三件：条数、结论那句、来源说明。同理必须登记。 */
-  'ml-count', 'ml-text', 'ml-note']
+  'reject-body', 'reject-count',
+  'clear', 'conn', 'conn-text', 'toggle',
+  'ml-count', 'ml-text', 'ml-note',
+  'chart-temp', 'chart-humidity']
   .forEach((id) => { els[id] = makeEl(id); });
+
+/* index.html 里那一句是**写在标签里**的，不是页面脚本填的 ——
+   造出来的空元素得照着补上，否则读回来是空串，看着像「页面把占位抹了」。
+   这段字的唯一作用是：fetch 还没回来那一小段时间里别留白。 */
+els['ml-text'].textContent = '正在读取 report/ml_result.json …';
 
 const chartsBox = makeEl('charts');
 
@@ -71,11 +85,10 @@ const PALETTE = {
   '--surface-1': '#fcfcfb',
 };
 
-/* 导出 CSV 那条路（Step 7-4）要用到 vm 里没有的三样东西：Blob、URL、
+/* 导出 CSV 那条路要用到 vm 里没有的三样东西：Blob、URL、
    以及 document.createElement —— 真实现是临时造一个 <a download> 插进 body
    再点它一下。不补这三样，点导出按钮就是 ReferenceError，
-   而「导出的字节到底对不对」正是这一步最该测的东西。
-   每一件都把调用记下来，测试才能在没有真浏览器的情况下把那份 CSV 拿到手。 */
+   而「导出的字节到底对不对」正是这一步最该测的东西。 */
 const blobs = [];
 class BlobStub {
   constructor(parts, options) {
@@ -138,26 +151,25 @@ class ChartStub {
 
 /* ---------- mqtt.js 打桩 ---------- */
 /* 不打桩的话 connect() 会走进「未加载 mqtt.js」那条分支，MQTT 这段等于没测。
-   这里把 connect/subscribe/on 都记下来，测试就能主动触发握手、主动投递消息。 */
+   这里把 connect/subscribe/publish/on 都记下来，测试就能主动触发握手、
+   主动投递消息、检查发出去的东西。 */
 const mqttStub = {
   clients: [],
   connect(url, opts) {
     const handlers = {};
     const c = {
-      url, opts, handlers, subscribed: [], ended: false,
-      /* Step D3 收尾：页面第一次往外发东西了（dormmate/v1/cmd）。
-         published 把每一次都记下来 —— 发没发、发到哪条 topic、payload 是什么、
-         retain 开没开，全是断言的对象。真 mqtt.js 的客户端连上之后
-         connected 就是 true，这里照做，不然 sendHandle 会一直走「没连上」那条。 */
+      url, opts, handlers, subscribed: [], ended: false, endForce: null,
+      /* 真 mqtt.js 的客户端连上之后 connected 就是 true，这里照做 ——
+         不然 sendHandle 会一直走「没连上」那条分支。 */
       connected: false,
       published: [],
       on(ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); return c; },
-      subscribe(topic, o, cb) { c.subscribed.push(topic); if (cb) cb(null); return c; },
+      subscribe(topic, o, cb) { c.subscribed.push({ topic, opts: o }); if (cb) cb(null); return c; },
       publish(topic, payload, opts) {
         c.published.push({ topic, payload, opts });
         return c;
       },
-      end() { c.ended = true; return c; },
+      end(force) { c.ended = true; c.endForce = force; return c; },
     };
     mqttStub.clients.push(c);
     return c;
@@ -165,40 +177,30 @@ const mqttStub = {
 };
 
 /* ---------- 3d/scene.js 打桩 ---------- */
-/* 不记录的话就测不出「切节点 / 收到新消息时到底有没有把状态交给 3D」——
-   而这正是 Step 6-3 的全部内容。
+/* 不记录的话就测不出「切节点 / 收到新快照时到底有没有把状态交给 3D」。
    打桩挂的是 createDorm3D（模块里 import 的那个名字），不是 3D 场景本身。 */
 const sceneCalls = [];
 function createDorm3DStub(hostId) {
   const rec = { hostId, statuses: [], labels: [], fans: [], focus: [], ops: [], disposed: 0 };
   sceneCalls.push(rec);
   return {
-    /* 真的那个也会返回「实际生效的状态」，所以桩照做 ——
-       renderScene 拿它的返回值拼标签文字。 */
     updateScene(status) { rec.statuses.push(status); rec.ops.push('updateScene'); return status; },
-    setLabel(text) { rec.labels.push(text); return text; },
-    /* setFanOn 要记下来（Step 7-2）：这一步的验收点之一是「点了按钮风扇得转」，
-       不记的话调没调、传的是 true 还是 false，全都测不出来。
+    setLabel(text) { rec.labels.push(text); rec.ops.push('setLabel'); return text; },
+    /* setFanOn 要记下来：验收点之一是「有人按过开始处理，扇叶得一直转」。
        ops 是按调用顺序记的**混在一起**的流水 ——
        scene.js 里那句「后调用的那次为准」意味着 updateScene 和 setFanOn
        的先后顺序本身就是一个必须钉住的约定，分开两个数组就看不出顺序了。 */
     setFanOn(on) { rec.fans.push(on); rec.ops.push('setFanOn'); },
-    /* setFocus 是 Step 8-3 加的：画面里那圈「当前重点」的环亮不亮。
-       和 setFanOn 一样要按顺序记 —— 「什么时候亮的」本身就是这一步的验收点，
-       而它和 updateScene 的先后顺序（场景先重画、再开关环）也在这里钉住。 */
     setFocus(on) { rec.focus.push(!!on); rec.ops.push('setFocus'); },
     dispose() { rec.disposed += 1; },
   };
 }
 
-/* ---------- speechSynthesis 打桩（Step 8-3）----------
-   真浏览器里 speak() 是异步出声的，测试环境没有声卡、也不需要。
-   这一步要验的是「按下按钮之后按顺序做了什么」：
-     先 cancel 再 speak（不 cancel 的话连点两次，第二句要排队等第一句念完）、
-     utterance 的 lang 设成了 zh-CN、
-     onerror 把**原始错误码**写进了那行说明。
-   所以三件事各记一份；顺序单独记在 speechLog 里 ——
-   只看 cancelled 和 uttered 两个计数是看不出先后顺序的。 */
+/* ---------- speechSynthesis 打桩 ---------- */
+/* 真浏览器里 speak() 是异步出声的，测试环境没有声卡、也不需要。
+   要验的是「按下按钮之后按顺序做了什么」：先 cancel 再 speak、
+   utterance 的 lang 设成了 zh-CN、onerror 把**原始错误码**写进了那行说明。
+   顺序单独记在 speechLog 里 —— 只看计数是看不出先后的。 */
 const speechLog = [];
 const spoken = [];
 function SpeechSynthesisUtteranceStub(text) {
@@ -211,18 +213,15 @@ const speechStub = {
   cancelled: 0,
   uttered: [],
   cancel() { this.cancelled += 1; speechLog.push('cancel'); },
-  /* 记下交给 speak 的那一个，好在断言里确认「念的」和「造出来的」是同一句 ——
-     造了一个 A、念了另一个 B 的话，两边的计数都对得上，只有这一份能看出来。 */
   speak(u) { this.uttered.push(u); speechLog.push('speak'); },
 };
 
-/* ---------- fetch 打桩（Step 9-3 的进阶项）----------
-   看板打开时会 fetch('../report/ml_result.json')，把 C 部分那份 ML 结果读来显示。
-   vm 里没有 fetch，不打桩就是 ReferenceError —— 而这一段的验收点
-   （读到了摆什么、404 摆什么、回来不是 JSON 又摆什么）全都发生在
-   promise 回来**之后**，所以桩不能直接把结果给出去：
-   它把 resolve / reject 存起来，让测试自己挑时候放行（R 段），
-   放行之后还要等一轮微任务才读得到页面 —— 见 R 段那个 settle()。 */
+/* ---------- fetch 打桩 ---------- */
+/* 看板打开时会 fetch('../report/ml_result.json')。vm 里没有 fetch，
+   不打桩就是 ReferenceError —— 而这一段的验收点（读到了摆什么、
+   404 摆什么、回来不是 JSON 又摆什么）全都发生在 promise 回来**之后**，
+   所以桩不直接把结果给出去：它把 resolve / reject 存起来，
+   让测试自己挑时候放行，放行之后再等一轮微任务才读得到页面。 */
 const fetchCalls = [];
 const fetchPending = [];
 function fetchStub(url) {
@@ -230,6 +229,23 @@ function fetchStub(url) {
   return new Promise((resolve, reject) => { fetchPending.push({ resolve, reject }); });
 }
 
+/* ---------- console 打桩 ---------- */
+/* dashboard.js 每条原始报文都往 Console 打一行。测试里那会是几百行噪音，
+   而且「发出去的那条指令 payload 是什么」正好也在 Console 那行里 —— 记下来备用。 */
+const consoleLogs = [];
+const consoleStub = {
+  log: (...args) => { consoleLogs.push(args.map(String).join(' ')); },
+  warn: (...args) => { consoleLogs.push('WARN ' + args.map(String).join(' ')); },
+  error: (...args) => { consoleLogs.push('ERROR ' + args.map(String).join(' ')); },
+};
+
+/* ---------- 上下文 ---------- */
+/* ★ window 就指向上下文自己。
+   真浏览器里 window === globalThis，shared/config.js 挂的是 globalThis
+   （见那个文件最后一行），dashboard.js 读的是 window.DormMateConfig ——
+   只有把这两个当成同一个东西，才和浏览器里的行为一致。
+   分成两个对象的话，config.js 挂到 A、dashboard.js 读 B，页面上永远是
+   「未加载 shared/config.js」。 */
 const context = {
   document: documentStub,
   Chart: ChartStub,
@@ -238,1943 +254,1009 @@ const context = {
   createDorm3D: createDorm3DStub,
   location: { hostname: 'localhost' },
   getComputedStyle: () => ({ getPropertyValue: (n) => PALETTE[n] || '' }),
-  window: {
-    matchMedia: () => ({ matches: false, addEventListener() {} }),
-    speechSynthesis: speechStub,
-    SpeechSynthesisUtterance: SpeechSynthesisUtteranceStub,
-  },
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  speechSynthesis: speechStub,
+  SpeechSynthesisUtterance: SpeechSynthesisUtteranceStub,
   Blob: BlobStub,
   URL: URLStub,
   setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
-  console,
-  JSON, Math, Date, Number, Object, Array, String, Set, isNaN, parseInt,
+  console: consoleStub,
+  JSON, Math, Date, Number, Object, Array, String, Set, Boolean,
+  isNaN, parseInt, Promise, Error, RegExp, TypeError, undefined,
 };
 context.globalThis = context;
-context.window.document = documentStub;
-
-/* ---------- 加载 shared/rules.js，再加载 dashboard.js ---------- */
-
-/* Step 6-3 起 dashboard.js 是 ES 模块（它 import 了 ../3d/scene.js），
-   Step 7-1 又多了一条（./logic.js）。而 vm.runInContext 只能跑普通脚本 ——
-   原样喂进去会抛「Cannot use import statement outside a module」。
-
-   处理方式和 tests/scene3d.test.js 里改写 'three' 那个标识符是一个思路：
-   把 import 那两行摘掉。摘之前先数一遍，必须正好两条；
-   将来谁再加一条 import，这里立刻炸出来，而不是把那条也悄悄摘了、测了个假的。
-
-   两条摘掉之后顶上放的东西不一样：
-     ../3d/scene.js —— 换成打桩的 createDorm3D（3D 不是这一步要测的）
-     ./logic.js     —— 换成**真文件**（见下面 runInContext 那段）
-   这么分是因为「优先关注」的比较规则正是 Step 7-1 的全部内容，
-   处理动作的状态机（beginHandling / nextHandling）是 Step 7-2 的全部内容，
-   打个桩等于把要测的东西测没了。
-
-   注意这只是**跑起来**的方式。原文件里到底怎么写的那两行，
-   由下面 M 段的两条静态断言盯着（正则 + 文件真的在）。 */
-const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
-/* 这条 import 在源码里折成了两行（Step 7-4 起函数变多，一行放不下），
-   所以分隔符一律写 \s —— 它能匹配换行，折行处那几个空格加换行才过得去。
-   写成 [ ] 或字面空格的话，摘不掉 import，下一句 vm 会抛
-   「Cannot use import statement outside a module」。 */
-const LOGIC_IMPORT = /^import\s*\{\s*pickPriority\s*,\s*nextAbnormal\s*,\s*beginHandling\s*,\s*nextHandling\s*,\s*cmdNote\s*,\s*beginEvent\s*,\s*markPriority\s*,\s*markAction\s*,\s*closeEvent\s*,\s*buildFocus\s*,\s*buildAlert\s*,\s*buildMlNote\s*,\s*mlFetchFailed\s*\}\s*from\s*'\.\/logic\.js';\s*$/m;
-const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
-const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
-const RULES_SRC = path.join(ROOT, 'shared', 'rules.js');
-const dashText = fs.readFileSync(DASH_SRC, 'utf8');
-const importCount = (dashText.match(/^import\s/gm) || []).length;
+context.window = context;
 
 vm.createContext(context);
-vm.runInContext(fs.readFileSync(RULES_SRC, 'utf8'), context, { filename: RULES_SRC });
 
-/* logic.js 跑真的那份。它同样是 ES 模块，把 `export ` 前缀摘掉就行 ——
-   函数名照旧留在作用域里，顶层 function 声明在 vm 里就是上下文的全局属性。
-   两个脚本共用一个上下文，所以后面 dashboard.js 里那句 pickPriority 调到的
-   就是这里定义的那一个。
+/* ---------- 依次加载三个真文件 ---------- */
 
-   顺带一个副作用是好事：logic.js 和 dashboard.js 的顶层名字撞了的话，
-   这里会当场抛「Identifier 'x' has already been declared」，不会悄悄跑过去。 */
+const CONFIG_SRC = path.join(ROOT, 'shared', 'config.js');
+const LOGIC_SRC = path.join(ROOT, 'dashboard', 'logic.js');
+const DASH_SRC = path.join(ROOT, 'dashboard', 'dashboard.js');
+
+/* 1) shared/config.js —— 普通 script，原样跑。
+      跑完之后 window.DormMateConfig 就有了（挂的就是 globalThis）。 */
+vm.runInContext(fs.readFileSync(CONFIG_SRC, 'utf8'), context, { filename: CONFIG_SRC });
+
+/* 2) dashboard/logic.js —— 真文件（不打桩）。
+      「一个结论都不下」这条正是这一轮的全部内容，打个桩等于把要测的东西测没了。
+      它是 ES 模块，把 `export ` 前缀摘掉就行：顶层 function 声明在 vm 里
+      就是上下文的全局属性，后面 dashboard.js 调到的就是这里定义的那一个。
+      顺带一个副作用是好事：logic.js 和 dashboard.js 的顶层名字撞了的话，
+      这里会当场抛「Identifier 'x' has already been declared」。 */
 vm.runInContext(fs.readFileSync(LOGIC_SRC, 'utf8').replace(/^export\s+/gm, ''),
   context, { filename: LOGIC_SRC });
 
-let src = dashText;
-src = src.replace(SCENE_IMPORT, '/* import 已摘除：顶上用的是上下文里的 createDorm3D 打桩 */\n');
-src = src.replace(LOGIC_IMPORT, '/* import 已摘除：上面跑的是真的 logic.js */\n');
-/* 只加测试钩子，不改原文件 */
-src += `
-;globalThis.__nodes = nodes;
-globalThis.__messages = messages;
-globalThis.__simulate = simulate;
-globalThis.__clearAll = clearAll;
-globalThis.__selectNode = selectNode;
-globalThis.__current = function () { return currentNodeId; };
-globalThis.__topicNode = topicNode;
-globalThis.__connect = connect;
-globalThis.__disconnect = disconnect;
-globalThis.__renderScene = renderScene;
-globalThis.__renderFocus = renderFocus;
-globalThis.__speakAlert = speakAlert;
-globalThis.__events = events;
-globalThis.__renderEvents = renderEvents;
-globalThis.__buildEventsCSV = buildEventsCSV;
-globalThis.__exportEventsCSV = exportEventsCSV;
-globalThis.__loadMlResult = loadMlResult;
-`;
+/* 3) dashboard/dashboard.js —— 摘掉那两条 import。
+     它是 ES 模块，而 vm.runInContext 只能跑普通脚本，原样喂进去会抛
+     「Cannot use import statement outside a module」。摘之前先数一遍，
+     必须正好两条；将来谁再加一条 import，这里立刻炸出来，
+     而不是把那条也悄悄摘了、测了个假的。 */
+const dashText = fs.readFileSync(DASH_SRC, 'utf8');
+const importCount = (dashText.match(/^import\s/gm) || []).length;
+if (importCount !== 2) {
+  throw new Error('dashboard.js 里应该是两条 import，实际 ' + importCount + ' 条 —— '
+    + '下面那两个正则摘不干净，vm 会抛语法错。');
+}
+const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
+/* 这条 import 折成了两行，所以分隔符一律写 \s —— 它能匹配换行。
+   写成字面空格的话摘不掉，下一句 vm 会抛「Cannot use import statement outside a module」。
+
+   名字那一段必须用 [^{}]* 而不是 [\s\S]*?：两条 import 挨在一起，用后者的话
+   正则可以从**上一行那条** `import { createDorm3D }` 的 `{` 起头，
+   一路吞到 './logic.js' 的 `}` —— 匹配是成功的，但摘出来的是错的那一段
+   （下面按名字数量做的断言就是这么发现它的）。 */
+const LOGIC_IMPORT = /^import\s*\{[^{}]*\}\s*from\s*'\.\/logic\.js';\s*$/m;
+
+let src = dashText
+  .replace(SCENE_IMPORT, '/* import 已摘除：顶上用的是上下文里的 createDorm3D 打桩 */\n')
+  .replace(LOGIC_IMPORT, '/* import 已摘除：上面已经把真 logic.js 的函数放进上下文了 */\n');
+if (/^import\s/m.test(src)) throw new Error('还有 import 没摘掉，vm 会抛语法错');
+
 vm.runInContext(src, context, { filename: DASH_SRC });
 
-/* 页面刚加载完、一条数据都还没收到的那一刻，顶上那一行画了什么。
-   先存下来 —— 后面各段都会往里灌数据，之后就再也看不到这个状态了。
-   N 段拿它验「启动时就画好了」和「没数据时不谎称都正常」。 */
-const FOCUS_AT_LOAD = els.focus.innerHTML;
+/* ---------- 造数据 ---------- */
 
-/* 那圈「当前重点」的环在启动那一刻是什么样，同样先存下来 ——
-   M 段读到的已经是 A~L 跑完之后的流水了（几十次调用），
-   要验「刚起来时就接过一次、传的是 false」只能靠这一份快照。 */
-const RING_AT_LOAD = sceneCalls[0].focus.slice();
+function nodeRow(nodeId, over) {
+  const row = {
+    nodeId: nodeId,
+    online: true,
+    status: '正常',
+    temperature: 25,
+    humidity: 60,
+    time: '2026-09-22 20:30:00',
+    abnormalCount: 0,
+    durationSec: null,
+    durationText: null,
+    reason: '',
+    lastSeen: '2026-09-22 20:30:00',
+    historyCount: 3,
+    history: [
+      { time: '2026-09-22 20:28:00', temperature: 25, humidity: 60, status: '正常' },
+      { time: '2026-09-22 20:29:00', temperature: 25, humidity: 60, status: '正常' },
+      { time: '2026-09-22 20:30:00', temperature: 25, humidity: 60, status: '正常' },
+    ],
+  };
+  Object.keys(over || {}).forEach(function (k) { row[k] = over[k]; });
+  return row;
+}
 
-/* 处理动作那一行刚加载完的样子，同样先存下来 ——
-   O 段一上来就 clearAll()，那之后再读到的就是「清空之后」画出来的，
-   而不是「启动时」画出来的了。少了这一份，把文件末尾那次 renderAction()
-   删掉也不会有人发现：按钮的 disabled 是 makeEl 给的默认值，看着照样是灰的。 */
-const ACTION_AT_LOAD = {
-  disabled: els['action-fan'].disabled,
-  text: els['action-state'].textContent,
-};
+function eventRow(over) {
+  const e = {
+    event_id: 'dorm-a-20260922-202800',
+    nodeId: 'dorm-a',
+    state: 'OPEN',
+    startTime: '2026-09-22 20:28:00',
+    problem: '温度偏高（31℃）',
+    priorityTime: '2026-09-22 20:30:00',
+    priorityReason: '连续异常 3 次、已持续 2 分钟，最久',
+    action: null, actionTime: null, actionSource: null,
+    recoverTime: null, endTime: null, result: null,
+    abnormalAfter: 0, verifyCount: 0,
+  };
+  Object.keys(over || {}).forEach(function (k) { e[k] = over[k]; });
+  return e;
+}
 
-/* 事件记录那一块刚加载完的样子。同样的道理：P 段一上来就 clearAll()，
-   那之后再读到的就是「清空之后」画出来的。少了这一份，
-   把文件末尾那次 renderEvents() 删掉也不会有人发现 ——
-   tbody 本来就是空的，看着跟「渲染过了、只是没有事件」一模一样。 */
-const EVENTS_AT_LOAD = {
-  disabled: els['export-events'].disabled,
-  count: els['event-count'].textContent,
-  body: els['event-body'].innerHTML,
-};
+function snapshotOf(over) {
+  const s = {
+    v: 2,
+    time: '2026-09-22 20:30:00',
+    focus: null,
+    priority: null,
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'), nodeRow('dorm-c')],
+    events: {
+      summary: { total: 0, OPEN: 0, HANDLING: 0, RECOVERED: 0, UNRESOLVED: 0 },
+      dropped: 0, events: [],
+    },
+    rejects: { total: 0, kept: 0, items: [] },
+    counters: { received: 0, rejected: 0, statusMismatch: 0, retainedCleared: 0,
+      commands: 0, commandRejected: 0 },
+  };
+  Object.keys(over || {}).forEach(function (k) { s[k] = over[k]; });
+  return s;
+}
 
-/* ML 那一块刚加载完的样子。这一份和上面几份不一样：它不是「别的段会把它改掉」，
-   而是**测试自己**在 R 段会把 fetch 放行、让页面重画它。到那时候再读，
-   拿到的就是「读回来之后」的样子了 —— 要验「读回来之前不是一片空白」
-   只能靠这一份快照。 */
-const ML_AT_LOAD = {
-  count: els['ml-count'].textContent,
-  text: els['ml-text'].textContent,
-};
+/** 一份「上面出事了」的快照：dorm-b 偏热、开着案、已经按过开始处理。 */
+function busySnapshot(over) {
+  const hot = nodeRow('dorm-b', {
+    status: '偏热', temperature: 31, abnormalCount: 3,
+    durationSec: 1200, durationText: '20 分钟',
+    reason: '已连续偏热 20 分钟（3 次）',
+    history: [
+      { time: '2026-09-22 20:28:00', temperature: 33, humidity: 60, status: '偏热' },
+      { time: '2026-09-22 20:29:00', temperature: 32, humidity: 60, status: '偏热' },
+      { time: '2026-09-22 20:30:00', temperature: 31, humidity: 60, status: '偏热' },
+    ],
+  });
+  const s = snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '偏热', severity: 'critical',
+      abnormalCount: 3, durationSec: 1200, durationText: '20 分钟',
+      reason: '已连续偏热 20 分钟（3 次）' },
+    nodes: [nodeRow('dorm-a'), hot, nodeRow('dorm-c')],
+    events: {
+      summary: { total: 8, OPEN: 0, HANDLING: 1, RECOVERED: 7, UNRESOLVED: 0 },
+      dropped: 0,
+      events: [
+        eventRow({ nodeId: 'dorm-a', state: 'RECOVERED', recoverTime: '2026-09-22 20:10:00',
+          endTime: '2026-09-22 20:10:00', result: '已恢复', action: '开启风扇 / 通风' }),
+        eventRow({ nodeId: 'dorm-b', state: 'HANDLING', action: '开启风扇 / 通风',
+          actionTime: '2026-09-22 20:31:00', actionSource: 'dashboard', abnormalAfter: 2 }),
+      ],
+    },
+    rejects: { total: 1, kept: 1, items: [{ time: '2026-09-22 20:29:00',
+      topic: 'dormmate/v1/nodes/dorm-a/telemetry', reasons: ['JSON 解析失败'],
+      payload: '{not json' }] },
+    counters: { received: 42, rejected: 1, statusMismatch: 0, retainedCleared: 0,
+      commands: 2, commandRejected: 0 },
+  });
+  Object.keys(over || {}).forEach(function (k) { s[k] = over[k]; });
+  return s;
+}
 
-const { handleMessage, __nodes: nodes, __messages: messages, __simulate: simulate,
-  __clearAll: clearAll, __selectNode: selectNode, __current: current,
-  __topicNode: topicNode, __connect: connect, __disconnect: disconnect,
-  __renderScene: renderScene, __renderFocus: renderFocus, __speakAlert: speakAlert,
-  __events: events, __buildEventsCSV: buildEventsCSV,
-  __loadMlResult: loadMlResult, buildMlNote, mlFetchFailed,
-  pickPriority, beginHandling, nextHandling,
-  buildFocus, buildAlert,
-  /* 这两个不是 __ 钩子，是 dashboard.js 顶层的普通函数声明 ——
-     和 judgeStatus 一样，本来就是上下文全局，直接取就行。 */
-  topicFor, topicWildcard } = context;
+/* ---------- 驱动页面的小工具 ---------- */
 
-/* ---------- 断言 ---------- */
-let pass = 0, fail = 0;
+let pass = 0;
+let fail = 0;
 function check(label, actual, expected) {
   const a = JSON.stringify(actual), e = JSON.stringify(expected);
   const ok = a === e;
   ok ? pass++ : fail++;
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}` + (ok ? `  =>  ${a}` : `\n        实际: ${a}\n        期望: ${e}`));
 }
-/* time 可以指定。不指定时用这个固定的默认值。
-   「优先关注」的时长完全由 time 决定（故意不读浏览器当前时间），
-   所以 N 段必须能逐条控制它，否则时长那几条没法写出定值。 */
-const DEFAULT_TIME = '2026-09-22 20:30:00';
-function mk(nodeId, t, h, status, time) {
-  return JSON.stringify({
-    nodeId, temperature: t, humidity: h,
-    status: status === undefined ? context.judgeStatus(t, h) : status,
-    time: time === undefined ? DEFAULT_TIME : time,
-  });
+
+function liveClient() { return mqttStub.clients[mqttStub.clients.length - 1]; }
+
+/** 让 socket 真的连上（触发 connect 回调 -> 订阅）。 */
+function goOnline() {
+  const c = liveClient();
+  c.connected = true;
+  (c.handlers.connect || []).forEach((fn) => fn());
+  return c;
 }
-const top = () => messages[0];
 
-/* ============ A. 模拟三节点数据 ============ */
-console.log('\n=== A. simulate() 后三个节点各自的数据 ===');
-simulate();
+/* 投递一条消息，走的是**页面自己注册的那个回调**（不是直接调 handleMessage）——
+   这样连「mqtt.js 给的是二进制、页面要先 toString」这一段也在测的范围里。 */
+let deliveries = 0;
+function deliver(topic, text) {
+  deliveries += 1;
+  const c = liveClient();
+  (c.handlers.message || []).forEach((fn) => fn(topic, { toString: () => text }));
+}
 
-check('三个节点都收到了 3 条', ['dorm-a', 'dorm-b', 'dorm-c'].map((id) => nodes[id].history.length), [3, 3, 3]);
-check('dorm-a 温度序列', nodes['dorm-a'].history.map((r) => r.temperature), [25, 26, 24]);
-check('dorm-a 湿度序列', nodes['dorm-a'].history.map((r) => r.humidity), [60, 62, 58]);
-check('dorm-b 温度序列', nodes['dorm-b'].history.map((r) => r.temperature), [31, 33, 32]);
-check('dorm-b 湿度序列', nodes['dorm-b'].history.map((r) => r.humidity), [60, 55, 58]);
-check('dorm-c 温度序列', nodes['dorm-c'].history.map((r) => r.temperature), [25, 26, 24]);
-check('dorm-c 湿度序列', nodes['dorm-c'].history.map((r) => r.humidity), [80, 82, 79]);
-check('dorm-a 状态序列', nodes['dorm-a'].history.map((r) => r.status), ['正常', '正常', '正常']);
-check('dorm-b 状态序列', nodes['dorm-b'].history.map((r) => r.status), ['偏热', '偏热', '偏热']);
-check('dorm-c 状态序列', nodes['dorm-c'].history.map((r) => r.status), ['偏湿', '偏湿', '偏湿']);
-check('每条的 nodeId 和所在节点一致', ['dorm-a', 'dorm-b', 'dorm-c'].map(
-  (id) => nodes[id].history.every((r) => r.nodeId === id)), [true, true, true]);
-check('latest 就是各自最后一条', ['dorm-a', 'dorm-b', 'dorm-c'].map((id) => nodes[id].latest.temperature), [24, 32, 24]);
-check('一次都没出现 warn/error（模拟数据是干净的）',
-  messages.filter((m) => m.level !== 'ok').length, 0);
-check('日志条数 = 9 条 ok', messages.length, 9);
+function feed(snapshot) { deliver('dormmate/v1/state', JSON.stringify(snapshot)); }
 
-/* ============ B. 图表跟着当前节点走 ============ */
-console.log('\n=== B. 图表数据 ===');
-check('建了 2 张图（温度、湿度各一张，不是双 Y 轴）', builtCharts.length, 2);
-const tempChart = builtCharts[0], humChart = builtCharts[1];
-check('温度图序列色', tempChart.data.datasets[0].borderColor, '#2a78d6');
-check('湿度图序列色', humChart.data.datasets[0].borderColor, '#c9407f');
-check('温度图数据 = dorm-a 的温度', tempChart.data.datasets[0].data, [25, 26, 24]);
-check('湿度图数据 = dorm-a 的湿度', humChart.data.datasets[0].data, [60, 62, 58]);
-check('湿度图没有混进 dorm-c 的 80/82/79', humChart.data.datasets[0].data.includes(80), false);
-/* simulate() 里的 time 是 formatTime(new Date())，用的是真实当前时间，
-   所以不能断言具体时刻，只能断言它确实来自这个节点自己的 time 字段 */
-check('横轴标签 = dorm-a 自己三条 time 的时分秒',
-  tempChart.data.labels, nodes['dorm-a'].history.map((r) => r.time.slice(11, 19)));
-check('横轴标签都是 HH:mm:ss 形状',
-  tempChart.data.labels.every((l) => /^\d{2}:\d{2}:\d{2}$/.test(l)), true);
-check('横轴标签逐条递增',
-  tempChart.data.labels.join() === tempChart.data.labels.slice().sort().join(), true);
+/** 点某张卡片（事件委托：造一个 target.closest 能认出 .card 的假事件）。 */
+function clickCard(nodeId) {
+  const target = { closest: (sel) => (sel === '.card' ? { dataset: { node: nodeId } } : null) };
+  els.cards._handlers.click.forEach((fn) => fn({ target }));
+}
 
-/* ============ C. 切换当前节点 ============ */
-console.log('\n=== C. 点卡片切节点 ===');
-check('默认看 dorm-a', current(), 'dorm-a');
-selectNode('dorm-c');
-check('切到 dorm-c', current(), 'dorm-c');
-check('切完后温度图 = dorm-c 的温度', tempChart.data.datasets[0].data, [25, 26, 24]);
-check('切完后湿度图 = dorm-c 的湿度（不再是 60/62/58）', humChart.data.datasets[0].data, [80, 82, 79]);
-selectNode('dorm-b');
-check('切到 dorm-b 的温度图', tempChart.data.datasets[0].data, [31, 33, 32]);
-check('切到 dorm-b 的湿度图', humChart.data.datasets[0].data, [60, 55, 58]);
-selectNode('不存在');
-check('切到不存在的节点被忽略', current(), 'dorm-b');
-selectNode('dorm-b');
-check('重复点同一个节点不出错', current(), 'dorm-b');
+/** 点顶部那条横幅。 */
+function clickBanner(nodeId) {
+  const target = { closest: (sel) => (sel === '.focus' ? { dataset: { node: nodeId } } : null) };
+  els.focus._handlers.click.forEach((fn) => fn({ target }));
+}
 
-/* ============ D. 不串线：单独喂一个节点，别的节点纹丝不动 ============ */
-console.log('\n=== D. 往 dorm-a 再喂一条，b/c 不受影响 ===');
-const beforeB = JSON.stringify(nodes['dorm-b'].history);
-const beforeC = JSON.stringify(nodes['dorm-c'].history);
-const okD = handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 17, 50));
-check('收下了', okD, true);
-check('dorm-a 变 4 条', nodes['dorm-a'].history.length, 4);
-check('dorm-a 最新一条是 17℃', nodes['dorm-a'].latest.temperature, 17);
-check('dorm-a 最新状态是偏冷', nodes['dorm-a'].latest.status, '偏冷');
-check('dorm-b 一条没动', JSON.stringify(nodes['dorm-b'].history) === beforeB, true);
-check('dorm-c 一条没动', JSON.stringify(nodes['dorm-c'].history) === beforeC, true);
+/* 真浏览器里灰掉的按钮**不会触发 click**。桩要照抄这个行为 ——
+   不然「灰按钮点不动」那条测的就是桩自己，页面上明明按不动，测试却看见发了消息。 */
+function clickHandle() {
+  if (els['action-handle'].disabled) return;
+  els['action-handle']._handlers.click.forEach((fn) => fn());
+}
+function clickClear() { els.clear._handlers.click.forEach((fn) => fn()); }
+function clickExport() { els['export-events']._handlers.click.forEach((fn) => fn()); }
+function clickSpeak() { els.speak._handlers.click.forEach((fn) => fn()); }
+function clickToggle() { els.toggle._handlers.click.forEach((fn) => fn()); }
 
-/* ============ E. 脏数据必须被拦下 ============ */
-console.log('\n=== E. 校验：脏数据 ===');
-const badCases = [
-  ['不是 JSON', 'dormmate/v1/nodes/dorm-a/telemetry', '{不是 json', 'error'],
-  ['空字符串', 'dormmate/v1/nodes/dorm-a/telemetry', '', 'error'],
-  ['顶层是 null', 'dormmate/v1/nodes/dorm-a/telemetry', 'null', 'error'],
-  ['顶层是数字', 'dormmate/v1/nodes/dorm-a/telemetry', '123', 'error'],
-  ['顶层是数组', 'dormmate/v1/nodes/dorm-a/telemetry', '[1,2,3]', 'error'],
-  ['缺 nodeId', 'dormmate/v1/nodes/dorm-a/telemetry', '{"temperature":25,"humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['缺 temperature', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['缺 humidity', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"status":"正常","time":"t"}', 'error'],
-  ['缺 status', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"humidity":60,"time":"t"}', 'error'],
-  ['缺 time', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"humidity":60,"status":"正常"}', 'error'],
-  ['temperature 是字符串', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":"25","humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['humidity 是 null', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"humidity":null,"status":"正常","time":"t"}', 'error'],
-  ['temperature 是 NaN', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":null,"humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['未知节点', 'dormmate/v1/nodes/dorm-x/telemetry', mk('dorm-x', 25, 60), 'error'],
-];
-const beforeAll = JSON.stringify([nodes['dorm-a'].history, nodes['dorm-b'].history, nodes['dorm-c'].history]);
-badCases.forEach(([label, topic, body, wantLevel]) => {
-  const r = handleMessage(topic, body);
-  const m = top();
-  check(`${label} -> 被拦下`, r, false);
-  check(`${label} -> 日志级别 ${wantLevel}`, m.level, wantLevel);
+/** 数一数页面上画了几张卡片。
+    `(?!-)` 是必须的：卡片里面还有 card-head / card-action / card-foot 三个
+    class，写成 /class="card/ 的话一张卡会被数成四张。 */
+function cardCount() { return (els.cards.innerHTML.match(/class="card(?!-)/g) || []).length; }
+
+/** 等一轮微任务 —— fetch 的 promise 链要转好几圈才轮到 renderMl。 */
+function settle() { return new Promise((resolve) => setImmediate(resolve)); }
+
+const stateTopic = 'dormmate/v1/state';
+
+/* ==================================================================== */
+
+(async function main() {
+
+/* ---------- A. 启动那一刻 ---------- */
+
+console.log('=== A. 启动 ===');
+
+check('★ 打开页面就连（连的是 shared/config.js 里那个地址）',
+  mqttStub.clients.length, 1);
+check('★ 地址里带 9001（WebSocket 端口来自配置，不是写死的）',
+  liveClient().url, 'ws://localhost:9001');
+check('还没连上时顶部写的是「连接中…」', els['conn-text'].textContent, '连接中…');
+check('连接状态那个 class 是 pending', els.conn.className, 'conn conn--pending');
+check('★ 打开时不会自己订阅（要等 socket 真的连上）',
+  liveClient().subscribed.length, 0);
+
+check('★ 一张卡片都没有时，卡片区写的是一句说明（不是空白）',
+  els.cards.innerHTML.indexOf('还没有收到 core 的快照') > 0, true);
+check('★ 那句话告诉人先起 core.py（把出路写出来，不是干等）',
+  els.cards.innerHTML.indexOf('core.py') > 0, true);
+check('★ 详情区的节点名是破折号（不知道，不是「dorm-a」）',
+  els['detail-node'].textContent, '—');
+check('★ 「开始处理」是灰的（还没有任何数据）',
+  els['action-handle'].disabled, true);
+check('★ 灰着的同时说了为什么', els['action-state'].textContent,
+  '还没有收到 core 的快照');
+check('★ 事件区写着「还没有事件」而不是空着',
+  els['event-body'].innerHTML.indexOf('还没有事件') > 0, true);
+check('事件条数是空的（不写「共 0 条」—— 那是另一回事）',
+  els['event-count'].textContent, '');
+check('导出按钮是灰的', els['export-events'].disabled, true);
+check('★ 被拒绝消息那块写着「core 一条都没拒过」',
+  els['reject-body'].innerHTML.indexOf('core 一条都没拒过') > 0, true);
+check('消息日志一开始是空的', els['log-body'].innerHTML.indexOf('还没有收到消息') > 0, true);
+check('★ 顶部横幅是平静那句，且此刻说的是「还没有收到 core 的快照」',
+  els.focus.innerHTML.indexOf('还没有收到 core 的快照') > 0, true);
+check('★ 3D 已经建起来了（容器 id 传对了）', sceneCalls.length, 1);
+check('3D 拿到的容器是 scene3d', sceneCalls[0].hostId, 'scene3d');
+check('★ 还没数据时 3D 标着「core 还没收到数据」（不是「正常」）',
+  sceneCalls[0].labels[0], '当前宿舍：—（core 还没收到数据）');
+check('★ 打开页面就向 report/ml_result.json 取了那一段',
+  fetchCalls, ['../report/ml_result.json']);
+/* 图表在启动时就建好了（两张空坐标轴），有数据才填点 ——
+   这样「哪一张是哪张」在页面上是稳定的，不会因为还没数据就整块跳出来。 */
+check('★ 启动时两张图就建好了（坐标轴先立着）', builtCharts.length, 2);
+check('★ 但那时候一条点都没有（不画空线）',
+  [builtCharts[0].data.labels, builtCharts[0].data.datasets[0].data], [[], []]);
+
+/* 连上之后订阅哪一条 —— 这是 E3 最硬的一条要求，单独一段盯着。 */
+console.log('\n=== A2. 订阅 ===');
+goOnline();
+check('★ 连上之后只订一条 topic', liveClient().subscribed.length, 1);
+check('★★ 订的是快照那条', liveClient().subscribed[0].topic, stateTopic);
+check('★★ 而且**不是**遥测的通配符 topic（E3 之前它订的就是那条）',
+  liveClient().subscribed[0].topic.indexOf('telemetry'), -1);
+check('订阅用的是配置里的 QoS', liveClient().subscribed[0].opts.qos, 1);
+check('连上之后顶部写「已连接」', els['conn-text'].textContent, '已连接');
+check('连接状态那个 class 变成 on', els.conn.className, 'conn conn--on');
+check('按钮变成「断开」', els.toggle.textContent, '断开');
+check('clientId 带 dormmate-dash- 前缀（现场同时开几个页面时分得清）',
+  liveClient().opts.clientId.indexOf('dormmate-dash-'), 0);
+check('★ 断线要自动重连（现场 wifi 抖一下不该让人手点）',
+  liveClient().opts.reconnectPeriod > 0, true);
+
+/* ---------- B. 收到一帧快照 ---------- */
+
+console.log('\n=== B. 收到快照 ===');
+
+feed(snapshotOf());
+check('★ 三张卡片都画出来了', cardCount(), 3);
+check('★ 卡片上的节点名来自快照（不是写死的三个）',
+  els.cards.innerHTML.indexOf('data-node="dorm-a"') > 0
+  && els.cards.innerHTML.indexOf('data-node="dorm-b"') > 0
+  && els.cards.innerHTML.indexOf('data-node="dorm-c"') > 0, true);
+check('卡片上有温度和湿度', /25<i class="tile-unit">℃<\/i>/.test(els.cards.innerHTML), true);
+check('卡片上有状态徽章', els.cards.innerHTML.indexOf('<span>正常</span>') > 0, true);
+check('★ 一个宿舍都没有时不会凭空画出三张卡（快照里几个就画几个）',
+  (function () { feed(snapshotOf({ nodes: [nodeRow('dorm-x')] })); return cardCount(); })(), 1);
+feed(snapshotOf());
+
+check('详情区跟着切到第一个宿舍', els['detail-node'].textContent, 'dorm-a');
+check('详情区那句话里有最新时刻和 core 手里的条数',
+  els['detail-meta'].textContent,
+  '最新一条 2026-09-22 20:30:00 · core 手里有这个节点的 3 条读数');
+check('★ 日志里记了一行摘要', els['log-body'].innerHTML.indexOf('快照 v2 · 宿舍 3') > 0, true);
+check('★ 「一条快照一行」——日志的行数就是收到的快照条数（排查时拿它对数）',
+  els['log-count'].textContent, '共 ' + deliveries + ' 条');
+check('★ 摘要里点名了核心的两件事（重点和事件）',
+  els['log-body'].innerHTML.indexOf('重点 无') > 0
+  && els['log-body'].innerHTML.indexOf('事件 0') > 0, true);
+
+check('★★ 消息日志里记的是**快照摘要**，不是原始报文（原始报文只进 Console）',
+  els['log-body'].innerHTML.indexOf('"nodes"'), -1);
+check('★ Console 里有那条原始报文（排错的第一现场）',
+  consoleLogs.some((l) => l.indexOf('收到 MQTT 原始消息') >= 0 && l.indexOf(stateTopic) > 0), true);
+
+check('两张图：温度 + 湿度', builtCharts.map((c) => c.data.datasets[0].label),
+  ['温度', '湿度']);
+check('★ 横轴是时分秒（不是整串日期）',
+  builtCharts[0].data.labels, ['20:28:00', '20:29:00', '20:30:00']);
+check('★ 曲线数据来自快照里的 history（页面不再自己攒）',
+  builtCharts[0].data.datasets[0].data, [25, 25, 25]);
+check('湿度那张也是同一段历史',
+  builtCharts[1].data.datasets[0].data, [60, 60, 60]);
+check('★ 坐标轴单位是 ℃ / %',
+  [builtCharts[0].options.scales.y.ticks.callback(25),
+    builtCharts[1].options.scales.y.ticks.callback(60)], ['25℃', '60%']);
+
+check('★ 3D 收到的是快照里的状态（页面不判、不复核）',
+  sceneCalls[0].statuses[sceneCalls[0].statuses.length - 1], '正常');
+check('★ 3D 的标签只有宿舍名（「这间怎么了」交给画面说）',
+  sceneCalls[0].labels[sceneCalls[0].labels.length - 1], '当前宿舍：dorm-a');
+
+/* ---------- C. 只认那一条 topic ---------- */
+
+console.log('\n=== C. 只认快照那一条 topic ===');
+
+/* 「页面没变」比的是**数据那一部分**：卡片、详情、3D。
+   日志会多一行 —— 那是应该的，被忽略的消息必须留痕，不然「怎么没反应」
+   这个问题的答案就只剩 Console 里才有了。 */
+const before = JSON.stringify([els.cards.innerHTML, els['detail-node'].textContent,
+  els['event-body'].innerHTML, sceneCalls[0].statuses.length]);
+const logWarnBefore = (els['log-body'].innerHTML.match(/不是快照 topic/g) || []).length;
+
+check('★ 遥测 topic 上的消息被拦下（返回 false）',
+  context.handleMessage('dormmate/v1/nodes/dorm-a/telemetry',
+    '{"nodeId":"dorm-a","temperature":40,"humidity":10,"status":"正常"}'), false);
+check('★★ 而且页面数据一个字节都没变（卡片、详情、事件、3D 都没动）',
+  JSON.stringify([els.cards.innerHTML, els['detail-node'].textContent,
+    els['event-body'].innerHTML, sceneCalls[0].statuses.length]), before);
+check('★★ 拦下的那条在日志里写了「不是快照 topic」',
+  els['log-body'].innerHTML.indexOf('不是快照 topic') > 0, true);
+check('★ 只多了一行（拦一条记一行，不会连锁反应）',
+  (els['log-body'].innerHTML.match(/不是快照 topic/g) || []).length, logWarnBefore + 1);
+check('★ 而且日志里把该订哪条写出来了（不用去翻源码）',
+  els['log-body'].innerHTML.indexOf(stateTopic) > 0, true);
+
+check('别的 topic 也一样被拦（core 的在线状态那条）',
+  context.handleMessage('dormmate/v1/core/status', '{"online":true}'), false);
+check('拒绝日志那条 topic 也一样', context.handleMessage('dormmate/v1/log/reject', '{}'), false);
+check('★ 空 topic 也被拦', context.handleMessage('', '{}'), false);
+
+/* ---------- D. 坏数据 ---------- */
+
+console.log('\n=== D. 坏数据拦得住 ===');
+
+function feedRaw(text, topic) {
+  return context.handleMessage(topic || stateTopic, text);
+}
+check('★ 不是 JSON', feedRaw('{not json'), false);
+check('日志里写了 JSON 解析失败', els['log-body'].innerHTML.indexOf('JSON 解析失败') > 0, true);
+check('★ 顶层是数组', feedRaw('[]'), false);
+check('日志里写了校验不通过', els['log-body'].innerHTML.indexOf('快照校验不通过') > 0, true);
+check('★ 版本是 1（旧版 core 混跑）', feedRaw('{"v":1,"nodes":[]}'), false);
+check('★ 日志里把版本不对写出来了',
+  els['log-body'].innerHTML.indexOf('快照版本是 1') > 0, true);
+check('★ 少了 reject 那一块', feedRaw(JSON.stringify(
+  Object.assign(snapshotOf(), { rejects: undefined }))), false);
+check('★ 没有 v 字段', feedRaw('{"nodes":[]}'), false);
+check('拦下之后页面还是那一帧（没有被清空、也没有半更新）',
+  [cardCount(), els['detail-node'].textContent], [3, 'dorm-a']);
+check('★ 坏数据之后紧接着一帧好的，页面照常更新（前一条没留下坏状态）',
+  (function () { feed(snapshotOf()); return els['log-body'].innerHTML.indexOf('快照 v2') > 0; })(), true);
+
+/* ---------- E. 页面不修内容 ---------- */
+
+console.log('\n=== E. 快照说什么就是什么（不修、不补、不复核）===');
+
+feed(snapshotOf({ nodes: [nodeRow('dorm-a', { status: '台风', temperature: 99,
+  humidity: -5, online: false }), nodeRow('dorm-b'), nodeRow('dorm-c')] }));
+check('★★ 状态是「台风」这种没见过的词，页面照样显示（前端不认识规则）',
+  els.cards.innerHTML.indexOf('<span>台风</span>') > 0, true);
+check('★★ 温度 99℃、湿度 -5% 原样显示（D4 第 5 条演示的就是它）',
+  [/99<i class="tile-unit">℃<\/i>/.test(els.cards.innerHTML),
+    /-5<i class="tile-unit">%<\/i>/.test(els.cards.innerHTML)], [true, true]);
+check('★ 认不出来的状态用中性那一档配色（不硬套成某一档状态色）',
+  els.cards.innerHTML.indexOf('is-unknown') > 0, true);
+check('★ 离线单独一个小标，不挤进状态徽章里',
+  els.cards.innerHTML.indexOf('已离线') > 0, true);
+check('★ 状态是「台风」的宿舍照样能选中（页面不为它另判一次）',
+  (function () { clickCard('dorm-a'); return els['detail-node'].textContent; })(), 'dorm-a');
+check('★ 3D 也照传「台风」（scene.js 认不出时会退回中性外观）',
+  sceneCalls[0].statuses[sceneCalls[0].statuses.length - 1], '台风');
+
+/* 一个宿舍还没数据时画什么 —— 「不知道」和「正常」必须看得出区别 */
+feed(snapshotOf({ nodes: [nodeRow('dorm-a', { status: null, temperature: null,
+  humidity: null }), nodeRow('dorm-b'), nodeRow('dorm-c')] }));
+check('★ 还没数据的宿舍画的是「等待数据」', els.cards.innerHTML.indexOf('等待数据') > 0, true);
+check('★ 而且写着「core 还没收到这个节点的数据」',
+  els.cards.innerHTML.indexOf('core 还没收到这个节点的数据') > 0, true);
+/* ★ 那一张卡上**一个数字都不许有**。写 0 是「测出来就是 0」，写 NaN 是
+   「页面算崩了」，两个都在说一件没发生过的事 —— 所以连温度那一格都不画，
+   换成那句话。抽出 dorm-a 那张卡单独看，免得 dorm-b / dorm-c 上的数字混进来。 */
+const emptyCard = els.cards.innerHTML.split('data-node="dorm-a"')[1].split('</button>')[0];
+check('★ 没有数据的卡片上不出现任何数字 / NaN / undefined',
+  [/tile-value/.test(emptyCard), /NaN/.test(emptyCard), /undefined/.test(emptyCard)],
+  [false, false, false]);
+
+/* ---------- F. 跨端联动（focus） ---------- */
+
+console.log('\n=== F. 跨端联动：focus ===');
+
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: '理由B' } }));
+check('★ core 排出来的重点会自动被选中（不用人点）',
+  els['detail-node'].textContent, 'dorm-b');
+check('★ 顶栏标签是「当前重点」', els.focus.innerHTML.indexOf('当前重点') > 0, true);
+check('★ 顶栏把 core 给的理由摆出来了', els.focus.innerHTML.indexOf('理由B') > 0, true);
+
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: '理由B' },
+  focus: { nodeId: 'dorm-c', by: 'mobile', at: '2026-09-22 20:32:00' } }));
+check('★★ 移动端点名 dorm-c 之后，看板跟着切过去了',
+  els['detail-node'].textContent, 'dorm-c');
+check('★★ 顶栏标签变成「跨端焦点」', els.focus.innerHTML.indexOf('跨端焦点') > 0, true);
+check('★★ 顶栏写明了是谁发的', els.focus.innerHTML.indexOf('mobile') > 0, true);
+check('★ 同时没忘了说 core 排出来的重点是谁、凭什么',
+  els.focus.innerHTML.indexOf('数据选出的重点是 dorm-b') > 0, true);
+check('★ 跨端这一行记进了日志（证据）',
+  els['log-body'].innerHTML.indexOf('跨端焦点 → dorm-c') > 0, true);
+check('★ 日志那条里写了是谁发的 focus',
+  els['log-body'].innerHTML.indexOf('mobile 发的 focus') > 0, true);
+
+/* 「焦点那一行只在变化时记」——摘要行是**每条快照都记**的（那是日志的约定），
+   所以比的是「跨端焦点」这个词出现的次数。 */
+const focusLogBefore = (els['log-body'].innerHTML.match(/跨端焦点 →/g) || []).length;
+const allLogBefore = (els['log-body'].innerHTML.match(/log-row log-row--/g) || []).length;
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: '理由B' },
+  focus: { nodeId: 'dorm-c', by: 'mobile', at: '2026-09-22 20:32:30' } }));
+check('★★ 焦点没变时不再记那一行（否则会被同一句话刷屏，看不出哪次真变了）',
+  (els['log-body'].innerHTML.match(/跨端焦点 →/g) || []).length, focusLogBefore);
+check('★ 但摘要那一行照记（「一帧快照一行」是日志的约定）',
+  (els['log-body'].innerHTML.match(/log-row log-row--/g) || []).length, allLogBefore + 1);
+
+clickCard('dorm-a');
+check('★ 可以点卡片切到别处看', els['detail-node'].textContent, 'dorm-a');
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: '理由B' },
+  focus: { nodeId: 'dorm-c', by: 'mobile', at: '2026-09-22 20:32:30' } }));
+check('★★ 下一条一模一样的快照不再把人拽回 dorm-c（跟过一次就算跟过了）',
+  els['detail-node'].textContent, 'dorm-a');
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: '理由B' },
+  focus: { nodeId: 'dorm-b', by: 'mobile' } }));
+check('★ 换成另一个焦点时照样跟着切', els['detail-node'].textContent, 'dorm-b');
+
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: '理由B' },
+  focus: null }));
+check('★★ 焦点取消之后回落到 core 选出的重点',
+  [els['detail-node'].textContent, els.focus.innerHTML.indexOf('当前重点') > 0],
+  ['dorm-b', true]);
+check('★ 取消这件事也记了一行',
+  els['log-body'].innerHTML.indexOf('跨端焦点已取消') > 0, true);
+
+/* 点东西不该往 broker 发消息 —— 看板是**看**的那一端，
+   改焦点是移动端的事（两边都能改的话，两个人一起看就会互相抢）。 */
+const publishedBeforeClick = liveClient().published.length;
+clickCard('dorm-c');
+clickBanner('dorm-a');
+check('★★ 在看板上点卡片 / 点横幅，一条消息都不发',
+  liveClient().published.length, publishedBeforeClick);
+check('★ 点横幅等于点对应那张卡片', els['detail-node'].textContent, 'dorm-a');
+
+/* ---------- G. 「开始处理」 ---------- */
+
+console.log('\n=== G. 开始处理 ===');
+
+/* 「待处理」那一档：core 开了案、还没人动过。这是唯一能按的状态。 */
+const openSnapshot = busySnapshot({ events: { summary: { total: 8, OPEN: 1 },
+  dropped: 0, events: [eventRow({ nodeId: 'dorm-b', state: 'OPEN' })] } });
+feed(openSnapshot);
+clickCard('dorm-b');
+check('★ 有一条待处理的事件时按钮可以按', els['action-handle'].disabled, false);
+check('★ 可以按时旁边那行是空的', els['action-state'].textContent, '');
+check('★ 卡片上标出了处理到哪一步',
+  els.cards.innerHTML.indexOf('card-action') > 0, true);
+check('★ 而且标的是 core 事件里的状态词（待处理）',
+  els.cards.innerHTML.indexOf('待处理') > 0, true);
+
+const pubBefore = liveClient().published.length;
+const cardsBefore = els.cards.innerHTML;
+const eventsBefore = els['event-body'].innerHTML;
+const rejectBefore = els['reject-body'].innerHTML;
+const opsBefore = sceneCalls[0].ops.length;
+const summaryBefore = els['log-body'].innerHTML;
+clickHandle();
+
+check('★ 按一下正好发出去一条', liveClient().published.length, pubBefore + 1);
+const sent = liveClient().published[pubBefore];
+check('★ 发到指令那条 topic', sent.topic, 'dormmate/v1/cmd');
+check('★ payload 里是节点 + 动作 + 来源',
+  JSON.parse(sent.payload), { nodeId: 'dorm-b', action: 'handle',
+    source: 'dashboard', time: '2026-09-22 20:30:00' });
+check('★★ payload 里**没有**任何结论性的字段（status / state / 已恢复）',
+  ['status', 'state', 'result', 'recovered'].filter((k) =>
+    Object.prototype.hasOwnProperty.call(JSON.parse(sent.payload), k)), []);
+check('★ 带的是**快照里这个节点的最新时刻**，不是浏览器时钟',
+  JSON.parse(sent.payload).time, '2026-09-22 20:30:00');
+check('★ QoS 用配置里的', sent.opts.qos, 1);
+check('★★ 指令**不 retained**（留下的指令会在下次起 core 时凭空推进一条事件）',
+  sent.opts.retain, false);
+check('★ 指令进了 Console（现场演示时能在 F12 里看见）',
+  consoleLogs.some((l) => l.indexOf('发出 MQTT 指令') >= 0
+    && l.indexOf('dormmate/v1/cmd') > 0), true);
+
+/* 【这一条是整份文件里最要紧的一条】
+   按下去之后，屏幕上除了那行说明，**什么都不许动**。 */
+check('★★ 卡片一个字节都没变（「处理中」要等 core 发回新快照）',
+  els.cards.innerHTML, cardsBefore);
+check('★★ 事件表一个字节都没变', els['event-body'].innerHTML, eventsBefore);
+check('★★ 被拒绝消息那块也没变', els['reject-body'].innerHTML, rejectBefore);
+check('★★ 3D 一次都没重画（没有本地记账，就没有本地动画）',
+  sceneCalls[0].ops.length, opsBefore);
+check('★★ 消息日志也没多出一行（日志的约定是「一帧快照一行」）',
+  els['log-body'].innerHTML, summaryBefore);
+check('★★ 唯一变的是那行说明 —— 它说清了「好没好由 core 判」',
+  els['cmd-note'].textContent,
+  '已把 handle 指令发给 core —— 好没好由 core 后续收到的报文判，'
+  + '这一步不结案。页面上那行「处理中」要等 core 发回新快照才会出现。');
+check('★ 那行说明里没有「已恢复」（红线写在人看得见的地方）',
+  els['cmd-note'].textContent.indexOf('已恢复'), -1);
+
+/* core 把新快照发回来之后，「处理中」才出现 —— 这就是那一拍往返。 */
+feed(busySnapshot({ events: { summary: { total: 8, HANDLING: 1 }, dropped: 0,
+  events: [eventRow({ nodeId: 'dorm-b', state: 'HANDLING', abnormalAfter: 2,
+    action: '开启风扇 / 通风', actionTime: '2026-09-22 20:31:00' })] } }));
+check('★★ core 发回新快照之后，卡片上才出现「处理中」（不是点出来的）',
+  els.cards.innerHTML.indexOf('处理中') > 0, true);
+
+/* 已经在处理中的按钮是灰的 —— 再按只会多记一笔动作，core 那边用不上。 */
+check('★ 已经在处理中 -> 按钮灰着', els['action-handle'].disabled, true);
+check('★ 灰着的原因写清楚了（而且把「之后又收到几条异常」报出来）',
+  els['action-state'].textContent.indexOf('再按一次只会多记一笔动作') > 0, true);
+check('★ 那个条数来自快照里的 abnormalAfter（不是这边数的 verify 数组）',
+  els['action-state'].textContent.indexOf('之后又收到 2 条异常') > 0, true);
+
+clickCard('dorm-a');
+clickCard('dorm-b');
+feed(snapshotOf({ nodes: [nodeRow('dorm-a')] }));
+clickCard('dorm-a');
+check('★ 状态正常、也没事件 -> 灰着', els['action-handle'].disabled, true);
+check('★ 那句话说的是「没有未结案的事件」',
+  els['action-state'].textContent.indexOf('没有未结案的事件') > 0, true);
+const pubBeforeNormal = liveClient().published.length;
+clickHandle();
+check('★★ 灰按钮点不动（一条消息都不发）',
+  liveClient().published.length, pubBeforeNormal);
+
+/* 离线时发不出去 —— 那行说明是唯一说得出话的地方 */
+feed(openSnapshot);
+clickCard('dorm-b');
+liveClient().connected = false;
+const pubOffline = liveClient().published.length;
+clickHandle();
+check('★ 没连上时不发', liveClient().published.length, pubOffline);
+check('★ 而且明说没发出去 + 原因',
+  els['cmd-note'].textContent.indexOf('还没连上 broker') > 0, true);
+check('★★ 而且明说「这一次点击没有任何效果」（页面不替 core 记账）',
+  els['cmd-note'].textContent.indexOf('没有任何效果') > 0, true);
+liveClient().connected = true;
+
+/* ---------- H. 事件表 ---------- */
+
+console.log('\n=== H. 事件记录 ===');
+
+feed(busySnapshot());
+check('★ 事件条数读的是 core 的真总数，显示条数少了会写出来',
+  els['event-count'].textContent, '共 8 条（显示最近 2 条）');
+const evHtml = els['event-body'].innerHTML;
+check('★★ 显示顺序是**最新在最上面**（core 给的数组是从旧到新）',
+  evHtml.indexOf('dorm-b') < evHtml.indexOf('dorm-a'), true);
+check('★ 每个宿舍名都出现了', [evHtml.indexOf('dorm-b') > 0,
+  evHtml.indexOf('dorm-a') > 0], [true, true]);
+check('★ 未结案的那条写的是 core 的状态词「处理中」',
+  evHtml.indexOf('ev-result--open') > 0 && evHtml.indexOf('处理中') > 0, true);
+check('★ 结过案的写的是「已恢复」', evHtml.indexOf('已恢复') > 0, true);
+check('★ 处理动作那一栏是 core 记的那笔',
+  evHtml.indexOf('开启风扇 / 通风') > 0, true);
+check('★ 优先关注那一栏把时间 + 理由两行都摆出来',
+  evHtml.indexOf('ev-reason') > 0 && evHtml.indexOf('连续异常 3 次') > 0, true);
+check('★ 还没发生的格子是破折号（ev-none），不是空格',
+  evHtml.indexOf('ev-none') > 0, true);
+check('★ 显示条数少于总数时写明了「显示最近 N 条」',
+  (function () { feed(busySnapshot({ events: { summary: { total: 500 },
+    events: [eventRow({ nodeId: 'dorm-b' })] } })); return els['event-count'].textContent; })(),
+  '共 500 条（显示最近 1 条）');
+
+feed(busySnapshot());
+const blobsBefore = blobs.length;
+clickExport();
+check('★ 点导出造了一个 Blob', blobs.length, blobsBefore + 1);
+const csv = blobs[blobs.length - 1];
+check('★ CSV 带 UTF-8 BOM（不带的话 Excel 里中文是乱码）',
+  csv.text.charCodeAt(0), 0xFEFF);
+check('★ MIME 是 text/csv + utf-8', csv.type, 'text/csv;charset=utf-8');
+const csvLines = csv.text.slice(1).split('\r\n');
+check('★ 表头就是那九列', csvLines[0],
+  'nodeId,startTime,problem,priorityTime,priorityReason,action,actionTime,recoverTime,result');
+check('★ 用 CRLF 换行 + 末尾也有一个（Excel/WPS 对 LF 不友好）',
+  csv.text.slice(1).endsWith('\r\n'), true);
+check('★★ 导出的行序和屏幕上一样（最新在前）',
+  csvLines[1].indexOf('dorm-b') === 0, true);
+check('★ 还没发生的格子导成空，不是字面的 "null"',
+  csv.text.indexOf('null'), -1);
+check('★ 下载用的是 download 属性（不是新开一个标签页）',
+  clickedAnchors[clickedAnchors.length - 1].download, 'events.csv');
+check('★ 造完的 <a> 又摘下来了（不留垃圾在 DOM 里）',
+  appendedNodes.length, removedNodes.length);
+check('★ objectURL 没有当场回收（当场回收会让下载点不动）',
+  objectUrls.length > revokedUrls.length, true);
+timers[timers.length - 1].fn();
+check('★ 隔一会儿之后才回收', revokedUrls.length, 1);
+
+/* RFC 4180 那两条：字段里出现了分隔符（半角逗号）或者双引号时，
+   整格要包双引号，里面的双引号写成两个。不做的话 Excel 会把一格切成两格，
+   而看的人只看到内容错位，不会想到是转义的问题。
+   （全角的「，」不算分隔符，不用包 —— 那正是 core 写理由时用的那个。） */
+feed(snapshotOf({ nodes: [nodeRow('dorm-a')],
+  events: { summary: { total: 1, OPEN: 1 }, dropped: 0, events: [
+    eventRow({ nodeId: 'dorm-a', problem: '温度偏高, 且湿度正常',
+      priorityReason: '他说"热"了' })] } }));
+const blobsBeforeQuote = blobs.length;
+clickExport();
+const quoted = blobs[blobs.length - 1].text;
+check('★ 字段里有半角逗号时整格包双引号（不包的话 Excel 会把一格切成两格）',
+  quoted.indexOf('"温度偏高, 且湿度正常"') > 0, true);
+check('★ 字段里有双引号时写成两个（这是 CSV 的转义写法，不是打错）',
+  quoted.indexOf('"他说""热""了"') > 0, true);
+check('★ 那两格只包了一层，没有把整行都包起来',
+  (quoted.match(/"温度偏高, 且湿度正常"/g) || []).length, 1);
+feed(snapshotOf());
+check('（导出按钮那两次点击各造了一个 Blob）', blobs.length, blobsBeforeQuote + 1);
+
+feed(snapshotOf());
+check('★ 一条事件都没有时导出按钮是灰的', els['export-events'].disabled, true);
+check('★ 事件区写着「还没有事件」', els['event-body'].innerHTML.indexOf('还没有事件') > 0, true);
+
+/* ---------- I. 被拒绝消息 ---------- */
+
+console.log('\n=== I. 被拒绝消息 ===');
+
+feed(snapshotOf({ rejects: { total: 2, kept: 2, items: [
+  { time: '2026-09-22 20:28:00', topic: 'dormmate/v1/nodes/dorm-a/telemetry',
+    reasons: ['JSON 解析失败'], payload: '{not json' },
+  { time: '2026-09-22 20:29:00', topic: 'dormmate/v1/nodes/dorm-b/telemetry',
+    reasons: ['topic 形状不对', 'nodeId 和 topic 对不上'],
+    payload: '{"nodeId":"dorm-b"}' },
+] } }));
+const rjHtml = els['reject-body'].innerHTML;
+check('★ 条数读的是 core 的真总数', els['reject-count'].textContent, '共 2 条');
+check('★★ 最新那条在最上面', rjHtml.indexOf('20:29:00') < rjHtml.indexOf('20:28:00'), true);
+check('★ 原文一字不差地摆出来（`{not json` 那串）',
+  rjHtml.indexOf('{not json') > 0, true);
+check('★ 一次给了两条原因时两条都摆出来',
+  rjHtml.indexOf('topic 形状不对') > 0 && rjHtml.indexOf('nodeId 和 topic 对不上') > 0, true);
+check('★ 原因是分开的小胶囊（数得清错在哪几处）', rjHtml.indexOf('rj-reason') > 0, true);
+check('★ 原文用等宽字体那一档（空格和引号看得清）',
+  rjHtml.indexOf('rj-payload') > 0, true);
+
+const logBeforeNewReject = els['log-body'].innerHTML;
+feed(snapshotOf({ rejects: { total: 3, kept: 3, items: [
+  { time: '2026-09-22 20:31:00', topic: 'dormmate/v1/nodes/dorm-c/telemetry',
+    reasons: ['湿度超出范围'], payload: '{"humidity":999}' },
+] } }));
+check('★ rejects 涨了就在日志里提醒一句',
+  els['log-body'].innerHTML.indexOf('core 拒收了 1 条消息') > 0, true);
+check('★ 提醒里带着原因，并指路到下面那块面板',
+  [els['log-body'].innerHTML.indexOf('湿度超出范围') > 0,
+    els['log-body'].innerHTML.indexOf('被拒绝消息') > 0], [true, true]);
+check('★ 面板换成了新那一帧的内容（旧的不残留）',
+  [els['reject-body'].innerHTML.indexOf('{not json'), els['reject-count'].textContent],
+  [-1, '共 3 条（显示最近 1 条）']);
+/* 「共 3 条（显示最近 1 条）」这个写法是故意的：core 只留最近 N 条在快照里，
+   面板上摆不满的时候得说清楚**没摆的那些去哪了**，不然 3 和 1 两个数对不上，
+   看的人会以为面板漏了。 */
+const logAfterReject = els['log-body'].innerHTML;
+feed(snapshotOf({ rejects: { total: 3, kept: 3, items: [] } }));
+check('★ 条数没再涨就不重复提醒（否则每帧一句，日志没法看）',
+  (els['log-body'].innerHTML.match(/core 拒收了/g) || []).length,
+  (logAfterReject.match(/core 拒收了/g) || []).length);
+
+feed(snapshotOf());
+check('★ core 一条都没拒过时那句提示还在', els['reject-body'].innerHTML.indexOf('core 一条都没拒过') > 0, true);
+check('★ 这时条数是空的（不是「共 0 条」）', els['reject-count'].textContent, '');
+
+/* ---------- J. 清空 ---------- */
+
+console.log('\n=== J. 清空 ===');
+
+feed(busySnapshot());
+const pubBeforeClear = liveClient().published.length;
+clickClear();
+check('★ 卡片区换成一句说明', els.cards.innerHTML.indexOf('屏幕已清空') > 0, true);
+check('★ 而且那句话点明了 core 手里那份没动',
+  els.cards.innerHTML.indexOf('core 手里那份数据没动') > 0, true);
+check('★ 详情区回到破折号', els['detail-node'].textContent, '—');
+check('★ 按钮灰了', els['action-handle'].disabled, true);
+check('★ 事件表清了', els['event-body'].innerHTML.indexOf('屏幕已清空') > 0, true);
+check('★ 被拒绝那块也清了', els['reject-body'].innerHTML.indexOf('屏幕已清空') > 0, true);
+check('★ 消息日志清了', els['log-body'].innerHTML.indexOf('还没有收到消息') > 0, true);
+check('★ 图表也清了（屏幕上不许留着已经不在快照里的数据）',
+  builtCharts[0].data.datasets[0].data, []);
+check('★ 3D 退回中性 + 标签清掉',
+  [sceneCalls[0].statuses[sceneCalls[0].statuses.length - 1],
+    sceneCalls[0].labels[sceneCalls[0].labels.length - 1]],
+  ['正常', '当前宿舍：—']);
+check('★ 上次念的那句话也擦了（不然看着像刚刚念的）',
+  els['speak-note'].textContent, '');
+check('★★ 清空**不发**任何消息（清的是屏幕，不是 core 的数据）',
+  liveClient().published.length, pubBeforeClear);
+feed(busySnapshot());
+check('★★ 下一条快照一到画面就回来了（证明刚才清的是屏幕）',
+  [cardCount(), els['detail-node'].textContent], [3, 'dorm-b']);
+
+/* ---------- K. 3D ---------- */
+
+console.log('\n=== K. 3D ===');
+
+feed(snapshotOf());
+const ops = sceneCalls[0].ops;
+check('★ 每帧都是「先 updateScene 再 setFanOn」这个顺序（scene.js 里后调用者为准）',
+  ops.indexOf('updateScene') < ops.indexOf('setFanOn') || ops.indexOf('setFanOn') === -1,
+  true);
+clickCard('dorm-b');
+check('★ 切节点会重画场景', sceneCalls[0].statuses[sceneCalls[0].statuses.length - 1], '正常');
+check('★ 标签跟着换成新宿舍', sceneCalls[0].labels[sceneCalls[0].labels.length - 1],
+  '当前宿舍：dorm-b');
+
+/* 风扇：判据是**core 记的那笔动作**，不是页面自己记的「按过没有」。
+   页面这一行是在 updateScene **之后**补的一刀 —— scene.js 的 LOOK 表已经照
+   status 把扇叶摆好过一次（偏热就转），页面只在「core 的事件里真有那笔 action」
+   时再补一刀把它强制转起来。
+
+   所以断言分两半：有 action 时页面确实补了这一刀；没有 action 时页面**一次都不碰**
+   风扇，扇叶转不转完全交给 updateScene 按 status 管。第二半才是红线那一半 ——
+   页面不能自己决定扇叶转不转。 */
+const fansBeforeBusy = sceneCalls[0].fans.length;
+feed(busySnapshot());
+check('★★ core 的事件里有 action 时，页面把风扇补成转的（不是本地记的「按过没有」）',
+  [sceneCalls[0].fans.length, sceneCalls[0].fans[sceneCalls[0].fans.length - 1]],
+  [fansBeforeBusy + 1, true]);
+feed(snapshotOf());
+check('★ 没有 action 时页面一次都不碰风扇（交给 updateScene 按 status 摆）',
+  sceneCalls[0].fans.length, fansBeforeBusy + 1);
+
+/* 「当前重点」那圈环亮在谁身上 —— 和顶栏那条横幅必须是同一个宿舍。 */
+feed(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' } }));
+check('★ 重点是 dorm-b 时，环亮着（横幅也说的它）',
+  [els.focus.innerHTML.indexOf('dorm-b') > 0,
+    sceneCalls[0].focus[sceneCalls[0].focus.length - 1]], [true, true]);
+clickCard('dorm-a');
+check('★ 看别的宿舍时环灭（省得以为那间才是重点）',
+  sceneCalls[0].focus[sceneCalls[0].focus.length - 1], false);
+feed(snapshotOf());
+check('★ 谁也不重点时环也是灭的',
+  sceneCalls[0].focus[sceneCalls[0].focus.length - 1], false);
+
+/* ---------- L. 语音 ---------- */
+
+console.log('\n=== L. 语音提醒 ===');
+
+feed(busySnapshot());
+const logLen = speechLog.length;
+clickSpeak();
+check('★ 先 cancel 再 speak（不 cancel 的话连点两次第二句要排队等第一句念完）',
+  speechLog.slice(logLen), ['cancel', 'speak']);
+check('★ 念的是最新那一帧算出来的话（不是缓存的上一次）',
+  spoken[spoken.length - 1].text,
+  'dorm-b 偏热已持续 20 分钟（已按下开始处理，处理中），温度正在下降。');
+check('★ 语言设成 zh-CN', spoken[spoken.length - 1].lang, 'zh-CN');
+check('★ 念的是人话（没有 ｜ 那种只给眼睛看的符号）',
+  spoken[spoken.length - 1].text.indexOf('｜'), -1);
+check('★ 按钮下面那行写了正在念什么（声音放不出来时这是唯一的凭据）',
+  els['speak-note'].textContent.indexOf('正在朗读：') === 0, true);
+
+spoken[spoken.length - 1].onerror({ error: 'not-allowed' });
+check('★ 念失败时把**原始错误码**贴出来（解释文案可能对不上，错误码不会骗人）',
+  els['speak-note'].textContent.indexOf('not-allowed') > 0, true);
+check('★ 失败时也把本该念的那句留着（能自己读一眼）',
+  els['speak-note'].textContent.indexOf('dorm-b 偏热') > 0, true);
+
+feed(snapshotOf());
+clickSpeak();
+check('★ 平静时念的是那句平静话', spoken[spoken.length - 1].text, '当前 3 个宿舍都正常。');
+
+/* 浏览器不支持语音合成时的降级 —— 按钮不能点了没反应。 */
+const savedSpeech = context.speechSynthesis;
+const savedUtterance = context.SpeechSynthesisUtterance;
+delete context.speechSynthesis;
+delete context.SpeechSynthesisUtterance;
+clickSpeak();
+check('★ 不支持时明说「不支持」并把它本该念的写出来',
+  [els['speak-note'].textContent.indexOf('这个浏览器不支持语音合成') === 0,
+    els['speak-note'].textContent.indexOf('当前 3 个宿舍都正常。') > 0], [true, true]);
+context.speechSynthesis = savedSpeech;
+context.SpeechSynthesisUtterance = savedUtterance;
+
+/* ---------- M. 连接开关 ---------- */
+
+console.log('\n=== M. 连接 / 断开 ===');
+
+clickToggle();
+check('★ 点「断开」会强制断开（不再自动重连）', liveClient().ended, true);
+check('★ 而且是 force 断开（不强断的话会自己爬回来，看着像点不动）',
+  liveClient().endForce, true);
+check('★ 顶部写「未连接」', els['conn-text'].textContent, '未连接');
+check('★ 按钮变回「连接」', els.toggle.textContent, '连接');
+const clientsBefore = mqttStub.clients.length;
+clickToggle();
+check('★ 点「连接」会新开一根（不是复用断开的那根）',
+  mqttStub.clients.length, clientsBefore + 1);
+goOnline();
+check('★ 新那根也订的是快照那条',
+  [liveClient().subscribed.length, liveClient().subscribed[0].topic], [1, stateTopic]);
+feed(busySnapshot());
+check('★ 重连之后数据照常进来', cardCount(), 3);
+
+/* ---------- N. ML 那一段 ---------- */
+
+console.log('\n=== N. Rule-ML 预留展示区 ===');
+
+check('★ fetch 的路径是相对本页面算的（页面在 dashboard/ 下）',
+  fetchCalls[0], '../report/ml_result.json');
+/* 这一刻 fetch 还没回来（下面的 await settle 才放行），所以页面上必须是
+   index.html 里那句占位 —— 空着的话看起来跟「这一段本来就没有内容」一样。 */
+check('★ 读回来之前页面上是占位那句话（不是空白）',
+  els['ml-text'].textContent, '正在读取 report/ml_result.json …');
+
+/* 放行第一个 fetch：正常情况下摆什么 */
+fetchPending[0].resolve({
+  ok: true,
+  status: 200,
+  json: () => Promise.resolve({
+    text: '规则和 ML 在这份数据上大体一致，只有少数几条对不上。',
+    mismatchForward: 2, mismatchReverse: 1,
+    generatedAt: '2026-09-22 21:00:00',
+    newFile: 'data/sim_log.csv', newRows: 300,
+    historyFile: 'data/history.csv', historyRows: 1200,
+  }),
 });
-check('一堆脏数据进来，三个节点的历史一条没变',
-  JSON.stringify([nodes['dorm-a'].history, nodes['dorm-b'].history, nodes['dorm-c'].history]) === beforeAll, true);
+await settle();
+check('★ 条数摆出来了（两个方向分开报）', els['ml-count'].textContent,
+  '规则说正常、ML 说不同：2 条；规则说异常、ML 说正常：1 条');
+check('★ 结论那句是从那份 JSON 里原样搬的', els['ml-text'].textContent,
+  '规则和 ML 在这份数据上大体一致，只有少数几条对不上。');
+check('★★ 说明里点明了「判的不是看板上这些实时读数」',
+  els['ml-note'].textContent.indexOf('判的不是看板上这些实时读数') > 0, true);
+check('★★ 而且点明了「不是实时数据」',
+  els['ml-note'].textContent.indexOf('不是实时数据') > 0, true);
+check('★ 说明里写了是哪份文件、多少条、什么时候跑的',
+  [els['ml-note'].textContent.indexOf('sim_log.csv') > 0,
+    els['ml-note'].textContent.indexOf('300 条') > 0,
+    els['ml-note'].textContent.indexOf('2026-09-22 21:00:00') > 0], [true, true, true]);
 
-/* ============ F. status 复核 ============ */
-console.log('\n=== F. status 复核（以规则为准）===');
-const nF = messages.length;
-const okF = handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 80, '偏湿'));   // 约定里点名的坑
-check('说偏湿、规则算偏热 -> 仍然收下', okF, true);
-check('一条报文只记一行日志', messages.length - nF, 1);
-check('日志级别是 warn', top().level, 'warn');
-check('日志点明了两个值', /收到「偏湿」.*规则算出「偏热」/.test(top().text), true);
-check('存下来的是规则结果「偏热」', nodes['dorm-a'].latest.status, '偏热');
+/* 第二个 fetch：404 时降级。重开一个页面太麻烦，直接点一次连接再走一遍不够 ——
+   所以这里验的是「读不到会降级」那套话术本身在页面上的落点：
+   用 loadMlResult 的第二条路径（放行成一个 404）来测。 */
+check('★ 读不到时页面上那段会降级成一句「这一段没跑」',
+  context.mlFetchFailed('HTTP 404').text.indexOf('这一段没跑：读不到') === 0, true);
+check('★ 降级时条数那栏是空的（不是 0）', context.mlFetchFailed('HTTP 404').count, '');
+check('★ 降级时告诉人怎么补（跑一次 analysis.py）',
+  context.mlFetchFailed('HTTP 404').note.indexOf('analysis/analysis.py') > 0, true);
+check('★ 原因原样贴出来（HTTP 404 和「回来不是 JSON」指向不同的排查方向）',
+  context.mlFetchFailed('Unexpected token < in JSON at position 0').text
+    .indexOf('Unexpected token <') > 0, true);
 
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 16, 60, '正常'));
-check('说正常、规则算偏冷 -> warn', top().level, 'warn');
-check('存下来的是偏冷', nodes['dorm-b'].latest.status, '偏冷');
+/* ---------- O. 静态断言（源码里那几件必须成立的事） ---------- */
 
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, '正常'));
-check('status 一致时不报警', top().level, 'ok');
+console.log('\n=== O. 源码里的硬约定 ===');
 
-/* ============ G. topic 与 nodeId 不一致 ============ */
-console.log('\n=== G. topic 和报文里的节点对不上 ===');
-const nG = messages.length;
-const okG = handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-c', 25, 80));
-check('仍然收下（节点以报文为准）', okG, true);
-check('仍然只记一行日志', messages.length - nG, 1);
-check('日志级别是 warn', top().level, 'warn');
-check('提示点明了两个节点名', /topic 里是 dorm-a，报文里是 dorm-c/.test(top().text), true);
-check('写进了报文说的 dorm-c', nodes['dorm-c'].latest.temperature, 25);
-check('没写进 topic 说的 dorm-a', nodes['dorm-a'].latest.temperature, 31);
+check('★ dashboard.js 正好两条 import', importCount, 2);
+check('★★ 它 import 的是 ../3d/scene.js 和 ./logic.js（没有第三条）',
+  [SCENE_IMPORT.test(dashText), LOGIC_IMPORT.test(dashText)], [true, true]);
 
-console.log('\n=== H. topic 形状不对时不误报 ===');
-check('topicNode 正常', topicNode('dormmate/v1/nodes/dorm-a/telemetry'), 'dorm-a');
-check('topicNode 形状不对返回空串', topicNode('随便什么'), '');
-check('topicNode 对 null 不炸', topicNode(null), '');
-// 迁移到 v1 之前的旧形状必须不再认（认了就等于两个 topic 都能进门）
-check('旧的三段式 topic 不再认', topicNode('dormmate/dorm-a/env'), '');
-check('少了 v1 段不认', topicNode('dormmate/nodes/dorm-a/telemetry'), '');
-check('尾段不是 telemetry 不认', topicNode('dormmate/v1/nodes/dorm-a/env'), '');
-handleMessage('随便什么', mk('dorm-a', 25, 60));
-check('形状不对的 topic 不产生额外 warn', top().level, 'ok');
+/* import 进来的名字必须真的在 logic.js 里导出 —— 少一个的话页面整块
+   「is not a function」，而那是运行到那一行才炸。 */
+const logicExports = (fs.readFileSync(LOGIC_SRC, 'utf8')
+  .match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
+  .map((l) => l.replace(/^export\s+(?:function|const|let)\s+/, ''));
+const importedNames = (dashText.match(/^import\s*\{([^{}]*)\}\s*from\s*'\.\/logic\.js';/m) || [])[1]
+  .split(',').map((s) => s.trim()).filter(Boolean);
+check('★ 从 logic.js 引了十二个名字', importedNames.length, 12);
+check('★★ 这十二个每一个都在 logic.js 的导出清单里',
+  importedNames.filter((n) => logicExports.indexOf(n) < 0), []);
 
-console.log('\n=== H2. 拼 topic 的地方只有一处，且拼出来的自己认得出 ===');
-/* 这一节是补上来的。以前「演示数据」按钮里那句是
-   'dormmate/' + nodeId + '/env' —— 迁到 v1 那轮批量替换只扫到字面量，
-   这句是**拼**出来的，漏了。它还不报错：形状不对时 topicNode 返回空串，
-   topic 与 nodeId 的一致性检查整段被跳过，页面上一切正常，
-   等于演示数据一直在发一种本页自己解析不出节点名的 topic。 */
-check('topicFor 拼出来的，topicNode 解析得回来', topicNode(topicFor('dorm-b')), 'dorm-b');
-check('订阅用的通配符也是同一个形状（把 + 换成节点名就解析得动）',
-  topicNode(topicWildcard().replace('+', 'dorm-c')), 'dorm-c');
-check('通配符 topic 仍然是约定的那一条',
-  topicWildcard(), 'dormmate/v1/nodes/+/telemetry');
+/* 【不许自己实现业务判断】这一条查的是**源码文本**：阈值、状态名一旦出现，
+   就说明判断又溜回前端了。 */
 
-/* 走一遍演示数据按钮真正走的路：9 条，一条 warn/error 都不许有。
-   topic 拼错的话这条会亮 —— 上面那条「形状不对不产生额外 warn」说明
-   光看日志级别是发现不了的，得反过来查 topic 本身。 */
-clearAll();
-simulate();
-check('演示数据 9 条，日志里没有 warn/error',
-  messages.filter((m) => m.level !== 'ok').length, 0);
-check('★ 演示数据发出的每条 topic 都解析得出节点名',
-  messages.every((m) => topicNode(m.topic) !== ''), true);
-check('★ 三条 topic 里认出的正是三个节点',
-  Array.from(new Set(messages.map((m) => topicNode(m.topic)))).sort(),
-  ['dorm-a', 'dorm-b', 'dorm-c']);
-
-/* 静态那一条：代码里（注释不算）出现 dormmate/v1 的地方，**只能是对应的
-   那个 const 声明**。多出一处 = 有人在别处又拼了一条 topic，而拼错一条是
-   **静默**的（形状不对时 topicNode 返回空串，一致性检查整段被跳过）。
-
-   Step D3 收尾起这条从「只许一处」变成「只许那两处」：页面现在有两个 topic
-   —— 上报的（TOPIC_PREFIX + TOPIC_SUFFIX 拼出来）和发指令的 CMD_TOPIC。
-   所以这里逐个点名：认这一整个字符串，而不是数个数。数个数的话，
-   在两处之间挪一次、或者多写一处但少写另一处，都能让数对得上。
-   注释里的例子不算数，所以先把注释摘掉再数。 */
+/* 注释里当然可以出现「偏热」「18℃」这类字眼（那是在解释规则），所以先摘注释。 */
 const dashCode = dashText
   .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/^[ \t]*\/\/.*$/gm, '');
-const prefixHits = dashCode.match(/'dormmate\/v1[^']*'/g) || [];
-check('★ 写死 dormmate/v1 的地方正好是「上报 topic 的前缀」和「指令 topic」两处',
-  prefixHits.slice().sort(), ["'dormmate/v1/cmd'", "'dormmate/v1/nodes/'"].sort());
-/* 节点名、通配符、后缀都不许再写一遍字面量：它们全部由上面那两个 const 拼。
-   一条一条点名，是因为「少拼了哪半句」这种改动，光看上面那两处是看不出来的。 */
-check('节点上报那三段没有第二份字面量（' + "'/telemetry'" + ' 只出现在后缀那一处）',
-  (dashCode.match(/\/telemetry/g) || []).length, 1);
-check('指令 topic 没有第二个写法（后缀式的 ' + "'dormmate/v1/cmd/...'" + ' 不许出现）',
-  dashCode.includes("dormmate/v1/cmd/'"), false);
-
-/* ============ I. 历史上限 ============ */
-console.log('\n=== I. 历史上限 ===');
-clearAll();
-for (let i = 0; i < 60; i += 1) handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 20 + (i % 5), 50));
-check('dorm-a 历史上限 50 条', nodes['dorm-a'].history.length, 50);
-check('留下的是最新的那批（最后一条 20+59%5=24）', nodes['dorm-a'].latest.temperature, 20 + (59 % 5));
-check('dorm-b 依旧为空', nodes['dorm-b'].history.length, 0);
-
-/* ============ J. 清空 ============ */
-console.log('\n=== J. 清空 ===');
-clearAll();
-check('三个节点都空了', ['dorm-a', 'dorm-b', 'dorm-c'].map((id) => nodes[id].history.length), [0, 0, 0]);
-check('latest 也清了', ['dorm-a', 'dorm-b', 'dorm-c'].map((id) => nodes[id].latest), [null, null, null]);
-check('日志清空', messages.length, 0);
-check('清空后没炸', true, true);
-
-/* ============ K. MQTT 接线 ============ */
-console.log('\n=== K. MQTT 接线 ===');
-check('打开页面就连了 Broker', mqttStub.clients.length, 1);
-const mc = mqttStub.clients[0];
-check('连的地址由页面 hostname 拼出来', mc.url, 'ws://localhost:9001');
-check('还没握手成功时不订阅', mc.subscribed, []);
-check('刚打开时状态是「连接中…」', els['conn-text'].textContent, '连接中…');
-
-/* 模拟 Broker 握手成功 */
-mc.handlers.connect.forEach((fn) => fn());
-check('连上后订阅 dormmate/v1/nodes/+/telemetry', mc.subscribed,
-  ['dormmate/v1/nodes/+/telemetry']);
-check('状态变成「已连接」', els['conn-text'].textContent, '已连接');
-check('指示灯切到绿色那档', els.conn.className, 'conn conn--on');
-
-/* 真投一条 MQTT 消息进来 —— 这一步的核心：消息要一路走到 handleMessage */
-clearAll();
-mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-b/telemetry', JSON.stringify({
-  nodeId: 'dorm-b', temperature: 31, humidity: 60, status: '偏热', time: '2026-09-22 20:30:00',
-})));
-check('MQTT 消息落到了 dorm-b', nodes['dorm-b'].history.length, 1);
-check('就是那条 31℃', nodes['dorm-b'].latest.temperature, 31);
-check('dorm-a 没被牵连', nodes['dorm-a'].history.length, 0);
-check('dorm-c 没被牵连', nodes['dorm-c'].history.length, 0);
-check('日志级别 ok', top().level, 'ok');
-
-/* 走 MQTT 进来的脏数据，被同一条链路拦下 */
-mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-b/telemetry', '{坏掉的 json'));
-check('MQTT 来的脏 JSON 被拦下', top().level, 'error');
-check('拦下后没写进历史', nodes['dorm-b'].history.length, 1);
-
-/* 原始报文要往 Console 打一行（排错用）。
-   把 console.log 临时换成收集器 —— 不换的话每跑一次测试都要刷一大片屏。
-   注意 ctx 里传的就是 Node 的 console 本身，所以要还原回去。 */
-const realLog = console.log;
-const logged = [];
-console.log = (...args) => { logged.push(args); };
-mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-c/telemetry', JSON.stringify({
-  nodeId: 'dorm-c', temperature: 25, humidity: 80, status: '偏湿', time: '2026-09-22 20:30:00',
-})));
-console.log = realLog;
-
-check('每条原始报文打一行 Console', logged.length, 1);
-check('打印的是 topic', logged[0][1], 'dormmate/v1/nodes/dorm-c/telemetry');
-check('打印的是原始报文原文，不是解析后的对象',
-  logged[0][2], '{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:30:00"}');
-
-/* 被拦下的报文更要打印 —— 排错时最需要的就是这一条 */
-console.log = (...args) => { logged.push(args); };
-mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-c/telemetry', '{又一条坏 json'));
-console.log = realLog;
-check('被拦下的报文同样打印了', logged.length, 2);
-check('打印内容就是那段坏文本', logged[1][2], '{又一条坏 json');
-
-/* 反过来的要求：模拟按钮的数据不该混进「实收报文」里冒充真消息 */
-console.log = (...args) => { logged.push(args); };
-simulate();
-console.log = realLog;
-check('模拟数据不冒充「实收报文」（Console 里不出现）', logged.length, 2);
-
-/* 断开 */
-disconnect();
-check('断开时强制 end，不再自动重连', mc.ended, true);
-check('状态回到「未连接」', els['conn-text'].textContent, '未连接');
-/* 旧连接的 close 回调补触发一次，不该把状态覆盖回去 */
-mc.handlers.close.forEach((fn) => fn());
-check('旧连接的 close 回调不覆盖当前状态', els['conn-text'].textContent, '未连接');
-
-connect();
-check('能重新连一根', mqttStub.clients.length, 2);
-const mc2 = mqttStub.clients[1];
-check('重连后状态是「连接中…」', els['conn-text'].textContent, '连接中…');
-connect();
-check('已经连着时再点「连接」不会叠第二根', mqttStub.clients.length, 2);
-mc2.handlers.connect.forEach((fn) => fn());
-check('第二根也订阅同样的 topic', mc2.subscribed, ['dormmate/v1/nodes/+/telemetry']);
-check('第二根连上后状态是「已连接」', els['conn-text'].textContent, '已连接');
-
-mc2.handlers.reconnect.forEach((fn) => fn());
-check('掉线重连时显示「重连中…」', els['conn-text'].textContent, '重连中…');
-mc2.handlers.connect.forEach((fn) => fn());
-check('重连成功后回到「已连接」', els['conn-text'].textContent, '已连接');
-
-/* 出错分支：console.error 是故意调的，这里临时静音，免得刷屏 */
-const realError = console.error;
-console.error = () => {};
-mc2.handlers.error.forEach((fn) => fn(new Error('boom')));
-console.error = realError;
-check('连接出错显示「连接失败」', els['conn-text'].textContent, '连接失败');
-
-/* ============ M. 3D 视图接线（Step 6-3）============ */
-console.log('\n=== M. 3D 视图接线 ===');
-
-/* 这个桩是按调用顺序把所有状态和文字都记下来的。
-   这一段要盯的就一件事：**画面跟的是「当前选中的节点」，不是「最后一个发消息的节点」**。
-   三个宿舍的数据混在同一个通配符 topic 里进来，这一步最容易出的错就是
-   dorm-b 一来就把画面改成 dorm-b 的样子，而左上角还写着 dorm-a ——
-   屏幕上看着挺正常，只有盯着标签才发现对不上。 */
-const scene = sceneCalls[0];
-const lastStatus = () => scene.statuses[scene.statuses.length - 1];
-const lastLabel = () => scene.labels[scene.labels.length - 1];
-
-/* --- 接线本身 --- */
-
-check('★ dashboard.js 只有两条 import（上面摘 import 靠的是两条正则，多一条会被漏掉）',
-  importCount, 2);
-check('★ 其中一条拿的是 ../3d/scene.js 里的 createDorm3D（不是 3d/index.html 里那份拷贝）',
-  SCENE_IMPORT.test(dashText), true);
-check('那个文件真的在（../ 是相对 dashboard.js 自己算的，不是相对页面）',
-  fs.existsSync(path.join(ROOT, '3d', 'scene.js')), true);
-
-const dashHtml = fs.readFileSync(path.join(ROOT, 'dashboard', 'index.html'), 'utf8');
-const modAt = dashHtml.indexOf('<script type="module"');
-const mapAt = dashHtml.indexOf('<script type="importmap">');
-
-check('★ dashboard.js 用 type="module" 载入（不然 import 直接是语法错）',
-  dashHtml.indexOf('<script type="module" src="dashboard.js">') >= 0, true);
-check('★ dashboard 也有一张 importmap（scene.js 里写的是裸名字 three，'
-  + 'importmap 是文档级的，缺了它就在 scene.js 里报「Failed to resolve」）',
-  mapAt >= 0, true);
-check('★ importmap 排在模块脚本之前（顺序反了浏览器不认）',
-  mapAt >= 0 && modAt > mapAt, true);
-check('★ type="module" 全页只有一处（只该有 dashboard.js 那一条）',
-  (dashHtml.match(/<script[^>]*type="module"/g) || []).length, 1);
-check('★ mqtt.js / Chart.js / rules.js 都还在模块脚本之前 —— 它们挂的是全局变量，'
-  + '必须在模块跑起来之前挂好',
-  ['lib/mqtt.min.js', 'chart.umd.min.js', '../shared/rules.js']
-    .every((f) => dashHtml.slice(0, modAt).includes(f)), true);
-check('容器 #scene3d 在页面上', dashHtml.indexOf('<div id="scene3d">') >= 0, true);
-
-/* --- 初始化 --- */
-
-check('页面起来时建了一个 3D 场景', sceneCalls.length, 1);
-check('★ 建的时候容器 id 和 index.html 里那个一致（对不上就挂到别的元素里去了）',
-  scene.hostId, 'scene3d');
-check('★ 打开页面时覆盖层写的是「还没有收到数据」，不假装有数据',
-  scene.labels[0].includes('还没有收到数据'), true);
-check('初始场景退回「正常」的外观（空白或半成品分不清是没数据还是坏了）',
-  scene.statuses[0], '正常');
-/* ★ 页面起来的时候就已经调过一次 setFocus 了 —— renderScene 的尾巴上那一句。
-   少了它（或者 scene.js 的返回值里根本没有 setFocus），那圈「当前重点」的环
-   永远不会出现，而那是在 renderScene 里头，页面上一点异常都看不出来。
-   （scene.js 那一侧的契约由 tests/scene3d.test.js 单独钉。） */
-check('★ 页面起来时就调过一次 setFocus，传的是 false'
-  + '（一条数据都没有，没有重点可言 —— 不是留着上一次的亮着的环）',
-  RING_AT_LOAD, [false]);
-
-/* --- 只画当前选中的那个节点 --- */
-
-clearAll();
-check('★ 清空后 3D 立刻退回「还没有收到数据」', lastLabel().includes('还没有收到数据'), true);
-check('清空后场景退回「正常」', lastStatus(), '正常');
-
-/* C 段留下的当前节点是 dorm-b。这时喂一条 dorm-a 的：
-   数据要收下，画面一个字都不能动。 */
-const nStatus = scene.statuses.length;
-const nLabel = scene.labels.length;
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60));
-check('dorm-a 的数据收下了', nodes['dorm-a'].latest.status, '偏热');
-check('★ 不是当前节点的消息：3D 一次都没被调', scene.statuses.length, nStatus);
-check('★ 覆盖层也一个字没动（还写着 dorm-b）', scene.labels.length, nLabel);
-
-/* 切过去：不用等新数据，立刻画出它那条的样子 */
-selectNode('dorm-a');
-check('★ 切到已有数据的节点，立刻画出它的状态', lastStatus(), '偏热');
-/* ★ 8-3 起标签上**只有宿舍名**。
-   原来这里还写着状态和温湿度，那是把卡片上的信息又抄了一遍 ——
-   而这一行落在画面正中间，看的人分不清哪个是「场景」哪个是「文字面板」。
-   分工：宿舍名是画面答不出来的（画里只有一间屋，不说不知道是哪个），
-   所以留在这儿；「这间怎么了」交给画面自己说（地板颜色、窗户开合、风扇转不转）；
-   温湿度是卡片的事。 */
-check('★ 覆盖层只写宿舍名', lastLabel(), '当前宿舍：dorm-a');
-check('★ 状态不再抄进标签（交给画面自己表达）', lastLabel().includes('偏热'), false);
-check('★ 温湿度也不再抄进标签（那是卡片的信息）',
-  [lastLabel().includes('31℃'), lastLabel().includes('60%')], [false, false]);
-
-/* 反方向再来一遍，确认不是「第一次刚好对了」 */
-const n2 = scene.statuses.length;
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80));
-check('★ 当前是 dorm-a，dorm-b 的消息同样不改画面',
-  scene.statuses.length, n2);
-selectNode('dorm-b');
-check('★ 切到 dorm-b，画的是它自己的偏湿', lastStatus(), '偏湿');
-
-const n3 = scene.statuses.length;
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 16, 60));
-check('★ 当前节点收到新消息，画面跟着变', lastStatus(), '偏冷');
-check('确实重画了（不是恰好在上一行就画好了）', scene.statuses.length > n3, true);
-
-/* --- status 复核的结果才交给 3D --- */
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, '正常'));   // 报文里故意写错
-check('报文里写「正常」，3D 上画的仍然是规则算出来的「偏热」', lastStatus(), '偏热');
-check('日志里警告了不一致', top().level, 'warn');
-
-/* --- 幂等：消息来了直接调，不用先判断变没变 --- */
-
-const n4 = scene.statuses.length;
-renderScene();
-renderScene();
-check('★ renderScene 是幂等的（重复调用画出同样的状态，不会翻转或累加）',
-  scene.statuses.slice(n4), ['偏热', '偏热']);
-
-/* --- 切到还没收到数据的节点 --- */
-
-clearAll();
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60));
-selectNode('dorm-c');
-check('★ 切到没收到数据的节点：退回「正常」的外观', lastStatus(), '正常');
-check('★ 覆盖层如实写「还没有收到数据」，不沿用上一个节点的偏冷',
-  lastLabel().includes('dorm-c') && lastLabel().includes('还没有收到数据'), true);
-
-selectNode('dorm-a');
-check('★ 切回有数据的节点，状态又回来了（不是只有第一次切才画）', lastStatus(), '偏冷');
-
-/* --- 脏数据不污染画面 --- */
-
-clearAll();
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60));
-const n5 = scene.statuses.length;
-console.error = () => {};
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', '这不是 JSON');
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', JSON.stringify({ nodeId: 'dorm-a', humidity: 60 }));
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-z', 31, 60));
-console.error = realError;
-check('★ 三条脏数据一条都没改到画面', scene.statuses.length, n5);
-check('画面还是那条干净数据的「正常」', lastStatus(), '正常');
-
-/* ============ N. 当前重点一行（Step 7-1 挑人 + Step 8-3 那一行）============ */
-console.log('\n=== N. 当前重点一行 ===');
-
-const ids = ['dorm-a', 'dorm-b', 'dorm-c'];
-const T = (hm) => '2026-09-22 ' + hm;   // 三组场景的时间都在这天
-const focusHTML = () => els.focus.innerHTML;
-/* 点一下那一行。走的是页面真正注册在 #focus 上的那个委托回调，
-   不是直接调 selectNode —— 委托的 selector 写错了这里就该红。 */
-function clickFocus(nodeId) {
-  els.focus._handlers.click.forEach((fn) => fn({
-    target: { closest: (sel) => (sel === '.focus' ? { dataset: { node: nodeId } } : null) },
-  }));
-}
-
-/* --- 接线本身 --- */
-
-check('★ dashboard.js 有两条 import（scene.js 的 3D 工厂 + logic.js 的算法）',
-  importCount, 2);
-check('★ logic.js 那条拿的是 7-1 的四个 + 7-4 的四个 + 8-3 的两个',
-  LOGIC_IMPORT.test(dashText), true);
-check('★ logic.js 那个文件真的在（./ 是相对 dashboard.js 自己算的，不是相对页面）',
-  fs.existsSync(LOGIC_SRC), true);
-check('index.html 里有 #focus 容器', dashHtml.includes('id="focus"'), true);
-/* ★ 8-1 那两块（B1 总览 + B2 依据）已经撤了 —— 顶部只剩这一行。
-   这一步是**信息分工**：原来有三处在说「谁是重点」，详略不同而已；
-   现在一行留给看板顶部，细节分给 3D / 语音 / report.html。
-   两块里任何一个还在页面上，就是「又加了一块」而不是分工。 */
-check('★ 8-1 的 #overview / #reasons 已经从页面上撤掉了',
-  [dashHtml.includes('id="overview"'), dashHtml.includes('id="reasons"')],
-  [false, false]);
-check('★ 那一行旁边就是「语音提醒」按钮', dashHtml.includes('id="speak"'), true);
-check('按钮的文案就是「语音提醒」', dashHtml.includes('>语音提醒</button>'), true);
-check('★ 念了哪一句写在按钮下面那行说明里', dashHtml.includes('id="speak-note"'), true);
-
-/* --- 启动那一刻（一条数据都没有）--- */
-
-check('★ 启动时就画好了那一行（不是等第一条消息才出现）',
-  FOCUS_AT_LOAD.includes('class="focus'), true);
-/* 「三个都正常」在一条数据都没收到时是假话：那三个节点是**不知道**，不是正常。
-   这两种情况都由 pickPriority 返回 null，区分在 buildFocus 那侧做。 */
-check('★ 启动时说的是「还没有收到数据」，不是「三个都正常」',
-  [FOCUS_AT_LOAD.includes('还没有收到任何节点的数据'),
-    FOCUS_AT_LOAD.includes('三个宿舍都正常')], [true, false]);
-check('启动时它不是按钮（没东西可点）', FOCUS_AT_LOAD.includes('<button'), false);
-/* 页面里跑的就是真的那份 logic.js（上面 runInContext 喂进去的），
-   不是另写一个桩 —— 所以下面每一条都在验同一个函数 */
-check('拿到的 pickPriority 就是 logic.js 里那个', typeof pickPriority, 'function');
-
-/* --- 维护 abnormalStart / abnormalCount --- */
-
-clearAll();
-check('清空后三个节点的连续异常段都是空的',
-  ids.map((id) => nodes[id].abnormalStart + ' / ' + nodes[id].abnormalCount),
-  ['null / 0', 'null / 0', 'null / 0']);
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
-check('★ 第一条异常：起点是它自己，记 1 次',
-  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount],
-  [T('20:00:00'), 1]);
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, undefined, T('20:03:00')));
-check('★ 段接着走：起点不动，次数加一',
-  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [T('20:00:00'), 2]);
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:04:00')));
-check('别的节点各算各的段，互不影响',
-  ids.map((id) => nodes[id].abnormalCount), [2, 1, 0]);
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:05:00')));
-check('★ 来一条正常数据：起点和次数一起清零',
-  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [null, 0]);
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:09:00')));
-check('★ 清零之后再异常：新的一段从这条开始（不沿用 20:00:00）',
-  [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [T('20:09:00'), 1]);
-
-/* 段里状态从偏热变成偏湿：算同一段。这里统计的是「连续异常了多久」，
-   不是「连续偏热了多久」—— 所以起点不动、次数继续加。 */
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:06:00')));
-check('★ 段里从偏热变偏湿，仍是同一段：起点不动、次数继续加',
-  [nodes['dorm-b'].abnormalStart, nodes['dorm-b'].abnormalCount], [T('20:04:00'), 2]);
-
-/* 报文谎称「正常」、规则算出「偏热」时，段不能被打断 ——
-   用的是复核之后的状态，不是报文里那个字符串。 */
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, '正常', T('20:07:00')));
-check('★ 报文谎称「正常」但规则算出偏热：段没被打断（用的是复核后的状态）',
-  [nodes['dorm-b'].abnormalStart, nodes['dorm-b'].abnormalCount], [T('20:04:00'), 3]);
-
-/* 两个字段必须始终一致：有异常计数 <=> 最新状态不是正常。
-   它们由同一个函数一起写，这里把这条不变量钉住 ——
-   一旦哪天有人只改了其中一个，这里立刻红。
-   （还没收到数据的节点两边都是「没有」，也算一致。） */
-check('★ 不变量：abnormalCount > 0 恰好等价于 latest 不是「正常」',
-  ids.map((id) => (nodes[id].abnormalCount > 0) === (nodes[id].latest
-    ? nodes[id].latest.status !== '正常' : false)),
-  [true, true, true]);
-
-/* --- 看板顶上那一行 --- */
-
-/* 此刻：dorm-a 偏热 20:09 起 1 次（时长 0），dorm-b 偏热 20:04 起 3 次（3 分钟），
-   dorm-c 还没收到过。当前看的是 dorm-a（M 段留下的）。 */
-check('★ 顶部那一行挑出了 dorm-b', focusHTML().includes('dorm-b'), true);
-/* ★ 这一行说的是**宿舍名 + 处理状态 + 趋势**，没有状态两个字，也没有那句原因。
-   这是 8-3 的分工：状态由卡片徽章（颜色 + 形状 + 文字）、3D 场景、语音一起承担；
-   「凭什么先管它」那种来龙去脉归 report.html。一行字里塞四样东西，
-   就又变回 8-1 那种「两句话交代所有事」了，那正是这一步要拆掉的。 */
-check('★ 那一行的内容：宿舍名 + 趋势（没按过按钮，就没有「处理中」那段）',
-  focusHTML().includes('dorm-b｜温度正在上升'), true);
-check('★ 那一行里不写状态（分工：状态由徽章和 3D 承担）',
-  [focusHTML().includes('偏热'), focusHTML().includes('已持续')], [false, false]);
-check('★ 那句原因也不在这一行里（它归 report.html）',
-  focusHTML().includes('持续时间最长'), false);
-/* 颜色不能单独表意：这一行里没有「偏热」两个字，所以状态必须由**形状**再表一次。
-   放进来的就是卡片上那套 ICONS（偏热是太阳、偏冷是雪花）。 */
-check('★ 但状态图标在（颜色永远配着形状出现，不靠颜色单独表意）',
-  [focusHTML().includes('focus-icon'), focusHTML().includes('<svg')], [true, true]);
-check('那一行是个 button，带着 nodeId（点击委托靠它认人）',
-  /<button[^>]*data-node="dorm-b"/.test(focusHTML()), true);
-check('颜色跟着状态走（偏热 -> is-critical，和卡片同一套 class）',
-  focusHTML().includes('focus is-critical'), true);
-check('当前看的不是它 -> 右边写「查看详情」', focusHTML().includes('查看详情'), true);
-check('当前看的不是它 -> 不带选中描边', /\bis-active\b/.test(focusHTML()), false);
-
-/* --- 点它 = 点对应那张卡片 --- */
-
-/* 切之前先记下那一行的内容。它在切完之后必须**一个字都没变** ——
-   「谁是重点」跟正在看谁无关，变的是右边那两个字。 */
-const lineBefore = buildFocus(nodes);
-clickFocus('dorm-b');
-check('★ 点「当前重点」切到了 dorm-b', current(), 'dorm-b');
-check('★ 卡片跟着切（dorm-b 那张变成「查看中」）',
-  /data-node="dorm-b"[^>]*aria-pressed="true"/.test(els.cards.innerHTML), true);
-check('★ 趋势图跟着切（画的是 dorm-b 自己的历史）',
-  tempChart.data.datasets[0].data, nodes['dorm-b'].history.map((r) => r.temperature));
-check('★ 3D 跟着切（画的是 dorm-b 的状态）', lastStatus(), '偏热');
-check('★ 切过去之后那一行改口说「正在查看」', focusHTML().includes('正在查看'), true);
-check('★ 而且它本身带上了选中描边',
-  /class="focus is-critical is-active"/.test(focusHTML()), true);
-check('★ 内容一个字没变（换的只是「正在查看」那两个字）',
-  [buildFocus(nodes) === lineBefore, focusHTML().includes(lineBefore)], [true, true]);
-check('标记变了，挑中的节点没变（只是「正在看」这件事变了）',
-  pickPriority(nodes).nodeId, 'dorm-b');
-
-/* --- 3D 上那圈「当前重点」标记（Step 8-3）--- */
-
-/* 这一圈环和「重画场景」的时机**不一样**，所以 dashboard.js 那边是两个函数：
-     场景只跟当前选中的宿舍有关 —— 收到别的节点的报文时一次都不该动；
-     谁是重点却是**全局**的 —— dorm-b 的一条数据就可能让正在看的 dorm-a
-                                不再是重点，那圈环得当场灭掉。
-   下面这几条把这两个时机分别钉住。 */
-const ringAt = () => scene.focus[scene.focus.length - 1];
-const ringCount = () => scene.focus.length;
-
-check('★ 启动那一刻那圈环是灭的（一条数据都没有，没有重点可言）',
-  scene.focus[0], false);
-check('★ 切到重点那个宿舍（dorm-b）之后环亮起来 —— 它正好是当前看的这间',
-  ringAt(), true);
-
-/* ★ 这一条是 renderFocusMark 单独存在的全部理由。
-   当前看的是 dorm-b，也正是重点。现在来两条 **dorm-a** 的报文：
-   画面本身一步都不该动（收到的不是它 —— 上面 M 段已经钉过），
-   但 dorm-a 的异常段比 dorm-b 长，重点当场换人 ——
-   dorm-b 那圈环必须跟着灭掉。
-   两件事捆在一个函数里写的话，这一种情况就只能靠「碰巧也在看那个节点」才更新得过来。 */
-const ringBefore = ringCount();
-const stBefore = scene.statuses.length;
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
-check('（这时 dorm-a 的段是 11 分钟、dorm-b 是 3 分钟，重点换成了 dorm-a）',
-  pickPriority(nodes).nodeId, 'dorm-a');
-check('★ 重点被别的节点抢走：正在看的这间当场摘掉标记', ringAt(), false);
-check('★ 而且确实重新调了一次 setFocus（不是沿用上一次那个值）',
-  ringCount() > ringBefore, true);
-check('★ 与此同时画面一步都没动（收到的不是当前这个节点）',
-  scene.statuses.length, stBefore);
-
-/* 再看一个方向：重点抢回来，环还得亮回去 */
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
-check('★ 正在看的这间重新成为重点：环当场亮回来',
-  [pickPriority(nodes).nodeId, ringAt()], ['dorm-b', true]);
-
-/* --- 清空之后：又回到「一条数据都没有」 --- */
-
-clearAll();
-/* 清空不是「三个都正常」，是「什么都不知道了」—— 和刚打开页面是同一种状态，
-   所以话也该是同一句。这条同时钉住了 clearAll 必须重画那一行。 */
-check('★ 清空后说的是「还没有收到数据」，不是「三个都正常」',
-  [focusHTML().includes('还没有收到任何节点的数据'),
-    focusHTML().includes('三个宿舍都正常')], [true, false]);
-check('★ 没数据时不是按钮（点不动，也不该看着像能点）',
-  focusHTML().includes('<button'), false);
-check('没数据时没有 data-node，点上去什么也不会发生',
-  focusHTML().includes('data-node'), false);
-check('★ 清空后那圈环也灭了（连重点都没有了）', ringAt(), false);
-check('pickPriority 在一条数据都没有时返回 null', pickPriority(nodes), null);
-/* 点一个没有 data-node 的东西不能把 currentNodeId 弄坏 */
-check('当前还看在 dorm-b 上（切节点只由真实的点击改）', current(), 'dorm-b');
-
-/* --- 按风扇那一刻，那一行当场补出「处理中」--- */
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-check('按之前那一行里没有「处理中」', focusHTML().includes('处理中'), false);
-check('这时按钮是能点的（不然下面按的是一个灰按钮，模拟的不是真行为）',
-  els['action-fan'].disabled, false);
-check('当前看的正是它（否则按下去作用在别的节点上）', current(), 'dorm-b');
-
-els['action-fan']._handlers.click.forEach((fn) => fn());
-/* ★ 这一条盯的是风扇回调里那句 renderFocus()。漏掉的话，「处理中」三个字
-   要等到**下一条报文进来**才出现 —— 中间那段时间卡片上写着「处理中｜风扇已开启」、
-   上面那一行里却什么都没有，看的人会以为按钮没生效。 */
-check('★ 按了风扇之后那一行**当场**补出处理状态（不用等下一条报文）',
-  focusHTML().includes('dorm-b｜处理中'), true);
-check('★ 只写「处理中」，不写「风扇已开启」—— 开了什么是空间动作，归 3D',
-  focusHTML().includes('风扇已开启'), false);
-/* 只有一条数据，所以没有趋势那段，｜ 后面直接就是「处理中」，不会留个空的 ｜ */
-check('只有一条数据时后面不跟趋势（说不出「往哪走」就不说）',
-  focusHTML().includes('dorm-b｜处理中｜'), false);
-
-/* --- 三组场景：和交给 MQTTX 的那三组是同一份数据 --- */
-
-/* 下面这三组就是回给用户的 MQTTX 测试数据。先在这里跑一遍 ——
-   现场照着发的时候页面上会出现什么，这里已经验过了。 */
-console.log('  -- 场景一：按时长决出优先 --');
-clearAll();
-[['dorm-a', 16, 60, '20:00:00'], ['dorm-a', 16, 60, '20:03:00'],
-  ['dorm-b', 31, 60, '20:00:00'], ['dorm-b', 31, 60, '20:07:00'],
-  ['dorm-c', 25, 80, '20:00:00'], ['dorm-c', 25, 80, '20:05:00'],
-].forEach(([id, t, h, hm]) => {
-  handleMessage('dormmate/v1/nodes/' + id + '/telemetry', mk(id, t, h, undefined, T(hm)));
-});
-check('★ 场景一：三段各 2 条，时长 3 / 7 / 5 分钟',
-  ids.map((id) => nodes[id].abnormalCount + ' 条'), ['2 条', '2 条', '2 条']);
-check('★ 场景一：时长最长的 dorm-b 胜出', pickPriority(nodes).nodeId, 'dorm-b');
-check('★ 场景一：原因',
-  pickPriority(nodes).reason, 'dorm-b 已连续偏热 7 分钟（2 次），持续时间最长');
-/* 那一行只说「是它」，不说「凭什么」。原因仍然算得出来（上面那条），
-   但它去的地方是事件记录和 report.html —— 那才是要交代来龙去脉的出口。 */
-check('★ 场景一：那一行说的是 dorm-b，但不含那句原因',
-  [focusHTML().includes('dorm-b｜'), focusHTML().includes('持续时间最长')], [true, false]);
-
-console.log('  -- 场景二：时长相同，按次数决出 --');
-clearAll();
-[['dorm-a', 16, 60, '20:00:00'], ['dorm-a', 16, 60, '20:06:00'],
-  ['dorm-b', 31, 60, '20:00:00'], ['dorm-b', 31, 60, '20:03:00'], ['dorm-b', 31, 60, '20:06:00'],
-  ['dorm-c', 25, 80, '20:00:00'], ['dorm-c', 25, 80, '20:06:00'],
-].forEach(([id, t, h, hm]) => {
-  handleMessage('dormmate/v1/nodes/' + id + '/telemetry', mk(id, t, h, undefined, T(hm)));
-});
-check('★ 场景二：三段的条数分别是 2 / 3 / 2',
-  ids.map((id) => nodes[id].abnormalCount), [2, 3, 2]);
-check('★ 场景二：三段时长都是 6 分钟（起点 20:00、最新 20:06）',
-  ids.map((id) => nodes[id].abnormalStart), [T('20:00:00'), T('20:00:00'), T('20:00:00')]);
-check('★ 场景二：条数最多的 dorm-b 胜出', pickPriority(nodes).nodeId, 'dorm-b');
-/* 点名的那个是 dorm-c 不是 dorm-a：三段时长一样，第 3 步比严重度时
-   dorm-c（偏湿）排在 dorm-a（偏冷）前面，所以「最强的那个同长对手」是 dorm-c。
-   理由对着**跟它最接近的那个**说，而不是随便挑一个同长的 ——
-   挑 dorm-a 的话，看的人会问「那 dorm-c 呢」。 */
-check('★ 场景二：原因如实说赢在次数，不写「持续时间最长」',
-  pickPriority(nodes).reason,
-  'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长，异常次数最多');
-
-console.log('  -- 场景三：全部正常 --');
-clearAll();
-[['dorm-a', 25, 60, '20:00:00'], ['dorm-b', 25, 60, '20:00:00'], ['dorm-c', 25, 60, '20:00:00']]
-  .forEach(([id, t, h, hm]) => {
-    handleMessage('dormmate/v1/nodes/' + id + '/telemetry', mk(id, t, h, undefined, T(hm)));
-  });
-check('★ 场景三：数据都收下了（不是被拦掉才显得「全正常」）',
-  ids.map((id) => nodes[id].history.length + ' / ' + nodes[id].latest.status),
-  ['1 / 正常', '1 / 正常', '1 / 正常']);
-check('★ 场景三：三个节点的异常计数都是 0', ids.map((id) => nodes[id].abnormalCount), [0, 0, 0]);
-check('★ 场景三：pickPriority 返回 null', pickPriority(nodes), null);
-check('★ 场景三：那一行说三个都正常', focusHTML().includes('3 个宿舍都正常'), true);
-/* 平静时那一行不是按钮：没有重点，就没有可点过去的地方 */
-check('★ 场景三：没有重点时它不是按钮', focusHTML().includes('<button'), false);
-
-/* 三组跑完，让后面的 O 段从一个干净的、当前节点确定的状态开始 */
-clearAll();
-selectNode('dorm-a');
-
-/* ============ O. 处理动作（Step 7-2）============ */
-console.log('\n=== O. 处理动作 ===');
-
-/* 这一步的要求是「处理状态、Dashboard 显示、3D 表现读同一份节点数据」。
-   所以下面每一段都是同一个写法：先写进节点字段，再把三处显示分别看一眼 ——
-   卡片上那行、详情区那行字、3D 里风扇转不转。三处都从 nodes[id] 读，
-   这里就没有第二份可以跟它不一致的副本。 */
-const fanBtn = els['action-fan'];
-const fanState = els['action-state'];
-/* 走页面真正注册在 #action-fan 上的那个回调，不直接调内部函数 ——
-   回调要是挂错了元素（比如挂到 #clear 上），这里就该红。 */
-const clickFan = () => fanBtn._handlers.click.forEach((fn) => fn());
-const actionsOnCards = () => (els.cards.innerHTML.match(/card-action/g) || []).length;
-
-/* --- 接线本身 --- */
-
-check('index.html 里有 #action-fan 那个按钮', dashHtml.includes('id="action-fan"'), true);
-check('index.html 里有 #action-state 那行字', dashHtml.includes('id="action-state"'), true);
-check('按钮的文案就是「开启风扇 / 通风」', dashHtml.includes('开启风扇 / 通风'), true);
-check('★ 页面上跑的 beginHandling / nextHandling 就是 logic.js 里那两个（不是另写的桩）',
-  [typeof beginHandling, typeof nextHandling], ['function', 'function']);
-check('★ 启动那一刻就把这一行画好了（按钮是灰的、字是「还没有收到数据」）',
-  ACTION_AT_LOAD, { disabled: true, text: '还没有收到这个节点的数据' });
-
-/* --- 一条数据都没有：按不动 --- */
-
-clearAll();
-selectNode('dorm-a');
-check('★ 没收到过数据时按钮是灰的（连 actionTime 都没地方取）', fanBtn.disabled, true);
-check('★ 那行字如实说还没收到数据，不混成「正常不需要处理」',
-  fanState.textContent, '还没有收到这个节点的数据');
-check('没处理过的卡片上不出现处理状态那一行', actionsOnCards(), 0);
-
-/* --- 状态正常：照样按不动（规格书：节点状态正常时禁用）--- */
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-check('状态正常时按钮还是灰的', fanBtn.disabled, true);
-check('那行字说明为什么按不动', fanState.textContent, '当前状态正常，不需要处理');
-
-/* --- 异常了：可以按 --- */
-
-/* 这里特意拿**偏湿**当被测场景，不用偏热。
-   偏热在 scene.js 的 LOOK 表里本来就是 fan: true，updateScene 自己就会把风扇
-   打开 —— 那种情况下「先 updateScene 再 setFanOn」的顺序写反了也照样绿。
-   偏湿的 fan 是 false，只有「动作叠在状态之上」这一种写法才转得起来。 */
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 80, undefined, T('20:05:00')));
-check('节点偏湿了，按钮可点（不是正常状态）', fanBtn.disabled, false);
-check('确认这一段的场景确实是偏湿，否则上面那条测的不是这件事',
-  nodes['dorm-a'].latest.status, '偏湿');
-check('还没按的时候那行字是空的（没什么要说的）', fanState.textContent, '');
-
-/* --- 按一下 --- */
-
-const fansBefore = scene.fans.length;
-const opsBefore = scene.ops.length;
-clickFan();
-
-check('★ handling 变成「处理中」', nodes['dorm-a'].handling, '处理中');
-check('★ action 记的是「风扇已开启」', nodes['dorm-a'].action, '风扇已开启');
-check('★ actionTime 用**该节点最新那条消息的 time**，不是浏览器当前时间',
-  nodes['dorm-a'].actionTime, T('20:05:00'));
-check('刚按下时还没有「动作之后的数据」', nodes['dorm-a'].dataAfterAction, null);
-
-check('★ 卡片上出现「处理中｜风扇已开启」',
-  els.cards.innerHTML.includes('处理中｜风扇已开启'), true);
-check('★ 它在卡片上是个单独的元素，不是混进脚注里的一句话',
-  /<span class="card-action">处理中｜风扇已开启<\/span>/.test(els.cards.innerHTML), true);
-check('只有被处理的那个节点有这一行（另外两张卡没有）', actionsOnCards(), 1);
-
-check('★ 详情区那行字把「记在哪条数据上」说清楚',
-  fanState.textContent,
-  '处理中｜风扇已开启（记在 2026-09-22 20:05:00 这条数据上） · 还没收到动作之后的数据');
-
-check('★ 按下去调了 setFanOn(true)，风扇转起来', scene.fans.slice(fansBefore), [true]);
-/* ★ 顺序是刻意的：scene.js 里写着「后调用的那次为准」，setFanOn 必须在
-   updateScene **之后** —— 反过来的话这次 setFanOn 会被 updateScene 自己那次
-   盖掉（偏湿的 fan 是 false，风扇就转不起来了）。
-   末尾那个 setFocus 是 8-3 加的：renderScene 收尾时要顺手按新的重点重算
-   那圈环。它排在最后，上面那两步的先后不受影响。 */
-check('★ 顺序是「先 updateScene、再 setFanOn」，最后才收尾重算那圈环',
-  scene.ops.slice(opsBefore), ['updateScene', 'setFanOn', 'setFocus']);
-
-/* --- 来了一条比动作还早的：不许改写「处理好了没有」--- */
-
-/* 重发旧数据 / 乱序到达。它比 actionTime 还早，就不该参与判断 ——
-   这一条偏偏是「正常」，少了 t > at 那道闸就会立刻把状态改成「已恢复」，
-   而实际上动作之后一条数据都还没来。 */
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-check('★ 比动作还早的消息不改处理状态（还留在「处理中」）',
-  nodes['dorm-a'].handling, '处理中');
-check('★ 也不记成「动作之后的数据」', nodes['dorm-a'].dataAfterAction, null);
-check('卡片上还是「处理中」，没被那条旧数据改写',
-  els.cards.innerHTML.includes('处理中｜风扇已开启'), true);
-
-/* --- 动作之后来了正常的：已恢复 --- */
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:09:00')));
-check('★ 动作之后的这条是正常 -> 转「已恢复」', nodes['dorm-a'].handling, '已恢复');
-check('★ dataAfterAction 记的是这一条（不是随便哪一条）',
-  [nodes['dorm-a'].dataAfterAction.time, nodes['dorm-a'].dataAfterAction.status],
-  [T('20:09:00'), '正常']);
-check('★ 卡片跟着改口', els.cards.innerHTML.includes('已恢复｜风扇已开启'), true);
-check('★ 详情区把「之后收到了什么」写出来',
-  fanState.textContent,
-  '已恢复｜风扇已开启（记在 2026-09-22 20:05:00 这条数据上）'
-  + ' · 之后收到 2026-09-22 20:09:00：25℃ / 60% 正常');
-check('恢复之后状态就是正常，按钮回到灰的', fanBtn.disabled, true);
-check('★ 恢复之后风扇照样转（动作开了就一直开着，只有「清空」才停）',
-  scene.fans[scene.fans.length - 1], true);
-
-/* --- 环境又变坏：自动退回「处理中」--- */
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:12:00')));
-check('★ 又异常了 -> 退回「处理中」（同一条规则，没有另写一条判断）',
-  nodes['dorm-a'].handling, '处理中');
-check('★ dataAfterAction 跟着换成新的这条',
-  nodes['dorm-a'].dataAfterAction.time, T('20:12:00'));
-check('卡片上又写成「处理中」（不是停在「已恢复」）',
-  els.cards.innerHTML.includes('处理中｜风扇已开启'), true);
-check('actionTime 没被顶掉（动作还是那一次，记在 20:05 上）',
-  nodes['dorm-a'].actionTime, T('20:05:00'));
-
-/* --- 每个节点各管各的 --- */
-
-clearAll();
-selectNode('dorm-a');
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:00:00')));
-clickFan();
-check('★ 按的是当前正在看的 dorm-a', nodes['dorm-a'].handling, '处理中');
-check('★ dorm-b 一点没被牵连', [nodes['dorm-b'].handling, nodes['dorm-b'].actionTime], ['无', null]);
-check('★ dorm-c 同样没被牵连', [nodes['dorm-c'].handling, nodes['dorm-c'].actionTime], ['无', null]);
-check('三张卡里只有一张带处理状态', actionsOnCards(), 1);
-
-/* 切到 dorm-b：它自己没被处理过，详情区那行字和按钮都得按它自己的来 */
-selectNode('dorm-b');
-check('★ 切到 dorm-b，那行字说的是它自己的情况（没处理过）',
-  fanState.textContent, '');
-check('★ 按钮跟着当前节点走：dorm-b 偏湿，可点', fanBtn.disabled, false);
-const fansBeforeB = scene.fans.length;
-selectNode('dorm-b');
-check('★ 去看一个没处理过的节点，风扇不会被 dorm-a 的处理状态带着转',
-  scene.fans.length, fansBeforeB);
-check('★ 卡片上那一行只属于 dorm-a（切节点不会把它搬过来）', actionsOnCards(), 1);
-
-/* dorm-b 自己也按一下：两个节点各记各的，互不覆盖 */
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:04:00')));
-clickFan();
-check('★ dorm-b 记在自己的 actionTime 上（20:04，不是 dorm-a 的 20:00）',
-  [nodes['dorm-b'].handling, nodes['dorm-b'].actionTime], ['处理中', T('20:04:00')]);
-check('dorm-a 的没被动过', [nodes['dorm-a'].handling, nodes['dorm-a'].actionTime],
-  ['处理中', T('20:00:00')]);
-check('两张卡各带一行处理状态', actionsOnCards(), 2);
-
-/* 切回 dorm-a：它那份还在（不是只有最后按的那个才记得住） */
-selectNode('dorm-a');
-check('★ 切回 dorm-a，处理状态还在，说的是它自己的 20:00',
-  fanState.textContent.includes('记在 2026-09-22 20:00:00 这条数据上'), true);
-check('★ 切回 dorm-a，风扇转起来（它自己是处理中的那个）',
-  scene.fans[scene.fans.length - 1], true);
-
-/* --- 没按过按钮的节点：dashboard 一次都不许碰风扇 --- */
-
-/* scene.js 的 LOOK 表里偏热是 fan: true，updateScene 自己会把风扇打开。
-   dashboard 这边只该在「按过按钮」时补一句 setFanOn(true)，
-   绝不能反过来对没处理过的节点喊 setFanOn(false) —— 那等于把 Step 6-2 弄坏了：
-   一个偏热的宿舍，只要没人点过按钮，风扇反而不转了。
-   所以这条钉住的是「handling 是「无」时，dashboard 连碰都不碰风扇」，
-   转与不转完全交给 updateScene 按状态那一档去定。 */
-clearAll();
-selectNode('dorm-a');
-const fansIdle = scene.fans.length;
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-check('当前节点转成偏热（scene.js 里这一档本来就要转）',
-  nodes['dorm-a'].latest.status, '偏热');
-check('★ 没按过按钮的节点，dashboard 一次都没碰风扇（交给 updateScene 那一档）',
-  scene.fans.length, fansIdle);
-check('交出去的确实是「偏热」，风扇转不转由 scene.js 自己按这一档决定',
-  scene.statuses[scene.statuses.length - 1], '偏热');
-
-/* --- 偏热节点上按一下：锦上添花，不能把本来就转着的风扇按停 --- */
-
-clearAll();
-selectNode('dorm-c');
-handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 31, 60, undefined, T('20:00:00')));
-check('dorm-c 偏热（scene.js 的 LOOK 表里这一档本来就转）', nodes['dorm-c'].latest.status, '偏热');
-clickFan();
-check('★ 偏热的节点按一下照样记上处理动作', nodes['dorm-c'].handling, '处理中');
-check('★ setFanOn 传的是 true，不是 false —— 动作是叠在状态之上的，不取代它',
-  scene.fans[scene.fans.length - 1], true);
-
-/* --- 清空：四个字段一起回到「没处理过」--- */
-
-const fansBeforeClear = scene.fans.length;
-clearAll();
-check('★ 清空后三个节点的处理字段全归零',
-  ids.map((id) => [nodes[id].handling, nodes[id].action, nodes[id].actionTime,
-    nodes[id].dataAfterAction]),
-  [['无', null, null, null], ['无', null, null, null], ['无', null, null, null]]);
-check('★ 卡片上那行处理状态跟着消失', actionsOnCards(), 0);
-check('清空后 3D 收到的状态是「正常」（这一档的 LOOK 里 fan 是 false，'
-  + '风扇就此停下 —— dashboard 自己从不调 setFanOn(false)，停是 updateScene 干的）',
-  scene.statuses[scene.statuses.length - 1], '正常');
-check('★ 清空之后 dashboard 一次都没再喊「转」（上面那个「正常」才是停下来的原因）',
-  scene.fans.length, fansBeforeClear);
-check('清空后按钮回到灰的（又变成一条数据都没有）', fanBtn.disabled, true);
-check('清空后那行字也回到「还没有收到数据」',
-  fanState.textContent, '还没有收到这个节点的数据');
-
-/* ============ O2. 按下去的动作发给 core（Step D3 收尾）============ */
-console.log('\n=== O2. 按下去的动作发给 core ===');
-/* 这一段之前，页面从来不往外发东西 —— client.publish 一次都没被调过。
-   Step D3 收尾起，按那个按钮还会往 dormmate/v1/cmd 发一条 handle。
-
-   这一段里 client 是 K 段留下的 mc2。桩的 connected 默认 false，
-   所以上面 O 段那些点击走的都是「没连上」那条分支（也因此没炸）——
-   这里显式接上，才测得到真发出去的那条路。 */
-const cmdNoteEl = els['cmd-note'];
-const mcPublish = mc2;
-
-/* 发出去的指令要往 Console 打一行（排错时，除了页面上那行字就靠它）。
-   收起来一起验 —— 和上面收原始报文那个收集器同一个做法。 */
-const cmdLogged = [];
-function clickFanQuiet() {
-  console.log = (...args) => { cmdLogged.push(args); };
-  try { clickFan(); } finally { console.log = realLog; }
-}
-
-/* --- 没连上时：本地照旧，但页面上必须说清楚 core 那边没动 --- */
-
-clearAll();
-selectNode('dorm-a');
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-mcPublish.connected = false;
-mcPublish.published.length = 0;
-clickFanQuiet();
-check('★ 没连上时一条都不发（不许往一条假连接上 publish）', mcPublish.published.length, 0);
-check('★ 本地那几个字段照旧记上（发不出去不影响看板自己的显示）',
-  [nodes['dorm-a'].handling, nodes['dorm-a'].actionTime], ['处理中', '2026-09-22 20:00:00']);
-check('★ 但页面上如实说这条指令没发出去（不说的话就是「按了没反应」）',
-  cmdNoteEl.textContent.startsWith('这条指令没发出去'), true);
-check('★ 括号里那句原因是 sendHandle 真返回的那个（说明那句说明是接上的，'
-  + '不是旁边另写了一句话）',
-  cmdNoteEl.textContent.includes('还没连上 broker'), true);
-check('★ 而且说清了 core 那边的事件不会变',
-  cmdNoteEl.textContent.includes('core 那边的事件不会变'), true);
-check('发不出去时 Console 也别打「发出去了」那一行（打了就成了假证据）',
-  cmdLogged.length, 0);
-
-/* --- 连上之后：真发出去，而且发的是「事实」不是「结论」--- */
-
-mcPublish.connected = true;
-clearAll();
-selectNode('dorm-a');
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-const sentBefore = mcPublish.published.length;
-cmdLogged.length = 0;
-clickFanQuiet();
-
-check('★ 连上之后按一下正好发一条', mcPublish.published.length, sentBefore + 1);
-/* 下面这些全都读那一条发出去的东西。要是根本没发出去（比如谁把
-   sendHandle 那一行删了），这里读到的就是 undefined —— 直接往下取字段
-   会**抛异常**，那一抛后面十几条检查连带整个文件都不跑了，看到的只有
-   一个堆栈，反而不知道坏在哪。所以缺了就当空对象，让每条各自 FAIL。 */
-const cmd = mcPublish.published[mcPublish.published.length - 1] || {};
-const cmdOpts = cmd.opts || {};
-check('★ 发到约定的那一条 topic', cmd.topic, 'dormmate/v1/cmd');
-check('★ retain 必须是 false（留着的话，下次起 core 会凭空把某条事件推进处理中）',
-  cmdOpts.retain, false);
-check('qos 是 1，和遥测那条一致', cmdOpts.qos, 1);
-
-const cmdBody = cmd.payload ? JSON.parse(cmd.payload) : {};
-check('★ payload 就是 core 那边要的两件必填 + 两件可选：nodeId、action，'
-  + '外加 source 和 time',
-  Object.keys(cmdBody).sort(), ['action', 'nodeId', 'source', 'time']);
-check('★ nodeId 和 action 是 core 的第一道必填校验（少一个整条被拒）',
-  [cmdBody.nodeId, cmdBody.action], ['dorm-a', 'handle']);
-check('★ action 写的是小写 handle —— core 不做大小写折叠，'
-  + '发 Handle 会被拒（理由是明写的，不是静默忽略）',
-  [cmdBody.action, cmdBody.action === String(cmdBody.action).toLowerCase()],
-  ['handle', true]);
-check('带了来源，core 的 [指令] 那行日志里看得出这条是人按的',
-  cmdBody.source, 'dashboard');
-check('★ time 用的是**报文里的时刻**，不是浏览器当前时间（和 actionTime 同一个值）',
-  [cmdBody.time, cmdBody.time === nodes['dorm-a'].actionTime],
-  ['2026-09-22 20:00:00', true]);
-
-/* ★ 红线的界面那一半：这条消息里**没有**任何「已经好了」的说法。
-   塞了 status / state / result 这类字段，就等于前端替 core 下了结论 ——
-   core 那边是靠 handle_command 拿不到节点状态这个**结构**挡住这件事的，
-   前端这边只需要不往里塞。逐个点名，比断言「不含 RECOVERED」更严：
-   换个字段名（塞个 recovered 或 ok）照样会被这几条抓住。 */
-const suspicious = ['status', 'state', 'result', 'recovered', 'recoveredAt',
-  'ok', 'healthy', 'normal'];
-check('★ 这条指令里一个「结论」字段都没有（只发事实）',
-  suspicious.filter((k) => Object.prototype.hasOwnProperty.call(cmdBody, k)), []);
-check('★ 发出去之后页面上没有出现「已恢复」（按一下不等于结案）',
-  cmdNoteEl.textContent.includes('已恢复'), false);
-check('★ 那行说明点明了「好没好由后面收到的报文判」',
-  [cmdNoteEl.textContent.includes('好没好'),
-    cmdNoteEl.textContent.includes('后面收到的报文'),
-    cmdNoteEl.textContent.includes('不结案')],
-  [true, true, true]);
-
-/* --- 指令进 Console、不进消息日志 --- */
-
-/* 日志区的约定是「一条报文一行」，行数是排查时用来对数的。
-   发出去的指令混进去，那个数就对不上了 —— 它该待的地方是 Console
-   （和「原始报文打一行」同一个做法，K 段已经在测收到的方向）。 */
-const logCountBefore = messages.length;
-const loggedCmd = cmdLogged[0] || [];
-check('发出去的那一条也在 Console 里打了（现场排错时确认「到底发出去了没有」）',
-  [cmdLogged.length, loggedCmd[1], loggedCmd[2]],
-  [1, 'dormmate/v1/cmd', cmd.payload]);
-check('★ 但一条都不进消息日志（行数要和**收到的**报文数对得上）',
-  messages.length, logCountBefore);
-
-/* --- 那个时刻给不出来时不硬编一个 --- */
-
-/* beginHandling 在没有 latest 时返回 null，回调会直接 return，根本走不到
-   发指令那一步；这里防的是另一半：latest 在、time 却是个空串。
-   这种报文在页面这一侧过得去（字段校验只管温湿度是不是有限数），
-   但不该拿它去当指令里的 time —— core 那边 time 格式不对是**整条拒收**，
-   而「按钮按了没反应」就又是那个老问题了。 */
-mcPublish.connected = true;
-clearAll();
-selectNode('dorm-a');
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, ''));
-check('★ 报文里 time 是空串时按钮仍然可点（校验管的是温湿度，不是 time）',
-  fanBtn.disabled, false);
-const sentBeforeBlank = mcPublish.published.length;
-clickFanQuiet();
-const blankSent = mcPublish.published[mcPublish.published.length - 1] || {};
-const blankBody = blankSent.payload ? JSON.parse(blankSent.payload) : {};
-check('★ time 给不出来时就不带这个字段（不带的话 core 会自己补此刻；'
-  + '带一个空串过去会被整条拒收）',
-  [mcPublish.published.length, sentBeforeBlank + 1,
-    Object.prototype.hasOwnProperty.call(blankBody, 'time'),
-    Object.keys(blankBody).sort()],
-  [sentBeforeBlank + 1, sentBeforeBlank + 1, false, ['action', 'nodeId', 'source']]);
-
-/* --- 清空时那行说明也一起清掉 --- */
-
-mcPublish.connected = true;
-clearAll();
-selectNode('dorm-a');
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-clickFanQuiet();
-check('按完之后那行说明是有内容的（有了这一条，下面那条才测得出「清掉」）',
-  cmdNoteEl.textContent.length > 0, true);
-clearAll();
-check('★ 清空之后那行说明也空掉（它是上一次按的结果，不是现在的状态）',
-  cmdNoteEl.textContent, '');
-
-/* 这一段跑完，把状态交回给 L 段期望的样子 */
-mcPublish.connected = false;
-clearAll();
-selectNode('dorm-a');
-
-/* ============ L. 没加载 mqtt.js（现场没网的情况）============ */
-console.log('\n=== L. 没加载 mqtt.js ===');
-const els2 = {};
-['cards', 'log-body', 'log-count', 'detail-node', 'detail-meta', 'chart-note',
-  'scene3d', 'simulate', 'clear', 'chart-temp', 'chart-humidity',
-  'conn', 'conn-text', 'toggle', 'action-fan', 'action-state', 'cmd-note',
-  /* 这几个不列也能跑（getElementById 会现场造一个），但列上更贴近真页面 */
-  'event-body', 'event-count', 'export-events', 'focus', 'speak', 'speak-note',
-  /* ML 那三件同理。R 段要在这一段里读它降级之后写了什么 */
-  'ml-count', 'ml-text', 'ml-note']
-  .forEach((id) => { els2[id] = makeEl(id); });
-/* 这一段故意**不**补 Blob / URL / setTimeout：导出按钮在这里不会被点，
-   而「缺依赖时页面照样起得来」正是这一段要验的 —— 补得越全，
-   越测不出真缺东西时会不会崩。 */
-
-const doc2 = {
-  documentElement: makeEl('html'),
-  getElementById: (id) => els2[id] || makeEl(id),
-  querySelector: () => makeEl('x'),
-  querySelectorAll: () => [],
-  addEventListener() {},
-};
-
-const ctx2 = {
-  document: doc2,
-  Chart: ChartStub,
-  /* 这里的 fetch 是**故意**让它失败的：这个上下文模拟的是「现场什么依赖都缺」，
-     离线时浏览器的 fetch 就是这个反应（fetch 本身在，请求发不出去）。
-     不能不给：不给的话 dashboard.js 一开头的 loadMlResult() 会抛
-     ReferenceError，那这一段测的就成了「少给一个桩会怎样」，
-     而不是「什么都缺时页面还能不能起来」。 */
-  fetch: () => Promise.reject(new Error('Failed to fetch')),
-  /* 这里故意让 3D 建不起来（模拟这台设备没有 WebGL）：
-     和 mqtt 那条一起，凑成「两个依赖同时缺」的最坏情况 ——
-     页面照样得起来。initScene3D 的 try/catch 就是为这个写的。 */
-  createDorm3D: () => { throw new Error('这台设备没有可用的 WebGL'); },
-  location: { hostname: 'localhost' },
-  /* 故意不给 mqtt —— 模拟 vendor/mqtt.min.js 没下载到 */
-  getComputedStyle: () => ({ getPropertyValue: () => '' }),
-  /* 这一段故意**不**给 speechSynthesis：和 mqtt、WebGL 一起，
-     凑成「三个依赖同时缺」。speakAlert 只在点按钮时才走那条分支，
-     页面起来这一步碰不到它 —— 但「缺东西时页面照样起得来」正是这一段要验的。 */
-  window: { matchMedia: () => ({ matches: false, addEventListener() {} }) },
-  /* 只把 error 静音：initScene3D 捕到异常后会 console.error 一行，
-     那是**预期行为**，不是测试失败。log 留着，方便排查。 */
-  console: { log: console.log, warn: console.warn, error: () => {} },
-  JSON, Math, Date, Number, Object, Array, String, Set, isNaN, parseInt,
-};
-ctx2.globalThis = ctx2;
-ctx2.window.document = doc2;
-
-let src2 = dashText;
-src2 = src2.replace(SCENE_IMPORT, '/* import 已摘除，理由同上 */\n');
-src2 = src2.replace(LOGIC_IMPORT, '/* import 已摘除：下面跑的是真的 logic.js */\n');
-src2 += ';globalThis.__simulate = simulate;\nglobalThis.__renderScene = renderScene;\n'
-  + 'globalThis.__renderFocus = renderFocus;\nglobalThis.__speakAlert = speakAlert;\n';
-
-vm.createContext(ctx2);
-vm.runInContext(fs.readFileSync(RULES_SRC, 'utf8'), ctx2);
-/* 这里也得喂真的 logic.js：simulate() 会走到 renderFocus，
-   没有它的话这一段测的就不是「没网时页面能不能起来」，
-   而是「pickPriority is not defined」—— 一个跟本节无关的错。 */
-vm.runInContext(fs.readFileSync(LOGIC_SRC, 'utf8').replace(/^export\s+/gm, ''),
-  ctx2, { filename: LOGIC_SRC });
-vm.runInContext(src2, ctx2, { filename: DASH_SRC });
-
-check('没有 mqtt 也不抛异常，页面照常起来', typeof ctx2.judgeStatus, 'function');
-check('状态显示「未加载 mqtt.js」', els2['conn-text'].textContent, '未加载 mqtt.js');
-check('日志写明了缺哪个文件（是 lib/ 那份，不是 web/vendor）',
-  els2['log-body'].innerHTML.includes('dashboard/lib/mqtt.min.js'), true);
-/* 关键的降级行为：连不上 Broker 也得能演示界面 */
-ctx2.__simulate();
-check('没有 Broker 时「模拟三节点数据」照样能用', els2['cards'].innerHTML.includes('dorm-a'), true);
-check('三张卡都出来了', ['dorm-a', 'dorm-b', 'dorm-c'].every(
-  (id) => els2['cards'].innerHTML.includes(id)), true);
-
-/* 3D 建不起来（没有 WebGL）时，dorm3d 是 null。renderScene 头一行就得跳过，
-   而不是去调 null.updateScene。 */
-ctx2.__renderScene();
-check('★ 没有 WebGL 时 renderScene 直接跳过，不抛异常', true, true);
-check('3D 建不起来不影响数据照常进（卡片还是三张）', els2['cards'].innerHTML.includes('dorm-c'), true);
-
-/* 「当前重点」不依赖任何外部东西（3D 和 mqtt 都缺着，它照样得算出来）——
-   它是三个模块里唯一一个纯计算，没网没显卡的时候正好靠它撑住现场演示。 */
-check('★ 没网没显卡时「当前重点」照样算得出来（挑出异常的那个节点）',
-  els2.focus.innerHTML.includes('当前重点')
-  && els2.focus.innerHTML.includes('dorm-b'), true);
-/* 语音也缺着，但按钮点下去不能抛未捕获异常 —— 它得把那句话写出来。
-   （这一段没给 window.speechSynthesis，走的正是「不支持」那条分支。） */
-ctx2.__speakAlert();
-check('★ 没网没显卡、浏览器也不支持语音时，点下去仍然只是写一行字，不抛异常',
-  els2['speak-note'].textContent.includes('不支持语音合成'), true);
-
-/* ============ P. 事件记录与导出（Step 7-4）============ */
-console.log('\n=== P. 事件记录与导出 ===');
-
-const evBody = () => els['event-body'].innerHTML;
-const exportBtn = els['export-events'];
-/* 走页面真正注册在 #export-events 上的那个回调，不直接调 exportEventsCSV ——
-   回调要是挂错了元素，这里就该红。 */
-const clickExport = () => exportBtn._handlers.click.forEach((fn) => fn());
-/* 表里画了几行数据。不能数 <tr>：一条事件都没有时渲染的是一行
-   「还没有事件」的提示，它也是 <tr>。数结果胶囊最稳 ——
-   空状态一个都没有，每条数据正好一个。
-   要连 class=" 一起写：只写 ev-result 的话，同一个 span 上的
-   ev-result--open / ev-result--done 也会被数进去，一行变两行。 */
-const evRowCount = () => (evBody().match(/<span class="ev-result/g) || []).length;
-/* 按节点找事件。events 是「新的在前」（unshift），所以同节点有多条时
-   拿到的是**最新**那条 —— P 段里需要旧那条时会直接写 events[i]。 */
-const evOf = (id) => events.find((e) => e.nodeId === id);
-
-/* --- 接线本身 --- */
-
-check('index.html 里有 #event-body 那张表', dashHtml.includes('id="event-body"'), true);
-check('index.html 里有 #event-count', dashHtml.includes('id="event-count"'), true);
-check('index.html 里有 #export-events 按钮', dashHtml.includes('id="export-events"'), true);
-check('按钮的文案就是「导出事件 CSV」', dashHtml.includes('导出事件 CSV'), true);
-
-const EV_TH = ['开始', '节点', '问题', '优先关注', '处理动作', '恢复', '结果'];
-const thPos = EV_TH.map((t) => dashHtml.indexOf('<th>' + t + '</th>'));
-check('★ 表头七列全在', thPos.every((p) => p > 0), true);
-check('★ 而且顺序固定（列序换了这里就红 —— 导出 CSV 的列序跟它一一对应）',
-  thPos.every((p, i) => i === 0 || p > thPos[i - 1]), true);
-
-/* --- 启动那一刻（一条数据都没有）--- */
-
-check('★ 启动时就把这块画好了（不是等第一条消息才出现）',
-  EVENTS_AT_LOAD.body.includes('还没有事件'), true);
-check('★ 启动时条数是空的，不写「共 0 条」',
-  EVENTS_AT_LOAD.count, '');
-/* 没东西可导的时候把按钮按掉，而不是让人点了弹一个只有表头的空 CSV ——
-   拿到的人会以为导出坏了。 */
-check('★ 启动时导出按钮是灰的', EVENTS_AT_LOAD.disabled, true);
-check('★ 跑在页面上的 buildEventsCSV 就是 dashboard.js 里那个',
-  typeof buildEventsCSV, 'function');
-
-/* --- 开案：正常 -> 异常 --- */
-
-clearAll();
-check('清空之后一条事件都没有', events.length, 0);
-check('清空之后按钮又变灰', exportBtn.disabled, true);
-check('清空之后表里写的是「还没有事件」', evBody().includes('还没有事件'), true);
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
-check('★ 节点从正常变成异常：开出一条事件', events.length, 1);
-const ev0 = events[0];
-check('★ 起点就是这条消息的 time', ev0.startTime, T('20:30:00'));
-check('★ problem 记的是开始那一刻的状态', ev0.problem, '连续偏热');
-check('nodeId 是它自己的', ev0.nodeId, 'dorm-b');
-/* ★ 这一条是整段实现的地基：events 里存的是**对象本身**，不是深拷贝。
-   整个换掉 node.event 的话，总表里那条会永远停在旧值上 ——
-   页面上一点异常都看不出来，只有导出的 CSV 是空的。 */
-check('★ 节点上那个引用和 events 里那条是**同一个对象**（不是各存一份副本）',
-  nodes['dorm-b'].event === ev0, true);
-check('刚开案时还没结案', [ev0.recoverTime, ev0.result], [null, '']);
-check('★ 表里多了一行', evRowCount(), 1);
-check('★ 那一行写着节点、问题和「进行中」',
-  [evBody().includes('dorm-b'), evBody().includes('连续偏热'),
-    evBody().includes('进行中')], [true, true, true]);
-check('条数写出来了', els['event-count'].textContent, '共 1 条');
-check('★ 有事件之后按钮能点了', exportBtn.disabled, false);
-
-/* 第一次被选为「优先关注」就记上那一刻 —— 这时候它是唯一的异常节点 */
-check('★ 第一次被选中，就把那一刻记上了', ev0.priorityTime, T('20:30:00'));
-/* 记下的原因和「谁是重点」那套算法现算的是**同一句**。
-   要在刚记下的这一刻比 —— 后面它还会变，而事件上那句已经冻住了。
-
-   8-3 之后这句原因不再贴到页面上（顶上只剩那一行，细节给了 report.html），
-   所以断言的对象从 DOM 换成了 pickPriority。盯的东西没变：
-   「为什么是它」全项目只有一处拼得出来，事件里记的就是那一处。 */
-check('★ 记下的原因和 pickPriority 现算的那句一字不差',
-  ev0.priorityReason, pickPriority(nodes).reason);
-check('而且这句原因不会出现在顶部那一行里（分工：那一行只管「是它」）',
-  [els.focus.innerHTML.includes(ev0.priorityReason),
-    ev0.priorityReason.length > 0], [false, true]);
-
-/* --- 段内继续异常：不另开一条 --- */
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 33, 55, undefined, T('20:33:00')));
-check('★ 段内又来一条异常：不另开一条', events.length, 1);
-check('★ 起点不动（每次刷新起点的话，时长永远停在「不到 1 分钟」）',
-  events[0].startTime, T('20:30:00'));
-check('★ 表里还是那一行（每收一条加一行的话这里会变成 2）', evRowCount(), 1);
-check('★ 之后又被选中也不覆盖（复盘要的是第一次被注意到的时刻）',
-  events[0].priorityTime, T('20:30:00'));
-
-/* 段里状态变了仍然是同一段、同一条 —— 和 7-1「统计的是连续异常、
-   不是连续偏热」是同一个口径 */
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:36:00')));
-check('★ 段里从偏热变成偏湿：还是同一条事件', events.length, 1);
-check('★ problem 保持开案时的「连续偏热」（它是这条事件的名字，不跟着改）',
-  events[0].problem, '连续偏热');
-
-/* --- ★ 被记上的是胜出者**自己**的时刻，不是触发那一轮的报文时刻 ---
-
-   构造一个「触发者是 A、胜出者是 B」的局面：
-     dorm-a 20:00 起连续偏热，20 分钟，一直占着优先关注
-     dorm-b 20:05 起也偏热，但只有 0 分钟，一直被 dorm-a 压着 —— 没被选中过
-     dorm-a 20:30 恢复正常，这一轮触发的是 **dorm-a 的报文**，
-       但胜出的是 dorm-b
-   dorm-b 是这一刻才第一次被选中的，记的必须是它**自己**最新那条的 20:05。
-   写成 record.time 的话，这里会看到 20:30 —— 那是别人的时间。 */
-clearAll();
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:05:00')));
-check('这时胜出的还是 dorm-a（20 分钟 > 0 分钟）', pickPriority(nodes).nodeId, 'dorm-a');
-check('★ dorm-b 还没被选中过，所以还没记时刻', evOf('dorm-b').priorityTime, null);
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:30:00')));
-check('★ dorm-a 恢复之后轮到 dorm-b 上位', pickPriority(nodes).nodeId, 'dorm-b');
-check('★ 记的是 dorm-b **自己**最新那条的 20:05，不是这条触发报文的 20:30',
-  evOf('dorm-b').priorityTime, T('20:05:00'));
-check('★ 而且 dorm-b 自己的那条事件还在（恢复的是 dorm-a，不该动它）',
-  [evOf('dorm-b').recoverTime, evOf('dorm-b').result], [null, '']);
-
-/* --- 处理动作：也只记第一次 --- */
-
-selectNode('dorm-b');
-clickFan();
-check('★ 按一下风扇：动作写进了那条事件', evOf('dorm-b').action, '风扇已开启');
-check('★ 动作时间取的是该节点最新那条的 time', evOf('dorm-b').actionTime, T('20:05:00'));
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 32, 60, undefined, T('20:10:00')));
-clickFan();
-check('★ 再按一次不覆盖（复盘看的是第一次动手是什么时候、做了什么）',
-  evOf('dorm-b').actionTime, T('20:05:00'));
-
-/* --- 结案：来了正常数据 --- */
-
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
-check('★ 恢复正常之后没有要优先的了', pickPriority(nodes), null);
-check('★ 写上了恢复时刻', evOf('dorm-b').recoverTime, T('20:55:00'));
-check('★ result 变成「已恢复」', evOf('dorm-b').result, '已恢复');
-check('★ 节点上那个引用摘掉了（这个节点没有「当前这段」了）',
-  nodes['dorm-b'].event, null);
-check('★ 但事件还在表里 —— 结案是留档，不是删除', evOf('dorm-b') !== undefined, true);
-check('★ 表里那行写着「已恢复」', evBody().includes('已恢复'), true);
-check('★ 行数没变（结案不加行也不减行）', evRowCount(), 2);
-
-/* 恢复之后再异常，开的是**新的一条** —— 旧的那条已经结案了，不能被翻出来改。
-   先把旧那条抓在手里：下面 unshift 进来一条新的之后，evOf('dorm-b')
-   拿到的就是新的那条了，旧的就再也点不到。 */
-const oldB = evOf('dorm-b');
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('21:00:00')));
-check('★ 恢复之后又异常：开的是新的一条', events.length, 3);
-check('★ 新那条的起点是 21:00，不是被改回去的 20:05',
-  [events[0].nodeId, events[0].startTime, events[0].result],
-  ['dorm-b', T('21:00:00'), '']);
-check('★ evOf 现在拿到的是新那条（同一个节点两条事件，认最新）',
-  evOf('dorm-b') === events[0], true);
-check('★ 旧那条一个字段都没被动过',
-  [oldB.startTime, oldB.recoverTime, oldB.result],
-  [T('20:05:00'), T('20:55:00'), '已恢复']);
-/* 新那条还没结案，也没被旧那条的状态污染 */
-check('★ 新那条是干净的：没恢复、没动作、没被优先关注过',
-  [evOf('dorm-b').recoverTime, evOf('dorm-b').action, evOf('dorm-b').priorityTime],
-  [null, null, T('21:00:00')]);
-
-/* --- 每个节点各记各的 --- */
-
-handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 25, 80, undefined, T('21:05:00')));
-check('★ 三个节点各有一条，互不串线',
-  ids.map((id) => {
-    const e = evOf(id);
-    return e ? e.nodeId : null;
-  }), ['dorm-a', 'dorm-b', 'dorm-c']);
-/* dorm-a 早在 20:30 就恢复正常、那条已经结案了。后面这一串 dorm-b / dorm-c
-   的消息一条都不该动到它 —— 起点和恢复时刻都还是它自己那两个。 */
-check('★ dorm-a 那条的起点和恢复时刻都还是它自己的（后面的消息没改到它）',
-  [evOf('dorm-a').startTime, evOf('dorm-a').recoverTime],
-  [T('20:00:00'), T('20:30:00')]);
-check('★ dorm-a 那条是「已恢复」，dorm-c 那条还在进行中',
-  [evOf('dorm-a').result, evOf('dorm-c').result], ['已恢复', '']);
-
-/* --- 清空 --- */
-
-clearAll();
-check('★ 清空把事件也一起清了（不清的话卡片写着「等待数据」，下面还列着上一轮的账）',
-  events.length, 0);
-check('清空后表里回到「还没有事件」', evBody().includes('还没有事件'), true);
-check('清空后条数也清空', els['event-count'].textContent, '');
-check('清空后按钮又灰了', exportBtn.disabled, true);
-check('★ 清空后节点上没留下指向总表的野引用',
-  ids.map((id) => nodes[id].event), [null, null, null]);
-/* clearAll 是 events.length = 0（就地清空），不是 events = [] ——
-   整个换掉的话，下面这个引用就指向一个已经被丢弃的数组了 */
-check('★ 清空是就地清空：拿到的还是同一个数组对象',
-  Array.isArray(events) && events.length === 0, true);
-
-/* --- CSV 字节 --- */
-
-clearAll();
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
-selectNode('dorm-b');
-clickFan();
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
-handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 25, 80, undefined, T('21:00:00')));
-
-const csv = buildEventsCSV();
-const csvLines = csv.split('\r\n');
-
-check('★ 表头就是那九列，顺序固定',
-  csvLines[0],
-  'nodeId,startTime,problem,priorityTime,priorityReason,action,actionTime,recoverTime,result');
-check('★ 每条事件一行（两条 = 两行数据 + 一行表头）', csvLines.length, 4);
-check('★ 行序和表里看到的一致（最新在前）',
-  [csvLines[1].startsWith('dorm-c,'), csvLines[2].startsWith('dorm-b,')], [true, true]);
-
-/* 换行：CRLF，而且每个 \n 前面都得有 \r */
-check('★ 换行是 CRLF（Excel / WPS 对 LF 的兼容性不如 CRLF）',
-  /\n/.test(csv) && !/[^\r]\n/.test(csv), true);
-check('★ 末尾也有一个 CRLF（不是 \r\n\r\n，就一个）',
-  [csv.endsWith('\r\n'), csv.endsWith('\r\n\r\n')], [true, false]);
-
-/* 还没发生的格子要写成**空**。String(null) 会写成四个字母的 "null"：
-   Excel 里看着像真存了一个叫 null 的值，Python 那边也判不出「这条还没结束」。 */
-check('★ 整份 CSV 里一个 "null" 都没有', csv.includes('null'), false);
-check('★ 没结案那条：动作 / 恢复 / 结果三处都是空',
-  csvLines[1].endsWith(',,,,'), true);
-
-/* 结了案那条：动作、恢复、结果都写上了 */
-check('★ 已结案那条：动作、动作时间、恢复时刻、结果四处齐全',
-  csvLines[2].endsWith(',风扇已开启,2026-09-22 20:30:00,2026-09-22 20:55:00,已恢复'), true);
-check('★ problem 那一列写的是「连续偏湿」', csvLines[1].includes(',连续偏湿,'), true);
-
-/* 转义（RFC 4180）：字段里有半角逗号或双引号时要包起来、内部的引号写成两个。
-   真跑起来这两样都不会出现（原因里用的是全角「，」，不触发转义），
-   但这份文件是要喂给 analysis.py 的，格式错一点那边就解析歪了。 */
-events.unshift({
-  nodeId: 'dorm-z', startTime: T('22:00:00'), problem: '连续偏热,带逗号',
-  priorityTime: null, priorityReason: '他说"先看这个"',
-  action: null, actionTime: null, recoverTime: null, result: '',
-});
-const csvQuoted = buildEventsCSV();
-check('★ 含半角逗号的字段被双引号包起来',
-  csvQuoted.includes('"连续偏热,带逗号"'), true);
-check('★ 字段里的双引号写成两个',
-  csvQuoted.includes('"他说""先看这个"""'), true);
-events.shift();
-
-/* --- 点一下导出按钮 --- */
-
-const nBlobs = blobs.length;
-const nAnchors = clickedAnchors.length;
-const nAppended = appendedNodes.length;
-const nRemoved = removedNodes.length;
-const nTimers = timers.length;
-
-clickExport();
-
-check('★ 点一下造了一个 Blob', blobs.length, nBlobs + 1);
-const made = blobs[blobs.length - 1];
-check('★ MIME 是 text/csv;charset=utf-8', made.type, 'text/csv;charset=utf-8');
-/* ★ BOM 必须在最前面。少了它 Excel/WPS 会按本地代码页解析，
-   problem 和 result 里的中文就是乱码 —— 这正是当初定「带 UTF-8 BOM」的原因。 */
-check('★ 内容第一个字符就是 UTF-8 BOM (U+FEFF)', made.text.charCodeAt(0), 0xFEFF);
-check('★ BOM 之后就是 buildEventsCSV 拼出来的那份',
-  made.text.slice(1), buildEventsCSV());
-
-const anchor = clickedAnchors[clickedAnchors.length - 1];
-check('★ 造了一个 <a>', clickedAnchors.length, nAnchors + 1);
-check('★ 它是链接、下载名是 events.csv',
-  [anchor.tag, anchor.download], ['a', 'events.csv']);
-check('★ href 指向那个 object URL', anchor.href, objectUrls[objectUrls.length - 1].url);
-/* 先插进文档再点：Firefox 里不插进文档的 <a> 点了没反应 */
-check('★ 先插进 body 再点', appendedNodes.length, nAppended + 1);
-check('★ 点完把 <a> 摘掉，不留垃圾节点',
-  [removedNodes.length === nRemoved + 1, removedNodes[removedNodes.length - 1] === anchor],
+  .replace(/^\s*\/\/.*$/gm, '');
+
+/* 阈值的查法不是「文件里不许出现 18 / 30 / 75」—— 那个写法会撞上两处
+   跟判断毫无关系的数字：太阳图标的 SVG 路径里有一串小数（含 10.18），
+   还有连 broker 用的 keepalive: 30。把它们一条条剔掉要写一堆正则，
+   而真正想拦的东西很集中：**读数和数字之间的比较**。下面这两条盯的就是这个位置。 */
+const THRESHOLD_CMP =
+  /(?:<|>|<=|>=|===|==|!==|!=)\s*(?:18|30|75)\b|\b(?:18|30|75)\s*[<>]/;
+check('★★ dashboard.js 里没有读数阈值（18 / 30 / 75 不参与任何比较）',
+  THRESHOLD_CMP.test(dashCode), false);
+check('★★ 湿度那个 75 干脆整份源码里都没出现', /\b75\b/.test(dashCode), false);
+
+/* 这几个状态名在这个文件里**只允许出现在那张渲染表里** —— STATUS_VIEW 干的
+   是「偏冷 -> 一个颜色、一个图标」，那是画，不是判。把那张表摘掉之后这些词
+   还出现，就说明判断溜回来了。 */
+const noStyleMap = dashCode.replace(/const STATUS_VIEW = \{[\s\S]*?\n\};/, '');
+check('★★ 状态名只出现在渲染表里，别处一个都没有（状态只从快照里读）',
+  /偏冷|偏热|偏湿/.test(noStyleMap), false);
+check('★★ 不再引 shared/rules.js（页面不再复核状态）',
+  dashText.indexOf('rules.js'), -1);
+check('★★ 源码里不出现 judgeStatus', dashCode.indexOf('judgeStatus'), -1);
+check('★★ 不出现 telemetry（它不订遥测了）',
+  dashCode.indexOf('telemetry'), -1);
+check('★★ topic 和地址都从 CFG 里取（没有第二份写死的）',
+  dashCode.indexOf('9001'), -1);
+check('★ 来源标记是 dashboard（core 的日志里分得清是谁按的）',
+  dashCode.indexOf("SOURCE_DASHBOARD = 'dashboard'") > 0, true);
+
+/* ---------- P. index.html ---------- */
+
+console.log('\n=== P. index.html ===');
+
+const html = fs.readFileSync(path.join(ROOT, 'dashboard', 'index.html'), 'utf8');
+/* 这个页面的注释写得很密，而且**注释里会引原文**（比如「以前这里写的是
+   <script src="../shared/rules.js">」）。凡是查「这一页引了什么」的断言，
+   都得先把注释摘掉再查，不然拦下来的是自己写的那句说明。 */
+const htmlNoComments = html.replace(/<!--[\s\S]*?-->/g, '');
+check('★★ 引了 shared/config.js（三个前端共用那一份）',
+  htmlNoComments.indexOf('src="../shared/config.js"') > 0, true);
+/* 查的是**标签**而不是那几个字：文件里有好几处注释在解释「以前这里引的是
+   shared/rules.js，现在不引了」，直接搜字符串会撞上那些说明。 */
+check('★★ 不再引 shared/rules.js', /<script[^>]*shared\/rules\.js/.test(htmlNoComments), false);
+check('★★ 「模拟三节点数据」那个按钮已经删掉了（E3 禁止自己造数据伪造同步）',
+  html.indexOf('simulate'), -1);
+check('★ 按钮叫「开始处理」，id 是 action-handle',
+  /id="action-handle"[^>]*>开始处理</.test(html), true);
+check('★ 有被拒绝消息那块面板的容器',
+  [html.indexOf('id="reject-body"') > 0, html.indexOf('id="reject-count"') > 0],
   [true, true]);
-/* 不能点完立刻 revoke：部分浏览器会在下载真正开始前就把 blob 释放掉，
-   表现为「点了没反应」。所以是隔一会儿再回收。 */
-check('★ objectURL 是延迟 1000ms 回收的，不是点完立刻 revoke',
-  [timers.length, timers[timers.length - 1].ms, revokedUrls.length],
-  [nTimers + 1, 1000, 0]);
-timers[timers.length - 1].fn();
-check('★ 到点了才 revoke，revoke 的就是那个 URL', revokedUrls, [anchor.href]);
-
-/* 一条事件都没有时按钮是 disabled 的。真浏览器里点灰按钮不会触发回调，
-   所以这里不模拟「点了会怎样」—— 上面 EVENTS_AT_LOAD 那条断言盯的就是它。 */
-
-/* ============ Q. 语音提醒（Step 8-3）============ */
-console.log('\n=== Q. 语音提醒 ===');
-
-/* 这是四个出口里唯一一个「说给人听」的，约束也来自那里：声音是线性的，
-   说过就过去了，没人能回头翻 —— 所以**只念一句**，而且每次都现算。
-   念的那句话由 logic.js 的 buildAlert 拼（那边有单独的词句测试），
-   这一段盯的是页面这一侧：点一下到底做了什么、按什么顺序做、失败了怎么办。 */
-const speakBtn = els.speak;
-/* 走页面真正注册在 #speak 上的那个回调，不直接调 speakAlert ——
-   回调要是挂错了元素，这里就该红。 */
-const clickSpeak = () => speakBtn._handlers.click.forEach((fn) => fn());
-const noteText = () => els['speak-note'].textContent;
-const lastSpoken = () => spoken[spoken.length - 1];
-
-/* --- 接线本身 --- */
-
-check('index.html 里有 #speak 按钮', dashHtml.includes('id="speak"'), true);
-check('index.html 里有 #speak-note（念了哪一句写在这儿）',
-  dashHtml.includes('id="speak-note"'), true);
-check('★ 按钮上就挂着 speakAlert 这一个回调', speakBtn._handlers.click.length, 1);
-/* 按钮下面那行说明是**唯一**能确认「它到底念了什么」的地方 ——
-   静音、没音箱、声音太小的时候，声音这条出口整个是空白的。
-   它是一行说明，不是第二个按钮：写成按钮的话，看的人会以为按它能重念。 */
-check('★ 那行说明在页面上是个 <p>', /<p[^>]*id="speak-note"/.test(dashHtml), true);
-check('★ 它是 textContent 贴上去的（那句话里夹着节点名，不走 innerHTML）',
-  els['speak-note'].innerHTML, '');
-
-/* --- 念的是「当前最重要的那一句」 --- */
-
-clearAll();
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
-check('（此刻重点是 dorm-b：段从 20:00 起，10 分钟）',
-  pickPriority(nodes).nodeId, 'dorm-b');
-
-const cancelledBefore = speechStub.cancelled;
-const spokenBefore = spoken.length;
-clickSpeak();
-
-check('★ 点一下只念**一句**（不是把三个宿舍从头到尾念一遍）',
-  spoken.length - spokenBefore, 1);
-check('★ 念的就是 buildAlert 现算的那一句，逐字对得上',
-  lastSpoken().text, 'dorm-b 偏热已持续 10 分钟，温度持平。');
-check('★ 念的这句开头就是 pickPriority 挑出来的那个宿舍',
-  lastSpoken().text.indexOf(pickPriority(nodes).nodeId), 0);
-check('★ 交给 speak 的就是造出来的那个 utterance（不是造一个念另一个）',
-  speechStub.uttered[speechStub.uttered.length - 1] === lastSpoken(), true);
-/* 顺序是刻意的：不先 cancel 的话，连点两次第二句会老老实实排在队列里
-   等第一句念完（好几秒）才开口 —— 而那时候念的是按下按钮那一刻算出来的话。 */
-check('★ 先 cancel 再 speak（不然连点两次，第二句要排队等第一句念完）',
-  [speechStub.cancelled - cancelledBefore, speechLog.slice(-2)],
-  [1, ['cancel', 'speak']]);
-check('★ lang 设成了 zh-CN（不设的话按系统语言挑嗓音，中文会被念成字母）',
-  lastSpoken().lang, 'zh-CN');
-check('★ 念了哪一句写在那行说明里（静音时唯一能确认它念了什么的地方）',
-  noteText(), '正在朗读：' + lastSpoken().text);
-
-/* --- 处理状态也念出来 --- */
-
-selectNode('dorm-b');
-els['action-fan']._handlers.click.forEach((fn) => fn());
-clickSpeak();
-/* handlingNote() 是全项目唯一拼得出「风扇已开启，处理中」的地方，
-   7-1 那条栏、B2 依据、这一句读的都是它。 */
-check('★ 按过风扇之后念的那句带上「（风扇已开启，处理中）」',
-  lastSpoken().text.includes('（风扇已开启，处理中）'), true);
-check('而且念的是 dorm-b（重点没换人）',
-  lastSpoken().text.indexOf('dorm-b'), 0);
-
-/* --- ★ 每次都现算，一个字都不缓存 --- */
-
-/* 念一句旧的比不念更糟：听的人以为现在还是那样。 */
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 15, 60, undefined, T('20:30:00')));
-check('这时重点已经换人了（dorm-a 的段 30 分钟，比 dorm-b 的 10 分钟长）',
-  pickPriority(nodes).nodeId, 'dorm-a');
-check('上一句确实说的是别人（不然下面那条可能只是恰好相等）',
-  lastSpoken().text.includes('dorm-b'), true);
-
-clickSpeak();
-check('★ 数据变了：再点一次念的是新算的那句，不是上一次那句',
-  lastSpoken().text, 'dorm-a 偏冷已持续 30 分钟，温度正在下降。');
-check('趋势也跟着念出来了（不是每次都念同一套词）',
-  lastSpoken().text.includes('温度正在下降'), true);
-
-/* --- 没有重点可念的时候，念的也得是实话 --- */
-
-clearAll();
-clickSpeak();
-check('★ 一条数据都没有：念的是「还没有收到数据」，不是「都正常」',
-  lastSpoken().text, '还没有收到任何节点的数据。');
-/* 再点一次也得重算，不能因为「上一次算过了」就跳过 cancel/speak */
-const cancelledIdle = speechStub.cancelled;
-clickSpeak();
-check('平静时照样每次都真的念（不是「没重点就什么都不做」）',
-  [spoken.length > 0, speechStub.cancelled - cancelledIdle], [true, 1]);
-
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
-clickSpeak();
-check('★ 三个都正常：念的是「都正常」，句号收尾',
-  lastSpoken().text, '当前 3 个宿舍都正常。');
-
-/* --- 浏览器不支持语音合成 --- */
-
-/* 两个都要查：Chrome 上 speechSynthesis 一直在，缺的是 SpeechSynthesisUtterance
-   那个构造函数。少查一个的话，点一下就是一条未捕获的 TypeError ——
-   按钮看着能用，按下去什么也没有。 */
-const savedSynth = speechStub;
-const savedCtor = context.window.SpeechSynthesisUtterance;
-const spokenBeforeUnsupported = spoken.length;
-
-context.window.speechSynthesis = undefined;
-clickSpeak();
-check('★ 不支持时一个 utterance 都不造（不是造出来再失败）',
-  spoken.length, spokenBeforeUnsupported);
-check('★ 不支持时把那句话写出来，而不是静悄悄地什么都不做',
-  [noteText().includes('不支持语音合成'), noteText().includes('要念的是：')], [true, true]);
-check('说明里带着本来要念的那句（不然还是不知道它想说什么）',
-  noteText().includes(buildAlert(nodes)), true);
-
-/* 只缺构造函数这一半 —— 单独再走一遍，因为两个条件是分开写的 */
-context.window.speechSynthesis = savedSynth;
-context.window.SpeechSynthesisUtterance = undefined;
-clickSpeak();
-check('★ 只缺 SpeechSynthesisUtterance 也算不支持（它是构造函数，typeof 不是 function）',
-  spoken.length, spokenBeforeUnsupported);
-context.window.SpeechSynthesisUtterance = savedCtor;
-
-/* --- 朗读失败：原始错误码要写出来 --- */
-
-clickSpeak();
-const failedUtterance = lastSpoken();
-check('★ 挂上了 onerror（不挂的话朗读失败是静悄悄的，那行说明会一直写着「正在朗读」）',
-  typeof failedUtterance.onerror, 'function');
-failedUtterance.onerror({ error: 'not-allowed' });
-/* 原始错误码写在最前面 —— 解释文案可能对不上，错误码不会骗人
-   （和 3-2 那张 VOICE_ERRORS 表同一条原则）。 */
-check('★ 失败时把原始错误码写在那行说明里',
-  [noteText().includes('朗读失败'), noteText().includes('not-allowed')], [true, true]);
-check('也把本来要念的那句带上', noteText().includes(failedUtterance.text), true);
-failedUtterance.onerror(null);
-check('连事件对象都没有时退回 unknown，不崩', noteText().includes('unknown'), true);
-
-/* --- 清空之后那行说明也要清掉 --- */
-
-clickSpeak();
-check('念过之后那行说明里有字', noteText().length > 0, true);
-clearAll();
-/* 那行字是「上一次念的内容」。清空之后它一直挂在那儿，看着像是刚刚念过 ——
-   而那时要念的那句已经变回「还没有收到任何节点的数据」了。 */
-check('★ 清空之后那行说明也清了', noteText(), '');
-check('清空之后顶部那一行也回到了起点',
-  els.focus.innerHTML.includes('还没有收到任何节点的数据'), true);
-
-/* --- 语音和顶部那一行必须指向同一个人 --- */
-
-/* 这是这一步最容易出的错：两个出口各拼一份，页面上那一行说的是 dorm-b、
-   语音念的是 dorm-c。逻辑上防它的办法是「两边都从 pickPriority 出发」，
-   这里从页面上再验一次。 */
-clearAll();
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
-handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:05:00')));
-
-const pickNow = pickPriority(nodes);
-clickSpeak();
-check('★ 顶部那一行里就是 buildFocus 那句话（页面不自己另拼一份）',
-  els.focus.innerHTML.includes(buildFocus(nodes)), true);
-check('★ 语音念的就是 buildAlert 那句话',
-  lastSpoken().text, buildAlert(nodes));
-check('★ 两个出口说的是同一个宿舍',
-  [buildFocus(nodes).indexOf(pickNow.nodeId), lastSpoken().text.indexOf(pickNow.nodeId)],
-  [0, 0]);
-check('（这时重点确实是 dorm-b：它 10 分钟，dorm-a 只有 0 分钟）',
-  pickNow.nodeId, 'dorm-b');
-
-/* --- 直接调 speakAlert 也走同一条路（上一段里点按钮走的就是它）--- */
-
-const spokenBeforeDirect = spoken.length;
-speakAlert();
-check('★ 直接调 speakAlert 和点按钮效果一样（就一个实现，没有第二条路）',
-  [spoken.length - spokenBeforeDirect, lastSpoken().text], [1, buildAlert(nodes)]);
-
-const lineIdem = els.focus.innerHTML;
-renderFocus();
-check('★ 数据没变时重画那一行，内容一字不差（幂等）',
-  els.focus.innerHTML, lineIdem);
-
-clearAll();
-check('★ 清空之后顶部那一行回到起点，不留上一次的账',
-  els.focus.innerHTML.includes('还没有收到任何节点的数据'), true);
-
-/* ============ R. ML 辅助判断（Step 9-3 的进阶项）============
-   这一段和上面每一段都不同：它的数据不来自 MQTT，而是页面自己去 fetch
-   一份**静态文件**（analysis/analysis.py 上一次跑完写的 report/ml_result.json）。
-   要验的有三件：
-
-     1) 打开页面就去读，而且只读一次
-     2) 读回来了 —— 摆的就是文件里那句结论，不是页面另写的一份
-     3) 读不到（404 / 服务器没起 / 回来不是 JSON / 文件不是那个文件）
-        都得降级成一行**说清原因**的字，不能空着、不能把页面拖垮
-
-   第 3 条是这个文件里最容易漏的：那些路径平时跑不到，出事的时候正好在现场演示。 */
-console.log('\n=== R. ML 辅助判断（看板读 report/ml_result.json）===');
-
-const mlCount = () => els['ml-count'].textContent;
-const mlText = () => els['ml-text'].textContent;
-const mlNote = () => els['ml-note'].textContent;
-
-/* --- 接线本身 --- */
-
-check('index.html 里有 #ml-text', dashHtml.includes('id="ml-text"'), true);
-check('index.html 里有 #ml-count', dashHtml.includes('id="ml-count"'), true);
-check('index.html 里有 #ml-note', dashHtml.includes('id="ml-note"'), true);
-check('面板标题就是「ML 辅助判断」', dashHtml.includes('ML 辅助判断'), true);
-
-/* 启动时读，就一次 —— 这一段是静态文件，没有「再读一遍」的理由，
-   多读几次不但没用，还会把「它跟实时数据没关系」这件事说糊。 */
-check('★ 打开页面就去读那份 JSON（就一次）', fetchCalls, ['../report/ml_result.json']);
-
-/* --- 读回来之前 --- */
-
-/* 占位那句话写在 index.html 里（假 DOM 读不到它，所以对着**文件**查），
-   它必须落在 #ml-text 这个 <p> 里头 —— 落到别处就白写了。
-   fetch 是异步的，那几百毫秒里那一块空着的话，看着跟「这一段没有内容」一样。 */
-check('★ 读回来之前那一块写着「正在读取」而不是空白（fetch 是异步的）',
-  /id="ml-text"[^>]*>正在读取[^<]*</.test(dashHtml), true);
-check('（占位那句里点明了读的是哪份文件）',
-  /id="ml-text"[^>]*>[^<]*report\/ml_result\.json/.test(dashHtml), true);
-/* 条数那一格是 JS 填的，所以这一条看的是真跑起来之后的那个元素：
-   它只能是空的 —— 先摆一个「0 条」的话，读回来之前看着就像「一条都没差」。 */
-check('★ 读回来之前条数那格是空的（不先摆一个「0 条」）', ML_AT_LOAD.count, '');
-
-/* --- 真的把仓库里那份读了 --- */
-
-/* 下面每一跳都拿**它自己**跟真文件里的数对，不写死 2 条 / 40 条 ——
-   data/ 一改或脚本重跑一遍，那些数就会变，写死的断言会红得莫名其妙。
-   读的是仓库里那份真文件，也不自己手写一份假 JSON：手写的桩在
-   analysis.py 改了字段名之后照样全绿，而真页面上会写「这一段没跑」。 */
-const ML_REAL = JSON.parse(
-  fs.readFileSync(path.join(ROOT, 'report', 'ml_result.json'), 'utf8'));
-
-/* fetch 回来之后还要过两个 then 才轮到页面 —— 那些排在微任务里。
-   setTimeout(0) 是宏任务，排在所有微任务后面，等它一轮就够了。 */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-/* 这一段读不到那份文件时，一个节点、一条事件都不该被动过 ——
-   它是**另一条数据线**，跟 MQTT 那条没有任何关系。 */
-const ML_BEFORE = JSON.stringify(nodes) + '|' + events.length;
-
-(async function () {
-  fetchPending[0].resolve({ ok: true, status: 200, json: () => Promise.resolve(ML_REAL) });
-  await settle();
-
-  const want = buildMlNote(ML_REAL);
-  check('★ 页面上摆的三样就是那个纯函数算出来的三样（页面一个字都不自己拼）',
-    [mlCount(), mlText(), mlNote()], [want.count, want.text, want.note]);
-  check('★ 结论那句就是真文件里那一句（看板和报告说的是同一句话）',
-    mlText(), ML_REAL.text);
-  check('★ 条数就是真文件里「规则说正常、ML 说不同」那个数',
-    mlCount().includes('：' + ML_REAL.mismatchForward + ' 条'), ML_REAL.mismatchForward > 0);
-  check('★ 说明里写着不是实时数据（看板上别的数字都在动，这一段不动）',
-    mlNote().includes('不是实时数据'), true);
-  check('★ 说明里那两份文件名和真文件对得上',
-    [mlNote().includes(ML_REAL.newFile), mlNote().includes(ML_REAL.historyFile)],
-    [true, true]);
-  check('★ 说明里带着那份 JSON 记的时刻', mlNote().includes(ML_REAL.generatedAt), true);
-
-  /* --- 读不到：先是一个「文件根本打不开」 --- */
-
-  loadMlResult();
-  fetchPending[1].reject(new Error('Failed to fetch'));
-  await settle();
-
-  check('★ 打不开时降级成一句「这一段没跑：……」，不抛也不空着',
-    [mlText().indexOf('这一段没跑：') === 0, mlText().includes('Failed to fetch')],
-    [true, true]);
-  check('★ 打不开时条数那格是空的（不写「0 条」，那看着像「一条都没差」）',
-    mlCount(), '');
-  check('★ 打不开时告诉人先跑哪个脚本',
-    mlNote().includes('py -3.14 analysis/analysis.py'), true);
-
-  /* --- 404：页面不是从项目根目录起的服务器时就是这样 --- */
-
-  loadMlResult();
-  fetchPending[2].resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
-  await settle();
-  check('★ 404 说的是「HTTP 404」，不是拿一句「读不到」糊过去',
-    mlText().includes('HTTP 404'), true);
-
-  /* --- 回来不是 JSON：文件被人占着写了一半，或者服务器给了个 404 页面 --- */
-
-  loadMlResult();
-  fetchPending[3].resolve({
-    ok: true, status: 200,
-    json: () => Promise.reject(new Error('Unexpected token < in JSON at position 0')),
-  });
-  await settle();
-  check('★ 回来不是 JSON 时也说得出为什么',
-    mlText().includes('Unexpected token'), true);
-
-  /* --- 是 JSON，但不是 analysis.py 写的那份 --- */
-
-  loadMlResult();
-  fetchPending[4].resolve({ ok: true, status: 200, json: () => Promise.resolve({ hi: 1 }) });
-  await settle();
-  check('★ 文件在那儿但不是那一份：照样说「这一段没跑」',
-    [mlText().indexOf('这一段没跑：') === 0, mlText().includes('该写的字段')],
-    [true, true]);
-
-  /* --- 这四条路走下来，别的任何一块都不该动过 --- */
-
-  check('★ ML 那一段读不到，一个节点、一条事件都不动（它不走 MQTT 那条线）',
-    JSON.stringify(nodes) + '|' + events.length, ML_BEFORE);
-
-  /* --- 再读到一次能恢复：降级是一时的，不是把这一块写死 --- */
-
-  loadMlResult();
-  fetchPending[5].resolve({ ok: true, status: 200, json: () => Promise.resolve(ML_REAL) });
-  await settle();
-  check('★ 再读到时又能摆回来（降级不留痕）', mlText(), ML_REAL.text);
-
-  /* --- 直接调 loadMlResult 也走同一条路（上面每一次都是它）--- */
-
-  check('★ 跑在页面上的就是 dashboard.js 里那个函数（不是测试另造的一条路）',
-    typeof loadMlResult, 'function');
-
-  /* --- L 段那个「什么都没有」的上下文 --- */
-
-  /* 那边没有 mqtt、没有 WebGL、也没有能用的 fetch（模拟离线 / 服务器没起）。
-     页面照样得起来，ML 那一段降级成一行字 —— 它的 promise 是在那边加载时
-     发出的，刚刚这几轮微任务里已经跑完了。 */
-  check('★ L 段那个「要什么没什么」的上下文里，ML 那一段也降级成一行字',
-    els2['ml-text'].textContent.indexOf('这一段没跑：') === 0, true);
-  check('（那边连 fetch 都用不了，原因写的就是打不开）',
-    els2['ml-text'].textContent.includes('Failed to fetch'), true);
-
-  console.log(`\n结果：${pass} 通过，${fail} 不通过`);
-  process.exit(fail === 0 ? 0 : 1);
-})();
+check('★ 那一块的四列是 时间 / Topic / 原因 / 原文',
+  /<th>时间<\/th>\s*<th>Topic<\/th>\s*<th>原因<\/th>\s*<th>原文<\/th>/.test(html), true);
+check('★ 页头写明了它只订 dormmate/v1/state',
+  html.indexOf('只订阅 <code>dormmate/v1/state</code>') > 0, true);
+/* 只看页脚那一段。上面有一条注释专门在解释「以前那句『一律用规则复核』
+   现在是错的」，搜整份文件的话会被那条注释挡下来。 */
+const footer = (html.match(/<footer[\s\S]*?<\/footer>/) || [''])[0];
+check('★ 页脚不再宣称「一律用规则复核」（那句话现在是错的）',
+  footer.indexOf('一律用规则复核'), -1);
+check('★ 页脚改成了「由 core 执行、页面只负责画」',
+  [footer.indexOf('core/rules.py') > 0, footer.indexOf('页面只负责画') > 0], [true, true]);
+check('★ config.js 排在模块脚本之前（模块要用到那个全局）',
+  htmlNoComments.indexOf('../shared/config.js') < htmlNoComments.indexOf('type="module"'), true);
+check('★ importmap 排在模块脚本之前（排在后面浏览器不认）',
+  htmlNoComments.indexOf('importmap') < htmlNoComments.indexOf('type="module"'), true);
+check('★ 那两张图的 canvas 还在（Chart.js 要靠它）',
+  [html.indexOf('id="chart-temp"') > 0, html.indexOf('id="chart-humidity"') > 0],
+  [true, true]);
+check('★ ML 那一块的位置留着（Rule-ML 预留展示区）',
+  [html.indexOf('id="ml-count"') > 0, html.indexOf('id="ml-text"') > 0,
+    html.indexOf('id="ml-note"') > 0], [true, true, true]);
+check('★ 3D 那个容器还在', html.indexOf('id="scene3d"') > 0, true);
+
+/* 页面的每个 id 都得在测试的登记表里 —— 漏一个就会假绿，
+   这条断言是给**测试自己**的护栏。 */
+const idList = (html.match(/id="([\w-]+)"/g) || [])
+  .map((s) => s.slice(4, -1));
+check('★ index.html 里那些 id 测试全都登记了（漏了就是假绿）',
+  idList.filter((id) => !Object.prototype.hasOwnProperty.call(els, id)), []);
+check('★ 而且登记的那些一个不多（多出来的是已经不存在的元素）',
+  Object.keys(els).filter((id) => idList.indexOf(id) < 0), []);
+
+/* 送进来的消息条数 —— 用来确认整份测试真的走了几百次投递，
+   而不是某一段静悄悄跳过了。 */
+check('★ 这一整轮确实投递了消息（不是空跑）', deliveries > 10, true);
+
+console.log(`\n结果：${pass} 通过，${fail} 不通过`);
+process.exit(fail === 0 ? 0 : 1);
+
+}()).catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

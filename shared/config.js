@@ -66,6 +66,14 @@
      浏览器都先收到一次 —— 页面刚加载就自己按了一遍「开始处理」。 */
   const CMD_RETAIN = false;
 
+  /* 「开始处理」那个动作的名字，报文里写成 `{"nodeId":"dorm-b","action":"handle",...}`。
+     它和 topic 一样是**跨端约定**：看板、移动端各发一次，core 的 events.HANDLE 收
+     一次，三处必须一模一样（写错一个字，core 回一句「动作不对」，
+     而看板那边看着像「点了没反应」）。所以它和 topic 放一起，
+     对应 core 侧的 `events.py` 里的 `HANDLE = "handle"`。
+     `tests/config.test.js` 会去 events.py 里把那行抠出来对一次。 */
+  const CMD_ACTION = 'handle';
+
   /* ---- 函数 ---- */
 
   /**
@@ -120,6 +128,7 @@
     QOS: QOS,
     RETAIN: RETAIN,
     CMD_RETAIN: CMD_RETAIN,
+    CMD_ACTION: CMD_ACTION,
     topicFor: topicFor,
     brokerUrl: brokerUrl,
     brokerUrlFor: brokerUrlFor,

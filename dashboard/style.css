@@ -294,6 +294,26 @@ button.focus:hover { border-color: var(--text-muted); }
 
 .focus.is-active .focus-state { color: var(--text-primary); }
 
+/* 第二行起：core 给的那句理由，以及「这个焦点是谁点的」。
+   两者都占满整行（flex-basis: 100%）—— 它们是给第一行那句话作注的，
+   跟着右边那个「查看详情」挤在同一行会被压成一条读不下去的长句。 */
+.focus-reason,
+.focus-cross {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* 「谁发的 focus」比那句理由再淡一档、再小一档：它是**来路**，不是**依据**。
+   演示的时候这两行要分得清 —— 上面那行是「为什么是它」（数据说的），
+   下面那行是「谁点的」（人点的），两者说的不是同一件事。 */
+.focus-cross {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ---------- 节点卡片 ---------- */
 
 .cards {
@@ -301,6 +321,22 @@ button.focus:hover { border-color: var(--text-muted); }
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 14px;
   margin-bottom: 28px;
+}
+
+/* 还没收到 core 快照时，网格里那一段说明。
+   grid-column: 1 / -1 是必须的 —— 不写的话它会被当成第一格，
+   挤在左边那 240px 里，右边空出两格看着像卡片没画出来。 */
+.cards-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 28px 20px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  background: var(--surface-1);
+  border: 1px dashed var(--hairline);
+  border-radius: 12px;
 }
 
 /* 卡片本身就是按钮：整张可点，键盘也能 Tab 到。所以要把按钮的默认样式清掉 */
@@ -757,7 +793,52 @@ tbody tr:last-child td { border-bottom: none; }
   border: 1px solid var(--hairline);
 }
 
+/* ---------- 被拒绝消息（Step E3-2） ---------- */
+
+/* 原因那格。core 一次可能给出好几条理由（topic 形状不对 + JSON 解析失败），
+   所以是**一列小胶囊**而不是一句话；每条各自成一个，读的人一眼数得清楚
+   这一条报文错在哪几处。 */
+.rj-reasons {
+  white-space: normal;      /* 和事件表那两列同理：这里放的是句子，不是数据 */
+  min-width: 160px;
+  max-width: 260px;
+}
+
+.rj-reason {
+  display: inline-block;
+  margin: 0 4px 4px 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  /* 用警告色而不是错误色：core 拒收一条消息是**正常工作**（D4 就是专门
+     演示这件事的），不是系统出了故障。整块染红会让人以为哪里崩了。 */
+  background: color-mix(in srgb, var(--status-warning) 12%, transparent);
+  color: var(--status-warning);
+}
+
+/* 原文。等宽字体 + 允许换行 + 保留空白：
+   「哪里写错了」全靠这一格，而坏报文里最常见的就是空格、引号、少一个花括号
+   —— 用比例字体显示并且把连续空格折成一个的话，错误正好被藏掉。
+   `white-space: pre-wrap` 同时做到「按原样排版」和「长到出格就换行」，
+   所以最长的那串也不会把整张表顶出横向滚动条。 */
+.rj-payload {
+  display: block;
+  max-width: 420px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--page);
+  border: 1px solid var(--hairline);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-secondary);
+}
+
 /* ---------- 页脚 ---------- */
+
 
 .foot {
   margin-top: 8px;

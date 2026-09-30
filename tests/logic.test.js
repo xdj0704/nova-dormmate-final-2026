@@ -1,14 +1,19 @@
 // tests/logic.test.js
-// 校验 dashboard/logic.js —— 「优先关注」的算法（Step 7-1）
-// 和「处理动作」的状态机（Step 7-2）。
+// 校验 dashboard/logic.js —— Step E3-2 之后，这里只剩两件事：
+// 「**读**快照里的字段」和「把那些字段**说**成人话」。
 //
 // 这个文件是整个测试套件里唯一**不用起 vm 上下文打桩**的一个：
 // logic.js 是纯函数，不碰 DOM、不读全局变量、不调 Date.now()，
-// 给它一组输入就该得到一组固定输出。所以这里连假 document 都不用造，
-// 直接把函数拿出来调。
+// 给它一份快照就该得到一句固定的话。所以这里连假 document 都不用造。
 //
 // 它不需要打桩这件事本身就是一条要求，A 段把它钉住了 ——
 // 哪天有人往 logic.js 里塞一句 document.getElementById，这里立刻红。
+//
+// 【这一轮为什么要重写】E3 之前这个文件测的是「优先关注怎么排」
+// 「处理动作状态机怎么走」—— 那些判断**整体搬去了 core**，函数也不在了。
+// 现在测的是另一边：core 发的这份快照，页面读对了没有、说对了没有。
+// 尤其是「一个结论都不许下」这条：A 段里有几条专门查源码里**没有**
+// 阈值、没有状态名、没有节点名 —— 那些词一旦出现，就说明判断又溜回来了。
 //
 // 跑法：node tests/logic.test.js
 'use strict';
@@ -40,1429 +45,886 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十九个（多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十八个（一个 const + 十七个函数，多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
-  'parseTime,fmtDuration,abnormalDuration,nextAbnormal,beginHandling,nextHandling,'
-  + 'beginEvent,markPriority,markAction,closeEvent,pickPriority,'
-  + 'buildOverview,buildReasons,tempTrend,buildFocus,buildAlert,'
-  + 'buildMlNote,mlFetchFailed,cmdNote');
-/* ACTION_FAN 刻意**不**导出：它是「按钮按下之后 action 记什么名字」的唯一一份，
-   只该由 logic.js 自己写进返回值。导出的话，dashboard 那边就可能有人
-   自己拼一个字符串塞进卡片，页面上就会出现两个说法不一样的名字。 */
-check('★ ACTION_FAN 不导出（那串字只该从 logic.js 里出来一份）',
-  EXPORTS.includes('ACTION_FAN'), false);
-
-/* 8-1 的内部件同理不导出。ranked() 是「谁是重点」的唯一一份排序，
-   basisFor() 是「赢在哪一步」的唯一一份说法 —— 导出的话，页面那边就能
-   绕开 pickPriority 自己排一遍，页面上两句话指着不同的宿舍而没人报错。
-   （basisFor 在 8-1 之前叫 reasonFor，那时它是私有的；拆成两半之后
-   仍然都留在模块里，只有 buildReasons / pickPriority 是对外的口。） */
-['ranked', 'basisFor', 'reasonFor', 'survey', 'handlingNote', 'lostTo']
-  .forEach(function (name) {
-    check('★ ' + name + ' 不导出（内部件：排序和说法各只留一份）',
-      EXPORTS.includes(name), false);
-  });
-
-/* 8-3 的内部件同理。trendText 是「上升/下降/持平」→ 那句话的唯一一份说法：
-   那一行和语音都用它，导出的话页面那边就能自己造第二种说法
-   （「温度在涨」/「温度上升」），同一件事两种说法而没人报错。
-   calmLine 是「没有重点时说什么」的唯一一份 —— 8-1 那两句里也各有一份类似的话，
-   但那两句归 report.html，页面上现在只剩 calmLine 这一份。 */
-['trendText', 'calmLine'].forEach(function (name) {
-  check('★ ' + name + ' 不导出（内部件：同一件事只留一种说法）',
-    EXPORTS.includes(name), false);
-});
+  'SNAPSHOT_VERSION,readSnapshot,nodeOf,openEvent,latestEvent,eventStateText,'
+  + 'handlingOf,actionState,fanOn,trendOf,trendText,calmLine,focusBanner,'
+  + 'alertLine,snapshotSummary,buildMlNote,mlFetchFailed,cmdNote');
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
-/* 「不操作 DOM」是这一步的明确要求，所以直接查源码。
-   先剥注释：注释里本来就会提到 document、Date 这些东西（比如 parseTime 上面
-   写了「不用 new Date(字符串)」），不剥的话这几条永远是红的。 */
+/* 内部件不许导出：导出的话，页面那边就能绕开这些唯一的说法自己拼一份，
+   于是同一件事在屏幕上出现两种讲法而没人报错。
+     nodeList / eventBlock / survey / isObject / bad —— 取值用的内部件
+     trendText 的反面：它是「上升/下降/持平 -> 一句话」的唯一一份说法，两边都用它
+     fileName / rowCount —— ML 那一段的收拾字段 */
+['nodeList', 'eventBlock', 'survey', 'isObject', 'bad', 'fileName', 'rowCount',
+  'ML_BAD_SHAPE', 'STATUS_TEXT']
+  .forEach(function (name) {
+    check('★ ' + name + ' 不导出（内部件：同一件事只留一份说法）',
+      EXPORTS.includes(name), false);
+  });
+
+/* 「不操作 DOM / 不读全局 / 不看时钟」是这一步的明确要求，所以直接查源码。
+   先剥注释：注释里本来就会提到 document、Date 这些东西（比如上面写着
+   「不调 Date.now()」），不剥的话这几条永远是红的。 */
 const code = raw
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^\s*\/\/.*$/gm, '');
 
-check('★ 源码里没有 document（不操作 DOM）', /\bdocument\b/.test(code), false);
-check('★ 源码里没有 window', /\bwindow\b/.test(code), false);
-check('★ 源码里没有 innerHTML', /innerHTML/.test(code), false);
-check('★ 源码里没有 setTimeout / requestAnimationFrame（不碰时间调度）',
-  /setTimeout|requestAnimationFrame|setInterval/.test(code), false);
-check('★ 源码里没有 Date.now（时长一律用报文里的 time 算，不用浏览器当前时间）',
-  /Date\.now\s*\(/.test(code), false);
-check('时间只经 Date.UTC 折算（两端同按 UTC，时区自然抵消）',
-  /Date\.UTC\s*\(/.test(code), true);
+[
+  'document', 'window', 'globalThis', 'localStorage', 'sessionStorage',
+  'navigator', 'fetch(', 'Date.now', 'new Date', 'setTimeout', 'mqtt',
+].forEach(function (name) {
+  check('★ 源码里不出现 ' + name + '（纯函数：这一层不许碰这些）',
+    code.indexOf(name) >= 0, false);
+});
 
-/* ---------- 把函数拿出来 ---------- */
+/* 【这一轮最重要的一条：判断不许溜回来】
+   温度阈值（18 / 30 / 75）和那三个状态名，是 core 的事。
+   这个文件现在连它们认都不认识 —— 「偏热」这三个字是从快照的 status 字段里
+   原样搬出来的，不是这边判出来的。源码里出现任何一个，就说明有人又写了一遍规则。
+   用 \b 圈住数字：不圈的话 '2026' 里的 '20'、'26' 会误伤。 */
+check('★ 源码里没有温度阈值 18（判断不是这一层的事）', /\b18\b/.test(code), false);
+check('★ 源码里没有温度阈值 30', /\b30\b/.test(code), false);
+check('★ 源码里没有湿度阈值 75', /\b75\b/.test(code), false);
+check('★ 源码里一个状态名都没有（偏冷 / 偏热 / 偏湿）',
+  /偏冷|偏热|偏湿/.test(code), false);
+/* 「正常」是**比较的基准**（谁需要关注 = 谁不是正常），留着它不算判断；
+   但它是唯一的例外，所以单独钉一条，免得将来又多出第二个词。 */
+check('（「正常」是唯一的例外：它是比较基准，不是判出来的）',
+  code.indexOf('正常') > 0, true);
+check('★ 源码里不出现 judgeStatus（规则那份在 shared/rules.js，这里不引）',
+  code.indexOf('judgeStatus'), -1);
+/* 节点名同样一个都不能写死：快照里有哪些宿舍是 core 的配置说了算。
+   写死的话，core 的 config.json 加了第四个节点，页面会当它不存在。 */
+check('★ 源码里不出现任何具体节点名（注释里的例子不算）',
+  /dorm-/.test(code), false);
 
-/* logic.js 是 ES 模块。vm 跑不了 import/export，所以把 `export ` 前缀摘掉 ——
-   函数名照旧留在作用域里，顶层 function 声明在 vm 里就是上下文的全局属性。
-   和 tests/scene3d.test.js 改写 'three' 是同一个思路。 */
 const stripped = raw.replace(/^export\s+/gm, '');
-const context = { Date, Number, String, Object, Array, JSON, Math, isNaN };
+const context = { Number, String, Object, Array, JSON, Math, isNaN, Boolean };
 context.globalThis = context;
 vm.createContext(context);
 vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
-const { parseTime, fmtDuration, abnormalDuration, nextAbnormal, beginHandling,
-  nextHandling, beginEvent, markPriority, markAction, closeEvent, pickPriority,
-  buildOverview, buildReasons, tempTrend, buildFocus, buildAlert,
-  buildMlNote, mlFetchFailed, cmdNote } = context;
+const { readSnapshot, nodeOf, openEvent, latestEvent, eventStateText,
+  handlingOf, actionState, fanOn, trendOf, trendText, calmLine, focusBanner,
+  alertLine, snapshotSummary, buildMlNote, mlFetchFailed, cmdNote } = context;
 
-check('十九个函数都拿得到', [parseTime, fmtDuration, abnormalDuration, nextAbnormal,
-  beginHandling, nextHandling, beginEvent, markPriority, markAction, closeEvent,
-  pickPriority, buildOverview, buildReasons, tempTrend, buildFocus, buildAlert,
-  buildMlNote, mlFetchFailed, cmdNote]
+check('★ 十七个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
+  eventStateText, handlingOf, actionState, fanOn, trendOf, trendText, calmLine,
+  focusBanner, alertLine, snapshotSummary, buildMlNote, mlFetchFailed, cmdNote]
   .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function']);
+  'function', 'function', 'function', 'function', 'function', 'function',
+  'function', 'function', 'function', 'function', 'function']);
 
-/* ---------- 小工具 ---------- */
+/* 版本号是 const（不是函数），要从上下文的词法作用域里读 ——
+   它和 core.py 的 SNAPSHOT_VERSION 必须同时改，读出来对一次是值得的。 */
+const SNAPSHOT_VERSION = vm.runInContext('SNAPSHOT_VERSION', context);
+check('★ 认的快照版本是 2', SNAPSHOT_VERSION, 2);
 
-const MIN = 60 * 1000;
-/* 拼一个节点。四个参数刚好是页面那边维护的那四个字段 */
-function node(latestTime, abnormalStart, abnormalCount, status) {
-  return {
-    latest: { time: latestTime, status: status === undefined ? '偏热' : status },
-    abnormalStart,
-    abnormalCount,
+/* ---------- 造数据 ---------- */
+
+/** 一个节点在快照里的那一条。字段和 core.py 的 NodeState.snapshot() 一一对应。 */
+function nodeRow(nodeId, over) {
+  const row = {
+    nodeId: nodeId,
+    online: true,
+    status: '正常',
+    temperature: 25,
+    humidity: 60,
+    time: '2026-09-22 20:30:00',
+    abnormalCount: 0,
+    durationSec: null,
+    durationText: null,
+    reason: '',
+    lastSeen: '2026-09-22 20:30:00',
+    historyCount: 3,
+    history: [
+      { time: '2026-09-22 20:28:00', temperature: 25, humidity: 60, status: '正常' },
+      { time: '2026-09-22 20:29:00', temperature: 25, humidity: 60, status: '正常' },
+      { time: '2026-09-22 20:30:00', temperature: 25, humidity: 60, status: '正常' },
+    ],
   };
-}
-/* 三节点一套，key 就是 nodeId */
-function three(a, b, c) {
-  return { 'dorm-a': a, 'dorm-b': b, 'dorm-c': c };
+  Object.keys(over || {}).forEach(function (k) { row[k] = over[k]; });
+  return row;
 }
 
-/* ---------- B. parseTime ---------- */
-
-console.log('\n=== B. parseTime ===');
-
-check('★ 按 UTC 折算（不是按本地时区，否则同一串在不同机器上差好几个小时）',
-  parseTime('2026-09-22 20:30:00'), Date.UTC(2026, 8, 22, 20, 30, 0));
-check('相差一分钟 = 60000 毫秒',
-  parseTime('2026-09-22 20:31:00') - parseTime('2026-09-22 20:30:00'), MIN);
-check('跨零点照样算得对',
-  parseTime('2026-09-23 00:00:00') - parseTime('2026-09-22 23:59:00'), MIN);
-check('跨月照样算得对',
-  parseTime('2026-10-01 00:00:00') - parseTime('2026-09-30 23:59:00'), MIN);
-check('闰年的 2 月 29 日认得出（不是 Invalid Date）',
-  Number.isNaN(parseTime('2024-02-29 12:00:00')), false);
-
-/* 格式不对一律 NaN，不做「差不多」的宽容匹配 ——
-   宽容匹配的代价是得出一个看着挺像样的错时长，而那个错没人会发现。 */
-check('斜杠分隔 -> NaN', Number.isNaN(parseTime('2026/09/22 20:30:00')), true);
-check('ISO 的 T 分隔 -> NaN（我们只认约定里那一种写法）',
-  Number.isNaN(parseTime('2026-09-22T20:30:00')), true);
-check('缺秒 -> NaN', Number.isNaN(parseTime('2026-09-22 20:30')), true);
-check('不补零 -> NaN', Number.isNaN(parseTime('2026-9-22 20:30:00')), true);
-check('前面有空格 -> NaN', Number.isNaN(parseTime(' 2026-09-22 20:30:00')), true);
-check('空串 -> NaN', Number.isNaN(parseTime('')), true);
-check('null -> NaN，不抛异常', Number.isNaN(parseTime(null)), true);
-check('undefined -> NaN，不抛异常', Number.isNaN(parseTime(undefined)), true);
-check('数字 -> NaN', Number.isNaN(parseTime(1758000000000)), true);
-check('一句中文 -> NaN', Number.isNaN(parseTime('刚刚')), true);
-
-/* ---------- C. fmtDuration ---------- */
-
-console.log('\n=== C. fmtDuration（一律向下取整）===');
-
-check('0 毫秒', fmtDuration(0), '不到 1 分钟');
-check('59 秒', fmtDuration(59 * 1000), '不到 1 分钟');
-check('整 1 分钟', fmtDuration(MIN), '1 分钟');
-check('7 分钟', fmtDuration(7 * MIN), '7 分钟');
-check('59 分 59 秒', fmtDuration(59 * MIN + 59 * 1000), '59 分钟');
-check('★ 4 分 59 秒 -> 「4 分钟」，不是 5（这一栏宁可少说不要多说）',
-  fmtDuration(4 * MIN + 59 * 1000), '4 分钟');
-check('整 1 小时', fmtDuration(60 * MIN), '1 小时');
-check('1 小时 5 分', fmtDuration(65 * MIN), '1 小时 5 分钟');
-check('2 小时整（不写「2 小时 0 分钟」）', fmtDuration(120 * MIN), '2 小时');
-/* 负数只可能来自脏数据。既然算不出「负的几分钟」，就当 0 ——
-   页面上出现「已连续偏热 -3 分钟」比说「不到 1 分钟」糟得多。 */
-check('负数 -> 当 0', fmtDuration(-5000), '不到 1 分钟');
-check('NaN -> 当 0，不抛异常', fmtDuration(NaN), '不到 1 分钟');
-check('Infinity -> 当 0', fmtDuration(Infinity), '不到 1 分钟');
-
-/* ---------- D. abnormalDuration ---------- */
-
-console.log('\n=== D. abnormalDuration ===');
-
-check('起点到最新一条相差 7 分钟', abnormalDuration(
-  node('2026-09-22 20:07:00', '2026-09-22 20:00:00', 2)), 7 * MIN);
-check('只有一条消息（起点就是它自己）-> 0',
-  abnormalDuration(node('2026-09-22 20:00:00', '2026-09-22 20:00:00', 1)), 0);
-check('没有 latest -> 0', abnormalDuration(null), 0);
-check('latest 是 null -> 0',
-  abnormalDuration({ latest: null, abnormalStart: '2026-09-22 20:00:00', abnormalCount: 1 }), 0);
-check('abnormalStart 是 null -> 0',
-  abnormalDuration({ latest: { time: '2026-09-22 20:07:00' }, abnormalStart: null, abnormalCount: 1 }), 0);
-check('abnormalStart 是脏字符串 -> 0',
-  abnormalDuration({ latest: { time: '2026-09-22 20:07:00' }, abnormalStart: '刚才', abnormalCount: 1 }), 0);
-check('latest.time 是脏字符串 -> 0',
-  abnormalDuration({ latest: { time: '现在' }, abnormalStart: '2026-09-22 20:00:00', abnormalCount: 1 }), 0);
-/* time 前后颠倒（手输的假数据）时不能返回负数 */
-check('★ 起点比终点还晚 -> 0，不返回负数',
-  abnormalDuration(node('2026-09-22 20:00:00', '2026-09-22 20:07:00', 2)), 0);
-check('跨天也算得对（23:59 -> 次日 00:06 = 7 分钟）',
-  abnormalDuration(node('2026-09-23 00:06:00', '2026-09-22 23:59:00', 2)), 7 * MIN);
-
-/* ---------- E. nextAbnormal ---------- */
-
-console.log('\n=== E. nextAbnormal（连续异常的状态机）===');
-
-const EMPTY = { abnormalStart: null, abnormalCount: 0 };
-const T1 = '2026-09-22 20:00:00';
-const T2 = '2026-09-22 20:03:00';
-
-check('从没异常过 + 来一条异常 -> 起点是它自己，1 次',
-  nextAbnormal(EMPTY, '偏冷', T1), { abnormalStart: T1, abnormalCount: 1 });
-check('★ 段接着走：起点不动，次数加一',
-  nextAbnormal({ abnormalStart: T1, abnormalCount: 1 }, '偏冷', T2),
-  { abnormalStart: T1, abnormalCount: 2 });
-check('正常数据 -> 两个字段一起清零',
-  nextAbnormal({ abnormalStart: T1, abnormalCount: 5 }, '正常', T2),
-  { abnormalStart: null, abnormalCount: 0 });
-check('★ 清零之后再来异常 -> 新的一段从这条开始（不是沿用上一段的起点）',
-  nextAbnormal(EMPTY, '偏热', T2), { abnormalStart: T2, abnormalCount: 1 });
-check('★ 段里状态从偏冷变偏热，仍然是同一段（统计的是「连续异常」不是「连续偏冷」）',
-  nextAbnormal({ abnormalStart: T1, abnormalCount: 2 }, '偏热', T2),
-  { abnormalStart: T1, abnormalCount: 3 });
-
-/* 不能改传进来的东西 —— 页面那边是 node 本身，改了就等于把手里的状态改脏了 */
-const prev = { abnormalStart: T1, abnormalCount: 1 };
-const out = nextAbnormal(prev, '偏热', T2);
-check('★ 不修改传进来的对象', prev, { abnormalStart: T1, abnormalCount: 1 });
-check('返回的是新对象，不是传进来的那个', out === prev, false);
-
-check('prev 是 undefined 也不炸', nextAbnormal(undefined, '偏冷', T1),
-  { abnormalStart: T1, abnormalCount: 1 });
-check('prev 的 abnormalCount 是 NaN -> 当成新的一段',
-  nextAbnormal({ abnormalStart: T1, abnormalCount: NaN }, '偏冷', T2),
-  { abnormalStart: T2, abnormalCount: 1 });
-check('prev 的 abnormalCount 是负数 -> 当成新的一段',
-  nextAbnormal({ abnormalStart: T1, abnormalCount: -3 }, '偏冷', T2),
-  { abnormalStart: T2, abnormalCount: 1 });
-check('没异常过 + 来一条正常 -> 还是空的',
-  nextAbnormal(EMPTY, '正常', T1), { abnormalStart: null, abnormalCount: 0 });
-/* 判据就是「等不等于正常这两个字」，不做任何模糊匹配 */
-check('「正常 」多一个空格不算正常（页面那边 status 来自复核，不会带空格）',
-  nextAbnormal(EMPTY, '正常 ', T1), { abnormalStart: T1, abnormalCount: 1 });
-
-/* ---------- F. pickPriority ---------- */
-
-console.log('\n=== F. pickPriority ===');
-
-check('空对象 -> null', pickPriority({}), null);
-check('nodes 是 undefined -> null，不抛异常', pickPriority(undefined), null);
-check('三个都正常 -> null', pickPriority(three(
-  node('2026-09-22 20:00:00', null, 0, '正常'),
-  node('2026-09-22 20:00:00', null, 0, '正常'),
-  node('2026-09-22 20:00:00', null, 0, '正常'))), null);
-check('还一条数据都没收到 -> null', pickPriority({
-  'dorm-a': { latest: null, abnormalStart: null, abnormalCount: 0 },
-  'dorm-b': { latest: null, abnormalStart: null, abnormalCount: 0 },
-}), null);
-
-/* 只有一个异常节点。这时上面三步一步都没比过，原因那句话要如实说。 */
-const solo = pickPriority(three(
-  node('2026-09-22 20:00:00', null, 0, '正常'),
-  node('2026-09-22 20:07:00', '2026-09-22 20:00:00', 2, '偏热'),
-  node('2026-09-22 20:05:00', null, 0, '正常')));
-check('★ 只有一个异常节点 -> 就是它', solo.nodeId, 'dorm-b');
-check('★ 原因里如实写「目前唯一」，不假称「持续时间最长」',
-  solo.reason, 'dorm-b 已连续偏热 7 分钟（2 次），是目前唯一的异常节点');
-
-/* 场景一：时长决出优先 */
-const byDuration = pickPriority(three(
-  node('2026-09-22 20:03:00', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:07:00', '2026-09-22 20:00:00', 2, '偏热'),
-  node('2026-09-22 20:05:00', '2026-09-22 20:00:00', 2, '偏湿')));
-check('★ 时长最长的是 dorm-b', byDuration.nodeId, 'dorm-b');
-check('★ 原因里带着时长和条数，尾巴说明赢在时长',
-  byDuration.reason, 'dorm-b 已连续偏热 7 分钟（2 次），持续时间最长');
-
-/* 场景二：时长一样长，比次数 */
-const byCount = pickPriority(three(
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 2, '偏湿')));
-check('★ 三个一样长，条数最多的是 dorm-b', byCount.nodeId, 'dorm-b');
-check('★ 尾巴如实说赢在次数，不写「持续时间最长」',
-  byCount.reason, 'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长，异常次数最多');
-
-/* 场景三：时长和条数都打平，比严重度（偏热 > 偏湿 > 偏冷） */
-const bySeverity = pickPriority(three(
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏冷'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏湿')));
-check('★ 时长、条数都一样时，偏热的 dorm-b 排在前面', bySeverity.nodeId, 'dorm-b');
-check('★ 尾巴如实说赢在严重度',
-  bySeverity.reason,
-  'dorm-b 已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长、异常次数也一样，'
-  + '但偏热比偏湿更要紧');
-
-/* 场景四：连严重度都一样，才轮到按名字。
-   注意三个的状态必须**相同** —— 不然会停在上面那一步，测不到字典序。 */
-const byName = pickPriority(three(
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热')));
-check('★ 四步全平才按字母顺序，dorm-a 在前', byName.nodeId, 'dorm-a');
-check('★ 尾巴如实说要按名字排了',
-  byName.reason, 'dorm-a 已连续偏热 6 分钟（3 次），和 dorm-b 完全并列，按节点名顺序排在前面');
-
-/* 第 4 步要的是**固定的码元序**，不是跟着运行环境走的本地化排序。
-   dorm-a / dorm-b / dorm-c 上这两种排法碰巧答案一样，所以上面那条测不出区别，
-   得挑一对能把它们分开的名字：码元序里 'B'(0x42) < 'a'(0x61)，
-   本地化排序先比字母再比大小写，'a' 反而排在 'B' 前面。
-   两个的状态也得一样（原因同上），否则赢的是严重度那一步。 */
-const byCodeUnit = pickPriority({
-  'dorm-a': node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
-  'dorm-B': node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 3, '偏热'),
-});
-check("★ 第 3 步用码元序：'dorm-B' 排在 'dorm-a' 前面", byCodeUnit.nodeId, 'dorm-B');
-/* 这条是上面那条的对照组：本地化排序给的答案正好相反，
-   所以换成 localeCompare 写法，上面那条立刻变红。 */
-check('（对照）本地化排序给的是相反的答案，这条才挑得出区别',
-  'dorm-B'.localeCompare('dorm-a') > 0, true);
-
-/* 时长优先于条数：条数再多，时长短也排在后面 */
-const longFew = pickPriority(three(
-  node('2026-09-22 20:07:00', '2026-09-22 20:00:00', 1, '偏冷'),
-  node('2026-09-22 20:01:00', '2026-09-22 20:00:00', 99, '偏热'),
-  node('2026-09-22 20:00:00', null, 0, '正常')));
-check('★ 时长优先：7 分钟的 1 次 排在 1 分钟的 99 次 前面', longFew.nodeId, 'dorm-a');
-
-/* 次数只在时长**相同**的那些之间比。跟所有人比是错的 ——
-   一个只异常了一分钟但有 99 条的节点，根本不该进到比次数这一步。 */
-check('★ 追平的那句话点的是时长相同的那个（不是次数最多的那个）',
-  longFew.reason, 'dorm-a 已连续偏冷 7 分钟（1 次），持续时间最长');
-
-/* 刚发第一条异常（时长 0）也算异常，照样选得出来 */
-const justStarted = pickPriority(three(
-  node('2026-09-22 20:00:00', null, 0, '正常'),
-  node('2026-09-22 20:00:00', '2026-09-22 20:00:00', 1, '偏热'),
-  node('2026-09-22 20:00:00', null, 0, '正常')));
-check('只有一条异常消息（时长 0）也照样选出来', justStarted.nodeId, 'dorm-b');
-check('时长 0 说成「不到 1 分钟」', justStarted.reason.includes('不到 1 分钟'), true);
-
-/* 脏 time 不抛异常，当 0 处理 */
-const dirty = pickPriority(three(
-  node('不是时间', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:05:00', '2026-09-22 20:00:00', 2, '偏热'),
-  node('2026-09-22 20:00:00', null, 0, '正常')));
-check('★ time 脏了不抛异常，坏的那个当 0 时长，好的照常赢', dirty.nodeId, 'dorm-b');
-
-/* 结果必须确定：同一份数据，键的顺序换了也得是同一个人、同一句话。
-   顺便钉死「不用 localeCompare」—— 那个跟着运行环境的区域设置走。 */
-const ks = ['dorm-a', 'dorm-b', 'dorm-c'];
-const vals = [
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 2, '偏热'),
-  node('2026-09-22 20:06:00', '2026-09-22 20:00:00', 2, '偏湿'),
-];
-const forward = pickPriority({ [ks[0]]: vals[0], [ks[1]]: vals[1], [ks[2]]: vals[2] });
-const reverse = pickPriority({ [ks[2]]: vals[2], [ks[1]]: vals[1], [ks[0]]: vals[0] });
-check('★ 键的顺序反过来，结果一模一样（时长条数都平，靠严重度定序）',
-  [reverse.nodeId, reverse.reason], [forward.nodeId, forward.reason]);
-check('倒序之后仍然是 dorm-b（不是「谁先被遍历到就是谁」）', reverse.nodeId, 'dorm-b');
-
-/* logic.js 不判断规则：status 是原样抄进那句原因的，它不自己复核 */
-const echo = pickPriority(three(
-  node('2026-09-22 20:03:00', '2026-09-22 20:00:00', 2, '偏湿'),
-  node('2026-09-22 20:00:00', null, 0, '正常'),
-  node('2026-09-22 20:00:00', null, 0, '正常')));
-check('★ latest.status 原样写进原因（复核规则的只有 shared/rules.js 一份）',
-  echo.reason.includes('已连续偏湿'), true);
-
-/* ---------- G. 处理动作（Step 7-2）---------- */
-
-console.log('\n=== G. beginHandling / nextHandling（处理动作的状态机）===');
-
-/* 拼一个「可处理」的节点：只要 latest 有 time 就能按下那个按钮。
-   故意多带几个字段，好验「不改传进来的东西」。 */
-function hNode(latestTime, handling, actionTime) {
-  return {
-    latest: { time: latestTime, status: '偏热', temperature: 31, humidity: 60 },
-    handling: handling === undefined ? '无' : handling,
+/** 一条事件。字段就是 core 的 Event.view() 那十三样（顺序也照着）。 */
+function eventRow(over) {
+  const e = {
+    event_id: 'dorm-a-20260922-202800',
+    nodeId: 'dorm-a',
+    state: 'OPEN',
+    startTime: '2026-09-22 20:28:00',
+    problem: '温度偏高（31℃）',
+    priorityTime: '2026-09-22 20:30:00',
+    priorityReason: '连续异常 3 次、已持续 2 分钟，最久',
     action: null,
-    actionTime: actionTime === undefined ? null : actionTime,
-    dataAfterAction: null,
-    history: [],
+    actionTime: null,
+    actionSource: null,
+    recoverTime: null,
+    endTime: null,
+    result: null,
+    abnormalAfter: 0,
+    verifyCount: 0,
   };
-}
-/* 一条复核之后的记录 */
-function rec(status, time) {
-  return { nodeId: 'dorm-a', temperature: 25, humidity: 60, status, time };
+  Object.keys(over || {}).forEach(function (k) { e[k] = over[k]; });
+  return e;
 }
 
-/* --- beginHandling：按下按钮那一刻 --- */
+/** 一份完整的 v2 快照。三个宿舍，什么都没发生。 */
+function snapshotOf(over) {
+  const s = {
+    v: 2,
+    time: '2026-09-22 20:30:00',
+    focus: null,
+    priority: null,
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'), nodeRow('dorm-c')],
+    events: {
+      summary: { total: 0, OPEN: 0, HANDLING: 0, RECOVERED: 0, UNRESOLVED: 0 },
+      dropped: 0,
+      events: [],
+    },
+    rejects: { total: 0, kept: 0, items: [] },
+    counters: { received: 0, rejected: 0, statusMismatch: 0, retainedCleared: 0,
+      commands: 0, commandRejected: 0 },
+  };
+  Object.keys(over || {}).forEach(function (k) { s[k] = over[k]; });
+  return s;
+}
 
-check('beginHandling(null) -> null，不抛异常', beginHandling(null), null);
-check('beginHandling({}) -> null（没有 latest）', beginHandling({}), null);
-check('latest 是 null -> null（一条数据都没收到过，actionTime 没地方取）',
-  beginHandling({ latest: null }), null);
-
-const started = beginHandling(hNode('2026-09-22 20:05:00'));
-check('★ 按下之后 handling 是「处理中」', started.handling, '处理中');
-check('★ action 就是「风扇已开启」这一串（卡片上原样显示的就是它）',
-  started.action, '风扇已开启');
-check('★ actionTime 取的是**最新那条消息的 time**',
-  started.actionTime, '2026-09-22 20:05:00');
-check('刚按下时还没有「动作之后的数据」', started.dataAfterAction, null);
-check('返回的正好是这四个字段', Object.keys(started).sort(),
-  ['action', 'actionTime', 'dataAfterAction', 'handling']);
-
-/* actionTime 只认 latest.time：latest 里别的字段、以及 history 里的旧消息，
-   都不该被拿去当动作时间 */
-const multi = hNode('2026-09-22 20:05:00');
-multi.history = [{ time: '2026-09-22 19:00:00', status: '偏热' }];
-check('★ actionTime 不是 history 里更早的那条（只认 latest）',
-  beginHandling(multi).actionTime, '2026-09-22 20:05:00');
-
-/* 纯函数：不改传进来的节点，也不复用同一个对象 */
-const untouched = hNode('2026-09-22 20:05:00');
-const before = JSON.stringify(untouched);
-const r1 = beginHandling(untouched);
-const r2 = beginHandling(untouched);
-check('★ 不改传进来的节点（纯函数）', JSON.stringify(untouched), before);
-check('★ 每次返回新对象（不是同一个引用被反复改写）', r1 === r2, false);
-
-/* --- nextHandling：动作之后又来了一条 --- */
-
-const inProgress = () => hNode('2026-09-22 20:05:00', '处理中', '2026-09-22 20:05:00');
-
-check('nextHandling(null, record) -> null', nextHandling(null, rec('正常', '2026-09-22 20:09:00')), null);
-check('nextHandling(node, null) -> null',
-  nextHandling(inProgress(), null), null);
-check('★ 没按过按钮（handling 是「无」）-> null，处理状态不受影响',
-  nextHandling(hNode('2026-09-22 20:05:00'), rec('正常', '2026-09-22 20:09:00')), null);
-check('handling 是个没见过的值 -> null（不认识的状态不去动它）',
-  nextHandling(hNode('2026-09-22 20:05:00', '修好了', '2026-09-22 20:05:00'),
-    rec('正常', '2026-09-22 20:09:00')), null);
-
-/* 严格晚于 actionTime 才算「动作之后」*/
-check('★ 和 actionTime 同一时刻的那条**不算**（动作就记在这条数据上，'
-  + '让它立刻把自己判成「已恢复」是错的）',
-  nextHandling(inProgress(), rec('正常', '2026-09-22 20:05:00')), null);
-check('★ 比 actionTime 还早的（重发旧数据 / 乱序到达）-> null',
-  nextHandling(inProgress(), rec('正常', '2026-09-22 20:00:00')), null);
-check('actionTime 脏了（解析不出来）-> null，不当成 0 硬算',
-  nextHandling(hNode('2026-09-22 20:05:00', '处理中', '不是时间'),
-    rec('正常', '2026-09-22 20:09:00')), null);
-check('actionTime 是 null -> null',
-  nextHandling(hNode('2026-09-22 20:05:00', '处理中', null),
-    rec('正常', '2026-09-22 20:09:00')), null);
-check('这条记录的 time 脏了 -> null',
-  nextHandling(inProgress(), rec('正常', '不是时间')), null);
-
-/* 动作之后的最新那条说了算 */
-const recovered = nextHandling(inProgress(), rec('正常', '2026-09-22 20:09:00'));
-check('★ 动作之后是「正常」-> 转「已恢复」', recovered.handling, '已恢复');
-check('★ dataAfterAction 记的就是这一条', recovered.dataAfterAction,
-  rec('正常', '2026-09-22 20:09:00'));
-check('只返回这两个字段（action / actionTime 不动，还是那一次动作的）',
-  Object.keys(recovered).sort(), ['dataAfterAction', 'handling']);
-
-check('★ 动作之后还是异常（偏热）-> 留在「处理中」',
-  nextHandling(inProgress(), rec('偏热', '2026-09-22 20:09:00')).handling, '处理中');
-check('★ 偏冷也算异常 -> 留在「处理中」',
-  nextHandling(inProgress(), rec('偏冷', '2026-09-22 20:09:00')).handling, '处理中');
-check('★ 偏湿也算异常 -> 留在「处理中」',
-  nextHandling(inProgress(), rec('偏湿', '2026-09-22 20:09:00')).handling, '处理中');
-check('留在「处理中」时 dataAfterAction 照样更新（最新的那条就是判断依据）',
-  nextHandling(inProgress(), rec('偏热', '2026-09-22 20:09:00')).dataAfterAction.time,
-  '2026-09-22 20:09:00');
-
-/* 纯函数 */
-const src2 = hNode('2026-09-22 20:05:00', '处理中', '2026-09-22 20:05:00');
-const before2 = JSON.stringify(src2);
-nextHandling(src2, rec('正常', '2026-09-22 20:09:00'));
-check('★ nextHandling 也不改传进来的节点', JSON.stringify(src2), before2);
-
-/* 只读 record.status，不自己复核 —— 判定规则只有 shared/rules.js 一份。
-   传进来一条「写着正常、但读数明显偏热」的记录，这里就该按「正常」处理：
-   复核是 dashboard 在调它之前做完的事。 */
-check('★ 只认 record.status，不自己重新判断（复核规则的只有 shared/rules.js 一份）',
-  nextHandling(inProgress(), { status: '正常', time: '2026-09-22 20:09:00' }).handling,
-  '已恢复');
-
-/* --- 来回走一遍：环境变好变坏都走同一条规则 --- */
-
-let state = beginHandling(hNode('2026-09-22 20:05:00')).handling;
-const trail = [state];
-[['偏热', '20:09:00'], ['正常', '20:12:00'], ['偏湿', '20:15:00'], ['正常', '20:18:00']]
-  .forEach(([status, hm]) => {
-    const node = { handling: state, actionTime: '2026-09-22 20:05:00' };
-    const moved = nextHandling(node, rec(status, '2026-09-22 ' + hm));
-    state = moved.handling;
-    trail.push(state);
+/** 一份「上面出事了」的快照：dorm-b 偏热、开着案、已经按过开始处理。 */
+function busySnapshot(over) {
+  const hot = nodeRow('dorm-b', {
+    status: '偏热',
+    temperature: 31,
+    abnormalCount: 3,
+    durationSec: 1200,
+    durationText: '20 分钟',
+    reason: '已连续偏热 20 分钟（3 次）',
+    history: [
+      { time: '2026-09-22 20:28:00', temperature: 33, humidity: 60, status: '偏热' },
+      { time: '2026-09-22 20:29:00', temperature: 32, humidity: 60, status: '偏热' },
+      { time: '2026-09-22 20:30:00', temperature: 31, humidity: 60, status: '偏热' },
+    ],
   });
-check('★ 处理中 -> 还异常(处理中) -> 正常(已恢复) -> 又异常(处理中) -> 正常(已恢复)',
-  trail, ['处理中', '处理中', '已恢复', '处理中', '已恢复']);
+  const ev = eventRow({
+    nodeId: 'dorm-b', state: 'HANDLING', action: '开启风扇 / 通风',
+    actionTime: '2026-09-22 20:31:00', actionSource: 'dashboard',
+    abnormalAfter: 2,
+  });
+  const s = snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '偏热', severity: 'critical',
+      abnormalCount: 3, durationSec: 1200, durationText: '20 分钟',
+      reason: '已连续偏热 20 分钟（3 次）' },
+    nodes: [nodeRow('dorm-a'), hot, nodeRow('dorm-c')],
+    events: {
+      summary: { total: 8, OPEN: 0, HANDLING: 1, RECOVERED: 7, UNRESOLVED: 0 },
+      dropped: 0,
+      events: [eventRow({ nodeId: 'dorm-a', state: 'RECOVERED',
+        recoverTime: '2026-09-22 20:10:00', endTime: '2026-09-22 20:10:00',
+        result: '已恢复', action: '开启风扇 / 通风' }), ev],
+    },
+    rejects: { total: 1, kept: 1, items: [{ time: '2026-09-22 20:29:00',
+      topic: 'dormmate/v1/nodes/dorm-a/telemetry', reasons: ['JSON 解析失败'],
+      payload: '{not json' }] },
+    counters: { received: 42, rejected: 1, statusMismatch: 0, retainedCleared: 0,
+      commands: 2, commandRejected: 0 },
+  });
+  Object.keys(over || {}).forEach(function (k) { s[k] = over[k]; });
+  return s;
+}
 
-/* 「已恢复」之后再变坏，也要退得回去 —— 不是只有「处理中」才接受新数据 */
-check('★ 已恢复的节点收到一条更晚的异常数据 -> 退回「处理中」',
-  nextHandling(hNode('2026-09-22 20:09:00', '已恢复', '2026-09-22 20:05:00'),
-    rec('偏热', '2026-09-22 20:12:00')).handling, '处理中');
-check('★ 已恢复的节点再收到一条更晚的正常数据 -> 仍是「已恢复」，'
-  + 'dataAfterAction 往后挪到最新那条',
-  nextHandling(hNode('2026-09-22 20:09:00', '已恢复', '2026-09-22 20:05:00'),
-    rec('正常', '2026-09-22 20:12:00')).dataAfterAction.time, '2026-09-22 20:12:00');
+/* ---------- B. readSnapshot ---------- */
 
-/* ---------- H. 事件记录（Step 7-4）---------- */
+console.log('\n=== B. readSnapshot（前端唯一的入口校验）===');
 
-console.log('\n=== H. beginEvent / markPriority / markAction / closeEvent（事件记录）===');
+function reasonOf(value) {
+  const r = readSnapshot(value);
+  return [r.ok, r.reason];
+}
 
-/* 一条事件的字段顺序就是导出 CSV 的列顺序（dashboard.js 的 EVENT_HEADER）。
-   这里钉死顺序，那两处就再也拧不到一起去。 */
-const EVENT_KEYS = ['nodeId', 'startTime', 'problem', 'priorityTime', 'priorityReason',
-  'action', 'actionTime', 'recoverTime', 'result'];
+check('正常的一份快照', readSnapshot(snapshotOf()).ok, true);
+check('★ 通过之后原样交出去（不做深拷贝、不悄悄补字段）',
+  readSnapshot(snapshotOf()).snapshot.nodes.length, 3);
+check('通过时 reason 是空串（不是 undefined）', readSnapshot(snapshotOf()).reason, '');
 
-/* --- beginEvent：这段异常开始了 --- */
+check('null', reasonOf(null),
+  [false, '快照顶层不是对象（收到 null）']);
+check('undefined', reasonOf(undefined),
+  [false, '快照顶层不是对象（收到 undefined）']);
+check('★ 数组（有人把 [] 当空快照发过来）', reasonOf([]),
+  [false, '快照顶层不是对象（收到 array）']);
+check('字符串', reasonOf('hello'),
+  [false, '快照顶层不是对象（收到 hello）']);
+check('数字', reasonOf(7), [false, '快照顶层不是对象（收到 7）']);
 
-check('beginEvent(null) -> null，不抛异常', beginEvent(null), null);
-check('beginEvent(undefined) -> null', beginEvent(undefined), null);
-check('★ status 是「正常」-> null（不许造出一个叫「连续正常」的东西）',
-  beginEvent(rec('正常', '2026-09-22 20:30:00')), null);
+check('没有 v', reasonOf({ nodes: [] })[1].indexOf('没有 v') >= 0, true);
+check('★ v 是字符串 "2"（JSON 里手写过一次 "2" 就会这样）',
+  reasonOf({ v: '2' })[1].indexOf('没有 v') >= 0, true);
+check('★ v 是 1（旧版 core）', reasonOf({ v: 1 }),
+  [false, '快照版本是 1，这个页面认的是 2（core.py 改了字段就要一起改）']);
+check('★ v 是 3（比这个页面新）',
+  reasonOf({ v: 3 })[1].indexOf('快照版本是 3') >= 0, true);
+check('★ v 是 NaN（JSON.parse 造不出来，但别的地方能）',
+  reasonOf({ v: NaN })[1].indexOf('没有 v') >= 0, true);
 
-const ev = beginEvent({ nodeId: 'dorm-b', status: '偏热', time: '2026-09-22 20:30:00' });
-check('★ problem 是「连续」+ 当时的 status', ev.problem, '连续偏热');
-check('★ startTime 就是这条消息的 time', ev.startTime, '2026-09-22 20:30:00');
-check('★ nodeId 照抄', ev.nodeId, 'dorm-b');
-check('★ 字段正好是那九列，而且**顺序**跟 CSV 表头一致',
-  Object.keys(ev), EVENT_KEYS);
+check('nodes 不是数组', reasonOf({ v: 2, nodes: {} })[1], '快照里没有 nodes 数组');
+check('events 整块没了', reasonOf({ v: 2, nodes: [] })[1],
+  '快照里没有 events（事件那一块）');
+check('events 在、events.events 不是数组',
+  reasonOf({ v: 2, nodes: [], events: { summary: {}, events: null } })[1],
+  '快照里没有 events（事件那一块）');
+check('rejects 整块没了',
+  reasonOf({ v: 2, nodes: [], events: { events: [] } })[1],
+  '快照里没有 rejects（被拒绝消息那一块）');
+check('counters 没了',
+  reasonOf({ v: 2, nodes: [], events: { events: [] }, rejects: { items: [] } })[1],
+  '快照里没有 counters');
 
-/* 还没发生的那几格一律 null / 空串。空串是 result 专用的：
-   它有个明确的「还没结案」含义，而 null 是「这件事压根没发生过」。 */
-check('刚开案时优先关注那两格是 null', [ev.priorityTime, ev.priorityReason], [null, null]);
-check('刚开案时处理动作那两格是 null', [ev.action, ev.actionTime], [null, null]);
-check('刚开案时 recoverTime 是 null', ev.recoverTime, null);
-check('★ 刚开案时 result 是**空字符串**（不是「进行中」也不是 null）', ev.result, '');
+check('priority 是字符串（不是对象也不是 null）',
+  reasonOf(Object.assign(snapshotOf(), { priority: 'dorm-a' }))[1],
+  'priority 既不是对象也不是 null');
+check('priority 是 null 是**允许**的（此刻没有重点）',
+  readSnapshot(snapshotOf({ priority: null })).ok, true);
+check('★ focus 是数组（旧版 core 没有这个字段，会拿到 undefined）',
+  reasonOf(Object.assign(snapshotOf(), { focus: [] }))[1],
+  'focus 既不是对象也不是 null（旧版 core 没有这个字段）');
+check('focus 是 null 是允许的（没人点名）',
+  readSnapshot(snapshotOf({ focus: null })).ok, true);
+check('★ focus 字段整个缺失也算不通过（旧版 core 的快照会被拦下，而不是整页显示 undefined）',
+  reasonOf(snapshotOf({ focus: undefined }))[1],
+  'focus 既不是对象也不是 null（旧版 core 没有这个字段）');
 
-/* 三种异常都要能开案，problem 跟着 status 走 */
-['偏冷', '偏热', '偏湿'].forEach((s) => {
-  check('★ ' + s + ' 开出来的 problem 是「连续' + s + '」',
-    beginEvent(rec(s, '2026-09-22 20:30:00')).problem, '连续' + s);
+/* 【只查形状，不查内容】core 那边就不拦 99℃（D4 第 5 条正是拿它演示的），
+   页面这一层更不该拦 —— 拦了的话，D4 那条演示在看板上什么都看不到，
+   而演示要看的恰恰就是「它照样被收下了」。 */
+const weird = snapshotOf({ nodes: [nodeRow('dorm-a', {
+  status: '偏热', temperature: 99, humidity: -5, abnormalCount: 999 })] });
+check('★★ 内容再离谱也放行（99℃ / -5% 都收）', readSnapshot(weird).ok, true);
+check('★ 而且原样交给页面（不修正、不夹紧）',
+  readSnapshot(weird).snapshot.nodes[0].temperature, 99);
+check('status 是页面上从没见过的词也放行',
+  readSnapshot(snapshotOf({ nodes: [nodeRow('dorm-a', { status: '台风' })] })).ok, true);
+
+/* ---------- C. nodeOf ---------- */
+
+console.log('\n=== C. nodeOf ===');
+
+const base = snapshotOf();
+check('找得到 dorm-b', nodeOf(base, 'dorm-b').nodeId, 'dorm-b');
+check('找不到就是 null（不抛）', nodeOf(base, 'dorm-z'), null);
+check('snapshot 是 null', nodeOf(null, 'dorm-b'), null);
+check('snapshot 是 undefined', nodeOf(undefined, 'dorm-b'), null);
+check('nodes 不是数组', nodeOf({ nodes: 'x' }, 'dorm-b'), null);
+check('nodes 里夹了个 null 也不炸', nodeOf({ nodes: [null, nodeRow('dorm-a')] }, 'dorm-a').nodeId, 'dorm-a');
+check('★ 一个宿舍都没有时是 null，不是造一个空的出来',
+  nodeOf(snapshotOf({ nodes: [] }), 'dorm-a'), null);
+/* 节点名不是写死的 —— 把 core 的 config.json 改成 dorm-x，这里照样找得到 */
+check('★ 换一个没见过的节点名照样找得到（名字来自快照，不是写死的）',
+  nodeOf(snapshotOf({ nodes: [nodeRow('dorm-x')] }), 'dorm-x').nodeId, 'dorm-x');
+
+/* ---------- D. 事件：openEvent / latestEvent / eventStateText / handlingOf ---------- */
+
+console.log('\n=== D. 事件 ===');
+
+const withEvents = snapshotOf({
+  events: {
+    summary: { total: 3 },
+    events: [
+      eventRow({ nodeId: 'dorm-a', state: 'RECOVERED', recoverTime: '2026-09-22 20:10:00' }),
+      eventRow({ nodeId: 'dorm-b', state: 'OPEN' }),
+      eventRow({ nodeId: 'dorm-c', state: 'UNRESOLVED', endTime: '2026-09-22 20:20:00' }),
+    ],
+  },
 });
 
-/* beginEvent 只读 record.status，不自己复核 —— 复核是 dashboard 在调它之前做完的。
-   传一条「写着偏热、读数却是 25/60」的记录，这里就该按偏热开案。 */
-check('★ 只认 record.status，不自己重新判断（复核规则的只有 shared/rules.js 一份）',
-  beginEvent({ nodeId: 'dorm-a', status: '偏热', time: '2026-09-22 20:30:00',
-    temperature: 25, humidity: 60 }).problem, '连续偏热');
-
-/* 纯函数 */
-const srcRec = { nodeId: 'dorm-a', status: '偏湿', time: '2026-09-22 20:30:00' };
-const recBefore = JSON.stringify(srcRec);
-const e1 = beginEvent(srcRec);
-const e2 = beginEvent(srcRec);
-check('★ 不改传进来的那条记录', JSON.stringify(srcRec), recBefore);
-check('★ 每次返回新对象（两条事件不能共用一个对象）', e1 === e2, false);
-
-/* --- markPriority：第一次被选成「优先关注」 --- */
-
-check('markPriority(null, ...) -> null', markPriority(null, '2026-09-22 20:35:00', 'x'), null);
-check('★ 没有时间 -> null（不能记一个空时刻）',
-  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), null, 'x'), null);
-check('time 是空串 -> null', markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '', 'x'), null);
-
-const fresh = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
-const pri = markPriority(fresh, '2026-09-22 20:35:00', 'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长');
-check('★ 第一次记下时刻', pri.priorityTime, '2026-09-22 20:35:00');
-check('★ 原因原话照抄（页面上那条栏里显示的就是这一句）',
-  pri.priorityReason, 'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长');
-check('只返回这两个字段', Object.keys(pri).sort(), ['priorityReason', 'priorityTime']);
-
-/* ★ 只记第一次：之后再被选中不覆盖。复盘要回答的是「什么时候被注意到、
-   当时因为什么」，不是「最后一次看它时长什么样」。 */
-const stamped = Object.assign(beginEvent(rec('偏热', '2026-09-22 20:30:00')),
-  { priorityTime: '2026-09-22 20:35:00', priorityReason: '第一次的原因' });
-check('★ 已经记过 -> null，不覆盖（只记第一次）',
-  markPriority(stamped, '2026-09-22 20:50:00', '后来的原因'), null);
-check('★ 那条事件上的时刻和原因都还是第一次的',
-  [stamped.priorityTime, stamped.priorityReason],
-  ['2026-09-22 20:35:00', '第一次的原因']);
-
-/* reason 缺失时写空串，不写字符串 'null' —— 那四个字母会原样进 CSV */
-check('reason 是 null -> 空串（不是字符串 "null"）',
-  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:35:00', null)
-    .priorityReason, '');
-check('reason 是 undefined -> 空串',
-  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:35:00')
-    .priorityReason, '');
-check('reason 是数字 -> 转成字符串，不原样塞进去',
-  markPriority(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:35:00', 42)
-    .priorityReason, '42');
-
-/* 纯函数：返回局部对象，绝不就地改传进来的那条 */
-const pSrc = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
-const pBefore = JSON.stringify(pSrc);
-markPriority(pSrc, '2026-09-22 20:35:00', 'x');
-check('★ markPriority 不改传进来的事件（要不要写回去是调用方的事）',
-  JSON.stringify(pSrc), pBefore);
-
-/* --- markAction：处理动作 --- */
-
-check('markAction(null, ...) -> null', markAction(null, '风扇已开启', '2026-09-22 20:35:00'), null);
-check('没有动作名 -> null',
-  markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')), null, '2026-09-22 20:35:00'), null);
-check('动作名是空串 -> null',
-  markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '', '2026-09-22 20:35:00'), null);
-check('★ 没有时间 -> null（不能记一个空时刻）',
-  markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '风扇已开启', null), null);
-
-const act = markAction(beginEvent(rec('偏热', '2026-09-22 20:30:00')),
-  '风扇已开启', '2026-09-22 20:35:00');
-check('★ 第一次记下动作名', act.action, '风扇已开启');
-check('★ 和动作记在哪条数据上', act.actionTime, '2026-09-22 20:35:00');
-check('只返回这两个字段', Object.keys(act).sort(), ['action', 'actionTime']);
-
-/* ★ 也只记第一次：第二次按的时候 actionTime 会往前挪，但复盘要看的是
-   「这件事第一次被动手是什么时候、做了什么」。 */
-const acted = Object.assign(beginEvent(rec('偏热', '2026-09-22 20:30:00')),
-  { action: '风扇已开启', actionTime: '2026-09-22 20:35:00' });
-check('★ 已经记过 -> null，不覆盖（只记第一次）',
-  markAction(acted, '风扇已开启', '2026-09-22 20:40:00'), null);
-check('★ 那条事件上的动作时刻还是第一次的', acted.actionTime, '2026-09-22 20:35:00');
-
-const aSrc = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
-const aBefore = JSON.stringify(aSrc);
-markAction(aSrc, '风扇已开启', '2026-09-22 20:35:00');
-check('★ markAction 不改传进来的事件', JSON.stringify(aSrc), aBefore);
-
-/* --- closeEvent：结案 --- */
-
-check('closeEvent(null, ...) -> null', closeEvent(null, '2026-09-22 20:55:00'), null);
-check('★ 没有时间 -> null',
-  closeEvent(beginEvent(rec('偏热', '2026-09-22 20:30:00')), null), null);
-
-const closed = closeEvent(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:55:00');
-check('★ recoverTime 是让它恢复正常的那条消息的 time',
-  closed.recoverTime, '2026-09-22 20:55:00');
-check('★ result 是「已恢复」', closed.result, '已恢复');
-check('只返回这两个字段', Object.keys(closed).sort(), ['recoverTime', 'result']);
-
-check('★ 已经结过案 -> null（不重复结案，recoverTime 不会被后来的数据顶掉）',
-  closeEvent({ recoverTime: '2026-09-22 20:55:00', result: '已恢复' },
-    '2026-09-22 21:30:00'), null);
-
-/* 结案不做时间比较：该不该结案是 nextAbnormal 把 abnormalCount 清零说了算的，
-   这边只负责写下来。所以哪怕传一个比 startTime 还早的 time，它也照写 ——
-   这是**故意**的，不是漏了校验（代价见 README「报文没有乱序保护」）。 */
-check('★ 结案不看时间先后（该不该结案由 nextAbnormal 决定，这里只负责写）',
-  closeEvent(beginEvent(rec('偏热', '2026-09-22 20:30:00')), '2026-09-22 20:00:00')
-    .recoverTime, '2026-09-22 20:00:00');
-
-const cSrc = beginEvent(rec('偏热', '2026-09-22 20:30:00'));
-const cBefore = JSON.stringify(cSrc);
-closeEvent(cSrc, '2026-09-22 20:55:00');
-check('★ closeEvent 不改传进来的事件', JSON.stringify(cSrc), cBefore);
-
-/* --- 一个节点走完一整段：开案 -> 被关注 -> 动手 -> 结案 ---
-
-   四个函数拼起来用的样子，就是 dashboard.js 里 handleMessage 那一串。
-   全程只有**一个**对象，就地往上加字段。 */
-const walked = beginEvent({ nodeId: 'dorm-b', status: '偏热', time: '2026-09-22 20:30:00' });
-Object.assign(walked, markPriority(walked, '2026-09-22 20:35:00', 'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长'));
-Object.assign(walked, markAction(walked, '风扇已开启', '2026-09-22 20:35:00'));
-Object.assign(walked, closeEvent(walked, '2026-09-22 20:55:00'));
-
-check('★ 走完一整段之后，九列全填齐（CSV 那一行就是这么来的）',
-  Object.keys(walked).map((k) => walked[k]), [
-    'dorm-b',
-    '2026-09-22 20:30:00',
-    '连续偏热',
-    '2026-09-22 20:35:00',
-    'dorm-b 已连续偏热 5 分钟（3 次），持续时间最长',
-    '风扇已开启',
-    '2026-09-22 20:35:00',
-    '2026-09-22 20:55:00',
-    '已恢复',
-  ]);
-
-/* 段里状态变了也不另开一条 —— problem 是开案时定死的。
-   一段从偏热恶化成偏湿的经历，事后不该看起来像是从头就偏湿的。 */
-const worsen = beginEvent({ nodeId: 'dorm-b', status: '偏热', time: '2026-09-22 20:30:00' });
-worsen.latestStatus = '偏湿';
-check('★ problem 在开案时就定死，中途状态变了也不改名（它是这条事件的名字）',
-  worsen.problem, '连续偏热');
-check('★ 没有任何函数会去改 problem（markPriority / markAction / closeEvent 都只返回自己那几格）',
-  [markPriority(worsen, '2026-09-22 20:35:00', 'x'),
-    markAction(worsen, '风扇已开启', '2026-09-22 20:35:00'),
-    closeEvent(worsen, '2026-09-22 20:55:00')]
-    .map((p) => Object.prototype.hasOwnProperty.call(p, 'problem')),
-  [false, false, false]);
-
-/* ---------- I. Step 8-1：B1 当前总览 + B2 判断依据 ---------- */
-
-console.log('\n=== I. Step 8-1：当前总览 + 判断依据 ===');
-
-/* 三个节点的三份数据。时间全部写死成固定时刻 —— 和 7-1 算时长同一个道理：
-   两端都取报文里的 time，所以 20:00 到 20:20 永远是 20 分钟，
-   跟什么时候跑、在哪台机器上跑都没关系，断言才能写定值。 */
-function trio(a, b, c) {
-  return { 'dorm-a': a, 'dorm-b': b, 'dorm-c': c };
-}
-/* 正常节点：abnormalCount 是 0，abnormalStart 按约定也是 null */
-function calm(time) { return node(time, null, 0, '正常'); }
-/* 一条数据都还没收到的节点。页面刚打开、还没连上 broker 的那几秒就是这个样子 */
-function silent() { return { latest: null, abnormalStart: null, abnormalCount: 0 }; }
-
-const ALL_CALM = trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'),
-  calm('2026-09-22 20:00:00'));
-const NOBODY = trio(silent(), silent(), silent());
-
-check('★ 一条数据都没有时不说「都正常」——那是**不知道**，不是正常',
-  buildOverview(NOBODY), '还没有收到任何节点的数据。');
-check('★ 一条数据都没有时，依据也说不出——不硬编一句糊弄过去',
-  buildReasons(NOBODY), '还没有收到任何节点的数据，说不出依据。');
-check('★ nodes 是空对象也不炸',
-  buildOverview({}), '还没有收到任何节点的数据。');
-check('★ nodes 是 undefined 也不炸',
-  typeof buildReasons(undefined), 'string');
-check('★ 都正常：总览不硬凑「0 个需要关注」',
-  buildOverview(ALL_CALM), '当前 3 个宿舍都正常。');
-check('★ 都正常：依据说清「没有要优先处理的」',
-  buildReasons(ALL_CALM), '当前 3 个宿舍都正常，没有要优先处理的宿舍。');
-check('★ 都正常时总览里不出现「是当前重点」（没有重点就别造一个）',
-  /当前重点/.test(buildOverview(ALL_CALM)), false);
-check('★ 只收到 2 个节点的数据时，「都正常」要改口——第 3 个是不知道',
-  buildOverview(trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'), silent())),
-  '当前 3 个宿舍中，2 个正常，另有 1 个还没有收到数据。');
-
-/* ---- 一个异常 ---- */
-
-const ONE = trio(calm('2026-09-22 20:00:00'),
-  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-  calm('2026-09-22 20:00:00'));
-
-check('★ 一个异常：总览先说计数，再点出重点',
-  buildOverview(ONE),
-  '当前 3 个宿舍中，2 个正常，1 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点。');
-check('★ 一个异常：依据里正常的两个直说「当前正常」，不硬拉来比较',
-  buildReasons(ONE),
-  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），是目前唯一的异常节点；'
-  + 'dorm-a 当前正常；dorm-c 当前正常。');
-
-/* ---- 两个异常：靠时长决出（就是需求里给的那两句）---- */
-
-const TWO = trio(calm('2026-09-22 20:00:00'),
-  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-  node('2026-09-22 20:20:00', '2026-09-22 20:15:00', 2, '偏湿'));
-
-check('★ 两个异常：总览多出一笔「dorm-c 出现偏湿」',
-  buildOverview(TWO),
-  '当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点；'
-  + 'dorm-c 出现偏湿。');
-check('★ 两个异常：依据逐个对比，输的那个说清输在哪一步',
-  buildReasons(TWO),
-  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），持续时间最长；'
-  + 'dorm-c 虽然偏湿，但只持续 5 分钟；dorm-a 当前正常。');
-
-/* ---- 时长打平、靠次数决出 ---- */
-
-const TIE = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 4, '偏热'),
-  calm('2026-09-22 20:00:00'));
-
-check('★ 时长打平时，输的那个不能写成「只持续 20 分钟」——它并没有更短',
-  buildReasons(TIE),
-  '优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间和 dorm-a 一样长，异常次数最多；'
-  + 'dorm-a 也偏冷，持续时间和它一样长，但只有 2 条异常数据；dorm-c 当前正常。');
-
-/* ---- 时长和条数都打平，靠严重度分胜负 ---- */
-
-const SEV = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-  calm('2026-09-22 20:00:00'));
-
-check('★ 时长条数都一样时靠严重度定序：偏热 > 偏冷',
-  buildReasons(SEV),
-  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），持续时间和 dorm-a 一样长、异常次数也一样，'
-  + '但偏热比偏冷更要紧；'
-  + 'dorm-a 也偏冷，时长和次数都跟它一样，但偏冷没有偏热要紧；dorm-c 当前正常。');
-
-/* ---- 连严重度都一样，只能按节点名定序 ---- */
-
-const DEAD = trio(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-  calm('2026-09-22 20:00:00'));
-
-check('★ 完全并列时明说是靠节点名排的，不装作赢了',
-  buildReasons(DEAD),
-  '优先关注 dorm-a：已连续偏热 20 分钟（2 次），和 dorm-b 完全并列，按节点名顺序排在前面；'
-  + 'dorm-b 也偏热，时长和次数都跟它一样，按节点名顺序排在后面；dorm-c 当前正常。');
-
-/* ---- 处理状态 ---- */
-
-const HANDLING = trio(calm('2026-09-22 20:00:00'),
-  Object.assign(node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-    { handling: '处理中', action: '风扇已开启' }),
-  node('2026-09-22 20:20:00', '2026-09-22 20:15:00', 2, '偏湿'));
-
-check('★ 正在处理的节点，总览里如实补一句；计数口径不变，仍算「需要关注」',
-  buildOverview(HANDLING),
-  '当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，是当前重点'
-  + '（风扇已开启，处理中）；dorm-c 出现偏湿。');
-check('★ 依据里也带上处理状态',
-  buildReasons(HANDLING).indexOf('（风扇已开启，处理中）') >= 0, true);
-/* 处理状态只是如实报出来，不参与排序 —— 真按「有没有人管」排是另一套规则。
-   这里用同一份数据（只差 handling 那几个字段）验证：重点和原因一字不变。 */
-check('★ 处理状态不参与排序：同一份数据按不按风扇，「谁是重点、因为什么」都一样',
-  pickPriority(HANDLING).reason, pickPriority(TWO).reason);
-/* 一个**已经正常**、handling 却还停在「处理中」的节点：风扇是按在旧数据上的，
-   之后来的那条正常数据比动作还早（见 nextHandling 的时间判断），所以状态回来了
-   但处理状态没跟上。这时候写「（风扇已开启，处理中）」是自相矛盾的
-   —— 都正常了还处理什么。 */
-check('★ 状态已经正常、处理状态却还停在「处理中」的节点，不带那个括号',
-  buildReasons(trio(
-    Object.assign(calm('2026-09-22 20:00:00'),
-      { handling: '处理中', action: '风扇已开启' }),
-    node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-    calm('2026-09-22 20:00:00'))).indexOf('处理中'), -1);
-
-/* ---- 有节点还没收到数据 ---- */
-
-const MIXED = trio(silent(),
-  node('2026-09-22 20:20:00', '2026-09-22 20:00:00', 2, '偏热'),
-  calm('2026-09-22 20:00:00'));
-
-check('★ 没收到数据的节点单独说，不算进「正常」里（三个数加起来正好是宿舍数）',
-  buildOverview(MIXED),
-  '当前 3 个宿舍中，1 个正常，1 个需要关注，另有 1 个还没有收到数据；'
-  + 'dorm-b 已持续偏热 20 分钟，是当前重点。');
-check('★ 依据里没数据的那个也说成「还没有收到数据」，不冒充正常',
-  buildReasons(MIXED),
-  '优先关注 dorm-b：已连续偏热 20 分钟（2 次），是目前唯一的异常节点；'
-  + 'dorm-a 还没有收到数据；dorm-c 当前正常。');
-
-/* ---- 一个数字、一个名字都不许写死 ---- */
-
-const FOUR = {
-  'dorm-a': calm('2026-09-22 20:00:00'),
-  'dorm-b': node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
-  'dorm-c': node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 2, '偏湿'),
-  'dorm-d': node('2026-09-22 20:30:00', '2026-09-22 20:20:00', 1, '偏冷'),
-};
-
-check('★ 换成四个宿舍照样说得对：宿舍数是数出来的，不是写死的 3',
-  buildOverview(FOUR),
-  '当前 4 个宿舍中，1 个正常，3 个需要关注；dorm-b 已持续偏热 30 分钟，是当前重点；'
-  + 'dorm-c 出现偏湿、dorm-d 出现偏冷。');
-check('★ 四个节点时依据也跟着走：三个异常各自一句，正常的那个照实说',
-  buildReasons(FOUR),
-  '优先关注 dorm-b：已连续偏热 30 分钟（3 次），持续时间最长；'
-  + 'dorm-c 虽然偏湿，但只持续 20 分钟；dorm-d 虽然偏冷，但只持续 10 分钟；'
-  + 'dorm-a 当前正常。');
-
-/* 三个都不正常：为 0 的那一档不写出来（「0 个正常」又长又没信息）。
-   和上面「都正常时不写 0 个需要关注」是同一个口径。 */
-const ALL_BAD = trio(
-  node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 2, '偏冷'),
-  node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
-  node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 1, '偏湿'));
-
-check('★ 三个都不正常时，不写「0 个正常」那一档',
-  buildOverview(ALL_BAD),
-  '当前 3 个宿舍中，3 个需要关注；dorm-b 已持续偏热 30 分钟，是当前重点；'
-  + 'dorm-a 出现偏冷、dorm-c 出现偏湿。');
-check('★ 三个都不正常时也单独说了没数据的那个（只收了 1 条消息）',
-  buildOverview(trio(silent(),
-    node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
-    node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 1, '偏湿'))),
-  '当前 3 个宿舍中，2 个需要关注，另有 1 个还没有收到数据；'
-  + 'dorm-b 已持续偏热 30 分钟，是当前重点；dorm-c 出现偏湿。');
-
-/* 节点名的字典序和严重程度**不一致**的一组。
-   上面每一组的 dorm-a/b/c 恰好都按 a < b < c 排，正好和「越靠前越严重」
-   重合 —— 那样即使把「还有谁异常」写成按 nodes 键顺序遍历，结果也一模一样，
-   测不出区别。这一组故意把最严重的放在中间：
-   dorm-a 只异常 5 分钟，dorm-b 异常 30 分钟（重点），dorm-c 异常 20 分钟。
-   键顺序是 a/b/c，严重程度是 b/c/a，两者必须分得开。 */
-const OUT_OF_ORDER = {
-  'dorm-a': node('2026-09-22 20:05:00', '2026-09-22 20:00:00', 1, '偏冷'),
-  'dorm-b': node('2026-09-22 20:30:00', '2026-09-22 20:00:00', 3, '偏热'),
-  'dorm-c': node('2026-09-22 20:30:00', '2026-09-22 20:10:00', 2, '偏湿'),
-  'dorm-d': calm('2026-09-22 20:00:00'),
-};
-
-check('★ 「还有谁异常」按严重程度排，不是按 nodes 的键顺序',
-  buildOverview(OUT_OF_ORDER),
-  '当前 4 个宿舍中，1 个正常，3 个需要关注；dorm-b 已持续偏热 30 分钟，是当前重点；'
-  + 'dorm-c 出现偏湿、dorm-a 出现偏冷。');
-check('★ 依据里也是先重点、再按严重程度一路排下来',
-  buildReasons(OUT_OF_ORDER),
-  '优先关注 dorm-b：已连续偏热 30 分钟（3 次），持续时间最长；'
-  + 'dorm-c 虽然偏湿，但只持续 20 分钟；dorm-a 虽然偏冷，但只持续 5 分钟；'
-  + 'dorm-d 当前正常。');
-
-const RENAMED = {
-  'north-1': calm('2026-09-22 20:00:00'),
-  'south-2': node('2026-09-22 20:10:00', '2026-09-22 20:00:00', 1, '偏冷'),
-};
-
-check('★ 节点名换掉、状态换掉、宿舍数换掉，同一份代码说的还是实话',
-  buildOverview(RENAMED),
-  '当前 2 个宿舍中，1 个正常，1 个需要关注；south-2 已持续偏冷 10 分钟，是当前重点。');
-check('★ 依据里的节点名和状态也全都来自数据',
-  buildReasons(RENAMED),
-  '优先关注 south-2：已连续偏冷 10 分钟（1 次），是目前唯一的异常节点；'
-  + 'north-1 当前正常。');
-
-/* ---- 和顶部那条栏的一致性：这是这两句存在的意义 ---- */
-
-[[TWO, '两个异常'], [FOUR, '四个节点'], [TIE, '时长打平'], [DEAD, '完全并列'],
-  [MIXED, '有节点没数据'], [ONE, '一个异常'], [RENAMED, '换过名字']]
-  .forEach(function (item) {
-    const nodes = item[0];
-    const label = item[1];
-    const pick = pickPriority(nodes);
-    const overview = buildOverview(nodes);
-    const reasons = buildReasons(nodes);
-
-    check('★ [' + label + '] 总览点的重点和优先关注栏是同一个人',
-      overview.indexOf(pick.nodeId + ' 已持续') >= 0, true);
-    /* 栏里是「dorm-b 已连续…」，依据是「优先关注 dorm-b：已连续…」——
-       去掉开头那个节点名之后必须逐字相同。各拼一份的话，两处对
-       「赢在哪一步」的说法迟早会不一样。 */
-    check('★ [' + label + '] 依据开头那半句和栏里的原因逐字相同',
-      reasons.indexOf('优先关注 ' + pick.nodeId + '：'
-        + pick.reason.slice(pick.nodeId.length + 1)), 0);
-    check('★ [' + label + '] 重点在依据里只说一遍（不在后面那拨对比里再出现一次）',
-      reasons.split(pick.nodeId).length - 1, 1);
-    check('★ [' + label + '] 两句话都以句号收尾',
-      [/。$/.test(overview), /。$/.test(reasons)], [true, true]);
-  });
-
-/* ---- 纯函数 ---- */
-
-const SNAPSHOT = JSON.stringify(FOUR);
-buildOverview(FOUR);
-buildReasons(FOUR);
-pickPriority(FOUR);
-check('★ 总览和依据都不改传进来的 nodes（页面那边读的是同一份对象）',
-  JSON.stringify(FOUR), SNAPSHOT);
-
-/* 同一个输入永远同一个输出 —— 这两句会被反复重画，带上任何「当前时间」
-   或随机成分，页面上就会出现两句对不上的话。 */
-check('★ 同样的输入连着算两遍，两句话一字不差',
-  [buildOverview(TWO) === buildOverview(TWO), buildReasons(TWO) === buildReasons(TWO)],
-  [true, true]);
-
-/* ---------- J. Step 8-3：当前重点一行 + 语音提醒 ---------- */
-
-console.log('\n=== J. Step 8-3：当前重点一行 + 语音提醒 ===');
-
-/* 这一步是**信息分工**：页面上原来有三处在说「谁是重点」（7-1 那条栏、
-   B1 总览、B2 依据），8-3 并成看板顶部一行，剩下的细节分给 3D / 语音 /
-   report.html。所以这里测的是两个新出口各自「该说什么、不该说什么」。
-
-   两个函数都必须从 pickPriority 出发 —— 「谁是重点」只有一份实现。
-   两处各挑一次的话，页面上会出现「那一行说的是 dorm-b、语音念的是 dorm-c」，
-   而且不会有任何地方报错。J3 最后一组专门钉这一条。 */
-
-/**
- * 一个带历史记录的节点。tempTrend 只看 history 的最后两条，
- * 所以 history 的**方向**很关键：最后一个是「刚收到的那条」，
- * 和页面里 history.push() 的方向一致（新的在后）。
- *
- * @param {number[]} temps 温度序列，最后一个是最新那条
- * @param {Object} [opts] time / start / count / status / handling
- */
-function traced(temps, opts) {
-  const o = opts || {};
-  const time = o.time || '2026-09-22 20:20:00';
-  const n = node(time, o.start || '2026-09-22 20:00:00',
-    o.count === undefined ? 2 : o.count, o.status || '偏热');
-  n.history = temps.map((t) => ({ time: time, temperature: t }));
-  if (o.handling) {
-    n.handling = o.handling;
-    n.action = '风扇已开启';
-  }
-  return n;
-}
-
-/* ---- J1. tempTrend：最近两条温度往哪走 ---- */
-
-check('★ 后一条比前一条高 -> 上升', tempTrend(traced([24, 26])), '上升');
-check('★ 后一条比前一条低 -> 下降', tempTrend(traced([26, 24])), '下降');
-check('★ 一样 -> 持平', tempTrend(traced([25, 25])), '持平');
-/* 只看最近两条。看更长的一段就成了「这一段的走势」，那是趋势图的事。 */
-check('★ 只看最近两条：前面跌得再狠，最近一次是涨的就是「上升」',
-  tempTrend(traced([30, 24, 26])), '上升');
-check('★ 反过来也一样：前面涨得再高，最近一次是跌的就是「下降」',
-  tempTrend(traced([18, 33, 31])), '下降');
-/* 比的是精确值，不设「小于 0.5℃ 算没变」那种容差 ——
-   设阈值要先定下来多少算没变，那是另一套规则，这一步不定；
-   而且真实数据里 24.9 → 25.0 确实就是在上升。 */
-check('★ 差 0.1℃ 也算上升（没有容差）', tempTrend(traced([24.9, 25])), '上升');
-check('★ 差 0.1℃ 也算下降', tempTrend(traced([25, 24.9])), '下降');
-
-/* 【只有一条记录时是空串，不是「持平」】这两件事不一样：
-   一条数据说不出「在往哪走」，说成「持平」就是把「不知道」说成了「没变」——
-   和 B1 那边「还没有收到数据 ≠ 正常」是同一条原则。 */
-check('★ 只有一条记录 -> 空串（说不出往哪走，不写成「持平」）',
-  tempTrend(traced([25])), '');
-check('一条记录都没有 -> 空串', tempTrend(traced([])), '');
-check('没有 history 字段 -> 空串，不炸', tempTrend(node('2026-09-22 20:20:00',
-  '2026-09-22 20:00:00', 2, '偏热')), '');
-check('history 不是数组 -> 空串，不炸', tempTrend({ history: '昨天' }), '');
-check('history 里有一项是 null -> 空串，不炸',
-  tempTrend({ history: [{ temperature: 25 }, null] }), '');
-check('温度不是有限数字 -> 空串（NaN 走进比较会得出「持平」这种假结论）',
-  [tempTrend({ history: [{ temperature: 25 }, { temperature: NaN }] }),
-    tempTrend({ history: [{ temperature: 25 }, { temperature: '26' }] }),
-    tempTrend({ history: [{ temperature: 25 }, {}] })], ['', '', '']);
-check('节点是 null / undefined / 空对象 -> 空串，不炸',
-  [tempTrend(null), tempTrend(undefined), tempTrend({})], ['', '', '']);
-
-/* ---- J2. buildFocus：看板顶部那一行 ---- */
-
-/* 平静时候那一行不带句号 —— 它不是一句话，是一个状态标签。
-   和 buildAlert（那一句是要念出来的）不一样，两边刻意各写各的标点。 */
-check('★ 一条数据都没有 -> 「还没有收到任何节点的数据」（不是「都正常」）',
-  buildFocus(NOBODY), '还没有收到任何节点的数据');
-check('★ 都正常 -> 「当前 3 个宿舍都正常」', buildFocus(ALL_CALM), '当前 3 个宿舍都正常');
-check('★ 只收到 2 个节点的数据 -> 两个数都报出来（第 3 个是不知道，不是正常）',
-  buildFocus(trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'), silent())),
-  '当前 2 个宿舍正常，另有 1 个还没有收到数据');
-check('nodes 是空对象 / undefined 也不炸',
-  [buildFocus({}), buildFocus(undefined)],
-  ['还没有收到任何节点的数据', '还没有收到任何节点的数据']);
-
-/* 有一条异常、只有一条数据：说不出往哪走，就只剩宿舍名。
-   拼不出来的那一段**整个不出现**，不留一个空串或两个连着的 ｜。 */
-check('★ 只有一条数据时只剩宿舍名（说不出「往哪走」就不说）',
-  buildFocus(ONE), 'dorm-b');
-check('★ 没有连着两个 ｜（空的那一段是整个不出现，不是拼个空串）',
-  buildFocus(ONE).includes('｜｜'), false);
-check('没有 ｜ 收尾 / 开头（段是拼上去的，不是占位符）',
-  [/｜$/.test(buildFocus(ONE)), /^｜/.test(buildFocus(ONE))], [false, false]);
-
-/* 规格里给的那个例子：谁、在不在处理、往哪走 */
-const BUSY = trio(calm('2026-09-22 20:00:00'),
-  traced([31, 30], { handling: '处理中' }),
-  calm('2026-09-22 20:00:00'));
-
-check('★ 三段拼起来就是规格里那个样子', buildFocus(BUSY), 'dorm-b｜处理中｜温度正在下降');
-check('★ 没按过按钮就没有「处理中」那一段',
-  buildFocus(trio(calm('2026-09-22 20:00:00'), traced([31, 30]),
-    calm('2026-09-22 20:00:00'))),
-  'dorm-b｜温度正在下降');
-/* 【「无」是字符串，所以它真的】上面那条用的是「没有 handling 这个字段」，
-   但页面里跑起来时不是那样：没按过按钮的节点，handling 就是字符串 '无'
-   （见 nextHandling / beginEvent）。所以这里不能只判 `if (node.handling)` ——
-   那样拼出来是「dorm-b｜无｜温度正在下降」，把「没人在处理」说成了一段内容。 */
-check('★ handling 是「无」（页面里没按过按钮就是这个值）-> 也不拼这一段',
-  buildFocus(trio(calm('2026-09-22 20:00:00'), traced([31, 30], { handling: '无' }),
-    calm('2026-09-22 20:00:00'))),
-  'dorm-b｜温度正在下降');
-/* 同一个坑，另一侧：handlingNote 用的是白名单（只认「处理中」），
-   所以语音那句本来就不会念出「无」。钉住这个不对称，免得日后统一成黑名单。 */
-check('★ 语音那句也不念「无」',
-  buildAlert(trio(calm('2026-09-22 20:00:00'), traced([31, 30], { handling: '无' }),
-    calm('2026-09-22 20:00:00'))).includes('无'),
+check('OPEN 算未结案', openEvent(withEvents, 'dorm-b').state, 'OPEN');
+check('★ RECOVERED 不算未结案（结过案的属于事件表，不属于「此刻在处理吗」）',
+  openEvent(withEvents, 'dorm-a'), null);
+check('★ UNRESOLVED 也不算未结案', openEvent(withEvents, 'dorm-c'), null);
+check('这个宿舍没有事件', openEvent(withEvents, 'dorm-z'), null);
+check('没有 events 这一块时是 null（不抛）', openEvent(null, 'dorm-b'), null);
+
+const twoOpen = snapshotOf({
+  events: { summary: {}, events: [
+    eventRow({ nodeId: 'dorm-b', state: 'OPEN', startTime: '2026-09-22 20:00:00' }),
+    eventRow({ nodeId: 'dorm-b', state: 'HANDLING', startTime: '2026-09-22 20:20:00' }),
+  ] },
+});
+check('★ 同一个宿舍两条没结案时取**后**一条（core 保证不会，但重启读到两条时取最近的更对）',
+  openEvent(twoOpen, 'dorm-b').startTime, '2026-09-22 20:20:00');
+
+check('latestEvent 拿到结过案的那条', latestEvent(withEvents, 'dorm-a').state, 'RECOVERED');
+check('latestEvent 在没有事件时是 null', latestEvent(withEvents, 'dorm-z'), null);
+const twoForB = snapshotOf({
+  events: { summary: {}, events: [
+    eventRow({ nodeId: 'dorm-b', state: 'RECOVERED', startTime: '2026-09-22 19:00:00' }),
+    eventRow({ nodeId: 'dorm-b', state: 'OPEN', startTime: '2026-09-22 20:00:00' }),
+  ] },
+});
+check('★ latestEvent 取最后一条（不是第一条，也不是「最后一条未结案」）',
+  latestEvent(twoForB, 'dorm-b').startTime, '2026-09-22 20:00:00');
+check('★ openEvent 和 latestEvent 可以指向不同两条（这不是 bug，是两个问题）',
+  [openEvent(twoForB, 'dorm-b').state, latestEvent(twoForB, 'dorm-b').state],
+  ['OPEN', 'OPEN']);
+
+check('OPEN -> 待处理', eventStateText('OPEN'), '待处理');
+check('HANDLING -> 处理中', eventStateText('HANDLING'), '处理中');
+check('RECOVERED -> 已恢复', eventStateText('RECOVERED'), '已恢复');
+check('UNRESOLVED -> 未恢复', eventStateText('UNRESOLVED'), '未恢复');
+check('★ 认不出来的原样返回（不假装懂、也不吞掉）', eventStateText('PAUSED'), 'PAUSED');
+check('空串 -> 空串', eventStateText(''), '');
+check('null -> 空串', eventStateText(null), '');
+check('undefined -> 空串', eventStateText(undefined), '');
+check('★ 不是字符串的（数字）-> 空串，不抛', eventStateText(3), '');
+/* 原型链上的名字：用 hasOwnProperty 判的话 'toString' 会走漏，
+   拿到一个函数当状态名。core 那边不会发这种，但挡一下不要钱。 */
+check('★ "toString" 这种原型链上的名字不许被当成已知状态',
+  eventStateText('toString'), 'toString');
+
+check('没有事件 -> 无', handlingOf(withEvents, 'dorm-z').label, '无');
+check('没有事件时 event 是 null', handlingOf(withEvents, 'dorm-z').event, null);
+check('没有事件时 after 是 0', handlingOf(withEvents, 'dorm-z').after, 0);
+check('OPEN -> 待处理', handlingOf(withEvents, 'dorm-b').label, '待处理');
+check('HANDLING -> 处理中', handlingOf(busySnapshot(), 'dorm-b').label, '处理中');
+check('★ 结过案的宿舍 -> 无（卡片上不该还挂着「处理中」）',
+  handlingOf(withEvents, 'dorm-a').label, '无');
+check('after 读的是 core 数好的 abnormalAfter',
+  handlingOf(busySnapshot(), 'dorm-b').after, 2);
+check('★ abnormalAfter 缺失时是 0，不是 NaN',
+  handlingOf(withEvents, 'dorm-b').after, 0);
+check('★ abnormalAfter 是字符串时也是 0（不把 "2" 当 2 用）',
+  handlingOf(snapshotOf({ events: { summary: {}, events: [eventRow({ abnormalAfter: '2' })] } }), 'dorm-a').after,
+  0);
+check('event 那一栏给的就是快照里那条本身',
+  handlingOf(withEvents, 'dorm-b').event === withEvents.events.events[1], true);
+
+/* ---------- E. actionState（「开始处理」按钮） ---------- */
+
+console.log('\n=== E. actionState ===');
+
+check('★ 还没收到快照 -> 灰着', actionState(null, 'dorm-b').enabled, false);
+check('没收到快照时那句话说了原因',
+  actionState(null, 'dorm-b').note.indexOf('core 还没收到这个节点的数据') >= 0, true);
+check('★ 这个宿舍还没数据 -> 灰着（按了也没有对应的事件）',
+  actionState(snapshotOf({ nodes: [nodeRow('dorm-a', { status: null, temperature: null })] }), 'dorm-a').enabled,
   false);
-check('★ 持平时的说法是「温度持平」，不是「温度正在持平」',
-  buildFocus(trio(calm('2026-09-22 20:00:00'), traced([31, 31], { handling: '处理中' }),
-    calm('2026-09-22 20:00:00'))),
-  'dorm-b｜处理中｜温度持平');
+check('还没数据那句话说的是「还没有收到」而不是「正常」',
+  actionState(snapshotOf({ nodes: [nodeRow('dorm-a', { status: null })] }), 'dorm-a').note
+    .indexOf('正常'), -1);
 
-/* 【这一行里没有状态】这是分工的结果，不是漏了：
-   状态由卡片徽章（颜色 + 形状 + 文字）、3D 场景、语音一起承担。
-   一行字里塞四样东西，就又变回 8-1 那种「两句话交代所有事」了。 */
-check('★ 这一行里不写状态（偏热/偏冷/偏湿一个都不出现）',
-  ['偏热', '偏冷', '偏湿'].map((s) => buildFocus(BUSY).includes(s)), [false, false, false]);
-/* 【也不写「风扇已开启」】开了什么是**空间动作**，3D 里风扇转着比一行字直观 ——
-   那正是 3D 该承担的部分。这一行只报「有没有人在处理」。 */
-check('★ 也不写「风扇已开启」（那是 3D 的事）',
-  [buildFocus(BUSY).includes('风扇已开启'), buildFocus(BUSY).includes('处理中')],
-  [false, true]);
-/* 一句原因也不写。它归 report.html ——那里才是交代来龙去脉的地方。 */
-check('★ 不写那句原因（「持续时间最长」之类一个都没有）',
-  buildFocus(BUSY).includes('已持续'), false);
+check('★ 有一条待处理的事件 -> 可以按', actionState(withEvents, 'dorm-b').enabled, true);
+check('可以按时旁边那行是空的（不用多说一句）', actionState(withEvents, 'dorm-b').note, '');
 
-/* ---- J3. buildAlert：语音念的那一句 ---- */
+const handlingState = actionState(busySnapshot(), 'dorm-b');
+check('★ 已经在处理中 -> 灰着', handlingState.enabled, false);
+check('处理中那句话点明了「再按只会多记一笔」',
+  handlingState.note.indexOf('再按一次只会多记一笔动作') > 0, true);
+check('处理中那句话带上了「之后又收到 2 条异常」',
+  handlingState.note.indexOf('之后又收到 2 条异常') > 0, true);
 
-/* 只有一句 —— 这是这个出口的约束，不是偷懒：声音是线性的，说过就过去了，
-   没人能回头翻。念三段话，听的人只记得住最后一句。 */
-check('★ 一条数据都没有 -> 念的是「还没有收到数据」，不是「都正常」',
-  buildAlert(NOBODY), '还没有收到任何节点的数据。');
-check('★ 都正常 -> 念的是「都正常」', buildAlert(ALL_CALM), '当前 3 个宿舍都正常。');
-check('★ 平静时的两句以句号收尾（要念出来，得自成一句）',
-  [/。$/.test(buildAlert(NOBODY)), /。$/.test(buildAlert(ALL_CALM))], [true, true]);
+const normalNoEvent = actionState(snapshotOf(), 'dorm-a');
+check('★ 状态正常、也没事件 -> 灰着', normalNoEvent.enabled, false);
+check('那句话说的是「没有未结案的事件」',
+  normalNoEvent.note.indexOf('没有未结案的事件') > 0, true);
 
-check('★ 一个异常：念的是「谁、什么状态、持续了多久」',
-  buildAlert(ONE), 'dorm-b 偏热已持续 20 分钟。');
-check('★ 有趋势就跟着念出来，自成一句',
-  buildAlert(trio(calm('2026-09-22 20:00:00'), traced([31, 30]),
-    calm('2026-09-22 20:00:00'))),
-  'dorm-b 偏热已持续 20 分钟，温度正在下降。');
-check('★ 正在处理就念出来（复用 handlingNote，和那一行、事件记录是同一份说法）',
-  buildAlert(BUSY), 'dorm-b 偏热已持续 20 分钟（风扇已开启，处理中），温度正在下降。');
-/* 念出来是「竖线」两个字，所以语音那一句里绝不能有 ｜ ——
-   这正是「两个出口不一样、不能共用一个字符串」的地方。 */
-check('★ 语音那句里没有 ｜（念出来是「竖线」）',
-  buildAlert(BUSY).includes('｜'), false);
+const hotNoEvent = actionState(snapshotOf({ nodes: [nodeRow('dorm-b', {
+  status: '偏热', abnormalCount: 2 })] }), 'dorm-b');
+check('★ 异常但 core 还没开案 -> 灰着（开案是 core 的规矩）',
+  hotNoEvent.enabled, false);
+check('★ 那句话把「连着几条了」报出来（数字来自快照，不是这边写死的 3）',
+  hotNoEvent.note.indexOf('现在连着 2 条') > 0, true);
+const hotOther = actionState(snapshotOf({ nodes: [nodeRow('dorm-b', {
+  status: '偏热', abnormalCount: 5 })] }), 'dorm-b');
+check('★ 换成连着 5 条，那句话跟着变成 5（说明这个数不是写死的）',
+  hotOther.note.indexOf('现在连着 5 条') > 0, true);
+check('★ abnormalCount 缺失时报 0，不报 NaN',
+  actionState(snapshotOf({ nodes: [nodeRow('dorm-b', { status: '偏热', abnormalCount: null })] }), 'dorm-b')
+    .note.indexOf('现在连着 0 条') > 0, true);
 
-/* 【语音只说结果，不说排序依据】「是目前唯一的异常节点」「持续时间最长」
-   那套是 B2 依据的话，写在 report.html 里给人对着表格慢慢看。
-   念出来是一串听一遍就过去的字，交代不了「为什么不是别人」。 */
-check('★ 不念输赢的理由（不提别的宿舍、不说「唯一」）',
-  [buildAlert(ONE).includes('唯一'), buildAlert(TWO).includes('dorm-a'),
-    buildAlert(TWO).includes('持续最长')], [false, false, false]);
-check('两个都异常时也只念重点那一个，不把两个都念一遍',
-  [buildAlert(TWO), buildAlert(TWO).includes('dorm-c')],
-  ['dorm-b 偏热已持续 20 分钟。', false]);
-check('★ 每次都以句号收尾', /。$/.test(buildAlert(BUSY)), true);
+/* 【以 core 的事件为准】处理之后连着几条正常、还没到恢复的条数时，
+   node.status 已经是「正常」了，而 core 那边那条事件还挂着 HANDLING。
+   这时候按钮该是什么样由**事件**说，不由 status 说 —— 两句要是有出入，
+   按 core 的来（不然「屏幕说正常、core 还在处理」，两边各说各的）。 */
+const recoveredButOpen = snapshotOf({
+  nodes: [nodeRow('dorm-b', { status: '正常' })],
+  events: { summary: {}, events: [eventRow({ nodeId: 'dorm-b', state: 'HANDLING' })] },
+});
+check('★★ status 已经是正常、但事件还在处理中 -> 仍然灰着（以 core 的事件为准）',
+  actionState(recoveredButOpen, 'dorm-b').enabled, false);
+check('★★ 而且那句话说的是「处理中」，不是「状态正常」',
+  actionState(recoveredButOpen, 'dorm-b').note.indexOf('正在处理中') > 0, true);
 
-/* ---- 两个出口必须指向同一个人 ---- */
+const normalButOpen = snapshotOf({
+  nodes: [nodeRow('dorm-b', { status: '正常' })],
+  events: { summary: {}, events: [eventRow({ nodeId: 'dorm-b', state: 'OPEN' })] },
+});
+check('★★ 反过来也一样：status 正常但事件还开着 -> 可以按',
+  actionState(normalButOpen, 'dorm-b').enabled, true);
 
-[[TWO, '两个异常'], [FOUR, '四个节点'], [TIE, '时长打平'], [DEAD, '完全并列'],
-  [MIXED, '有节点没数据'], [ONE, '一个异常'], [RENAMED, '换过名字'], [ALL_BAD, '三个都不正常'],
-  [OUT_OF_ORDER, '键顺序和严重程度不一致'], [BUSY, '正在处理'], [ALL_CALM, '都正常'],
-  [NOBODY, '一条数据都没有']]
-  .forEach(function (item) {
-    const nodes = item[0];
-    const label = item[1];
-    const pick = pickPriority(nodes);
-    const line = buildFocus(nodes);
-    const spoken = buildAlert(nodes);
+/* ---------- F. fanOn（3D 里的风扇） ---------- */
 
-    if (!pick) {
-      /* 没有重点时两边都不能凭空造一个出来：说的是同一句平静话，
-         只差头尾那点差别（一行不带句号、一句带）。 */
-      check('★ [' + label + '] 没有重点时，那一行和语音说的是同一件事',
-        [line + '。', spoken], [spoken, spoken]);
-      return;
-    }
+console.log('\n=== F. fanOn ===');
 
-    /* 重点那个宿舍的名字必须出现在两个出口的最前面 ——
-       不是「包含」就行：包含的话，「dorm-b 不在重点里但被顺口提了一句」
-       也能过。这一行和这一句的开头就是答案本身。 */
-    check('★ [' + label + '] 那一行开头就是重点那个宿舍',
-      line.indexOf(pick.nodeId), 0);
-    check('★ [' + label + '] 语音那句开头也是同一个宿舍',
-      spoken.indexOf(pick.nodeId), 0);
-    check('★ [' + label + '] 两个出口指向的是 pickPriority 挑出来的那个人',
-      [line.indexOf(pick.nodeId), spoken.indexOf(pick.nodeId)], [0, 0]);
-  });
+check('★ 最近那条事件有 action -> 转', fanOn(busySnapshot(), 'dorm-b'), true);
+check('没有事件 -> 不转', fanOn(snapshotOf(), 'dorm-a'), false);
+check('有事件但没人按过 -> 不转', fanOn(withEvents, 'dorm-b'), false);
+check('★ 结过案但按过 -> 照样转（7-2 定下的：只有清空才停）',
+  fanOn(snapshotOf({ events: { summary: {}, events: [
+    eventRow({ nodeId: 'dorm-a', state: 'RECOVERED', action: '开启风扇 / 通风' })] } }), 'dorm-a'),
+  true);
+check('★ action 是空串不算按过（空串是假值，别把「记了个空」当「按过」）',
+  fanOn(snapshotOf({ events: { summary: {}, events: [
+    eventRow({ nodeId: 'dorm-a', action: '' })] } }), 'dorm-a'), false);
+check('★ 读的是最近那条，不是随便一条',
+  fanOn(snapshotOf({ events: { summary: {}, events: [
+    eventRow({ nodeId: 'dorm-a', state: 'RECOVERED', action: '开启风扇 / 通风',
+      startTime: '2026-09-22 19:00:00' }),
+    eventRow({ nodeId: 'dorm-a', state: 'OPEN', action: null,
+      startTime: '2026-09-22 20:00:00' })] } }), 'dorm-a'), false);
+/* 「按过」是**按节点**算的，不是全局一个开关：另一个宿舍按过，
+   不该让这个宿舍的扇叶也转起来。 */
+const othersPressed = snapshotOf({ events: { summary: {}, events: [
+  eventRow({ nodeId: 'dorm-a', state: 'OPEN', action: null }),
+  eventRow({ nodeId: 'dorm-b', state: 'HANDLING', action: '开启风扇 / 通风' }),
+] } });
+check('★ 别的宿舍按过不算这个宿舍的（dorm-a 自己那条没按过）',
+  fanOn(othersPressed, 'dorm-a'), false);
+check('（同一个快照里，按过那个宿舍照样转 —— 说明确实是按节点分的）',
+  fanOn(othersPressed, 'dorm-b'), true);
 
-/* 【buildAlert 里有一句走不到的话】它拿到 pick 之后又算了一遍 ranked()，
-   还判了一次 `list.length === 0`。那一句永远走不到：pickPriority 的实现就是
-   「ranked() 空了才返回 null」，所以 pick 非空 ⇒ ranked 非空。
-   变异测试杀不掉它（删掉它行为一个字都不变，见 README 的等价变异体），
-   所以在这里把**前提**钉住：没有重点的时候，走的必须是 calmLine 那条路，
-   绝不能是把 undefined 拼进句子里的那条。 */
-[[NOBODY, '一条数据都没有'], [ALL_CALM, '都正常'],
-  [trio(calm('2026-09-22 20:00:00'), calm('2026-09-22 20:00:00'), silent()),
-    '只收到两个节点的数据']]
-  .forEach(function (item) {
-    const pick = pickPriority(item[0]);
-    const spoken = buildAlert(item[0]);
-    check('★ [' + item[1] + '] 没重点时走的是 calmLine 那条路（不是拼出 undefined）',
-      [pick, spoken.indexOf('undefined'), /。$/.test(spoken)], [null, -1, true]);
-  });
+/* ---------- G. trendOf / trendText ---------- */
 
-/* ---- 纯函数：不改输入、同样输入同样输出 ---- */
+console.log('\n=== G. trendOf / trendText ===');
 
-const J_SNAPSHOT = JSON.stringify(FOUR);
-buildFocus(FOUR);
-buildAlert(FOUR);
-tempTrend(FOUR['dorm-b']);
-check('★ 三个函数都不改传进来的 nodes（页面那边读的是同一份对象）',
-  JSON.stringify(FOUR), J_SNAPSHOT);
-
-/* 这一行和这一句都是**每条报文都重算**的（时长、趋势、处理状态都在变），
-   带上任何「当前时间」或随机成分，页面上就会出现某个数字停在某一刻不再动，
-   而下面的卡片一直在涨 —— 看着像数据不更新了。 */
-check('★ 同样的输入连着算两遍，那一行一字不差',
-  [buildFocus(BUSY) === buildFocus(BUSY), buildAlert(BUSY) === buildAlert(BUSY)],
-  [true, true]);
-
-/* ---------- K. Step 9-3 进阶项：看板读 ML 结果 ---------- */
-console.log('\n=== K. ML 辅助判断（看板这一侧）===');
-
-/* 一份「像 analysis.py 写出来的」JSON。字段名照 report/ml_result.json 抄。
-   这里够用就行 —— 那份真文件由 tests/dashboard.test.js 整份读进来跑一遍，
-   两处合起来才说明「这函数认得真文件」。 */
-function mlJson(over) {
-  return Object.assign({
-    generatedAt: '2026-09-29 19:45:12',
-    historyFile: 'dorm-a_history_sim.csv',
-    historyRows: 40,
-    historyFlagged: 18,
-    newFile: 'new_samples.csv',
-    newRows: 6,
-    mismatchForward: 2,
-    mismatchReverse: 0,
-    mismatchTotal: 2,
-    text: '历史 40 条里有 18 条被判成「与平时明显不同」；新数据 6 条里，'
-      + '固定规则说正常、ML 说不同的有 2 条。',
-  }, over);
+function hist(a, b) {
+  return [
+    { time: '2026-09-22 20:29:00', temperature: a, humidity: 60 },
+    { time: '2026-09-22 20:30:00', temperature: b, humidity: 60 },
+  ];
 }
-/* 三样东西的键就这三个。页面那边是照着这三个名字取的 ——
-   哪天改成 note.sentence 之类，dashboard.js 会静悄悄写上去一个 undefined，
-   只有这条能挡住。 */
-const KEYS = ['count', 'note', 'text'];
 
-/* ---- 正常那份 ---- */
+check('31 <- 33 是下降', trendOf(hist(33, 31)), '下降');
+check('29 <- 25 是上升', trendOf(hist(25, 29)), '上升');
+check('25 <- 25 是持平', trendOf(hist(25, 25)), '持平');
+check('25.0 <- 25.0（浮点相等）是持平', trendOf(hist(25.0, 25.0)), '持平');
+check('25.4 <- 25.5 是上升（差 0.1 也算变了，不设容差）', trendOf(hist(25.4, 25.5)), '上升');
+check('★ 只有一条 -> 空串（说成「持平」就是把「不知道」说成了「没变」）',
+  trendOf([{ time: 'x', temperature: 25 }]), '');
+check('★ 一条都没有 -> 空串', trendOf([]), '');
+check('不是数组 -> 空串', trendOf(null), '');
+check('undefined -> 空串', trendOf(undefined), '');
+check('★ 缺温度字段 -> 空串（不是 NaN 一路传到页面上）',
+  trendOf([{ time: 'a' }, { time: 'b' }]), '');
+check('★ 温度是字符串 -> 空串（"29" 不许被当成 29 比）',
+  trendOf(hist('25', '29')), '');
+check('★ 温度是 Infinity -> 空串', trendOf(hist(25, Infinity)), '');
+check('数组里夹了 null -> 空串', trendOf([null, { temperature: 25 }]), '');
+check('★ 只看最近两条：前面跌得再狠，最近一次是涨的就是上升',
+  trendOf([{ temperature: 30 }, { temperature: 20 }, { temperature: 25 }]), '上升');
+check('★ 不看湿度、不看 status（只有温度能定方向）',
+  trendOf([{ temperature: 25, humidity: 80, status: '偏湿' },
+    { temperature: 25, humidity: 60, status: '正常' }]), '持平');
 
-const note = buildMlNote(mlJson());
-check('★ 返回的就是那三样（count / text / note）', Object.keys(note).sort(), KEYS);
-check('★ 条数报的是「规则说正常、ML 说不同」那个数',
-  note.count, '规则说正常、ML 说不同：2 条');
-check('★ 结论那句是从 JSON 里原样搬的（看板不另写一份结论）',
-  note.text, mlJson().text);
-check('★ 说明里点明了判的是哪一份新数据', note.note.includes('new_samples.csv（6 条）'), true);
-check('★ 说明里点明了模型是拿哪一份训练的',
-  note.note.includes('dorm-a_history_sim.csv（40 条）'), true);
-check('★ 说明里写清了不是实时数据', note.note.includes('不是实时数据'), true);
-check('★ 说明里带着那份 JSON 记的时刻',
-  note.note.includes('2026-09-29 19:45:12'), true);
-/* 这一条是这一段存在的理由：看板上别的数字都在动，这一段不动。
-   少了那句「判的不是看板上这些读数」，看的人会把它安到刚收到的温湿度上。 */
-check('★ 而且说清了判的不是看板上的实时读数',
-  note.note.includes('判的不是看板上这些实时读数'), true);
+check('下降 -> 温度正在下降', trendText('下降'), '温度正在下降');
+check('上升 -> 温度正在上升', trendText('上升'), '温度正在上升');
+check('★ 持平 -> 「温度持平」（「温度正在持平」不成话）', trendText('持平'), '温度持平');
+check('空串 -> 空串（拼句子时直接跳过）', trendText(''), '');
+check('undefined -> 空串', trendText(undefined), '');
 
-/* ---- 两个方向分开报 ---- */
+/* ---------- H. calmLine ---------- */
 
-check('两个方向都是 0 时说的是「一条都没差」',
-  buildMlNote(mlJson({ mismatchForward: 0, mismatchReverse: 0 })).count,
-  '规则和 ML 一条都没差');
-/* 反向那条不能顺着前一句说成「一条都没差」—— 那是句假话，
-   两个方向说的根本不是一回事。 */
-check('★ 只有反向时不说「一条都没差」，说的是反向那句',
-  buildMlNote(mlJson({ mismatchForward: 0, mismatchReverse: 1 })).count,
-  '规则说异常、ML 说正常：1 条');
-check('两个方向都有时两句都在，中间分开',
-  buildMlNote(mlJson({ mismatchForward: 2, mismatchReverse: 1 })).count,
-  '规则说正常、ML 说不同：2 条；规则说异常、ML 说正常：1 条');
+console.log('\n=== H. calmLine ===');
 
-/* ---- 只留文件名 ---- */
+check('★ snapshot 是 null -> 「还没有收到 core 的快照」（不是「都正常」）',
+  calmLine(null), '还没有收到 core 的快照');
+check('nodes 是空数组 -> 同一句', calmLine(snapshotOf({ nodes: [] })), '还没有收到 core 的快照');
+check('★ 三个都有数据、都正常 -> 「当前 3 个宿舍都正常」',
+  calmLine(snapshotOf()), '当前 3 个宿舍都正常');
+check('★ 三个一个都没收到数据 -> 「还没有收到任何节点的数据」（不知道 ≠ 正常）',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a', { status: null }),
+    nodeRow('dorm-b', { status: null })] })),
+  '还没有收到任何节点的数据');
+check('★ 一个正常、一个还没数据 -> 两件事分开说',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: null })] })),
+  '当前 1 个宿舍正常，另有 1 个还没有收到数据');
+/* 全正常才算「都正常」：有一个还没数据就不能说满 */
+check('★★ 两个正常 + 一个还没数据 ≠ 都正常',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'),
+    nodeRow('dorm-c', { status: null })] })),
+  '当前 2 个宿舍正常，另有 1 个还没有收到数据');
+check('★ 有异常却没人被点名（那个节点离线了）时如实报个数，不说「都正常」',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'),
+    nodeRow('dorm-c', { status: '偏热', online: false })] })),
+  '当前 2 个宿舍正常，另有 1 个异常（离线的节点不参与优先排序）');
+check('★ 又有异常又有没数据的，两样都报',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a'),
+    nodeRow('dorm-b', { status: '偏冷' }), nodeRow('dorm-c', { status: null })] })),
+  '当前 1 个宿舍正常，另有 1 个异常（离线的节点不参与优先排序），另有 1 个还没有收到数据');
+check('一个宿舍都没有收到数据、也一个都没正常',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a', { status: null })] })),
+  '还没有收到任何节点的数据');
+/* 数字是数出来的（几个宿舍是快照说了算），所以换个数就得跟着变 */
+check('★ 换成一个宿舍 -> 「当前 1 个宿舍都正常」',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a')] })), '当前 1 个宿舍都正常');
 
-const longPath = buildMlNote(mlJson({
-  historyFile: 'C:\\Users\\xdj\\Desktop\\ml\\dorm-a_history_sim.csv',
-  newFile: '/tmp/ml/new_samples.csv',
+/* ---------- I. focusBanner ---------- */
+
+console.log('\n=== I. focusBanner（顶部那条横幅）===');
+
+check('★ 什么都没有 -> calm', focusBanner(snapshotOf()).mode, 'calm');
+check('calm 时 nodeId 是 null', focusBanner(snapshotOf()).nodeId, null);
+check('calm 时 line 就是 calmLine 那句',
+  focusBanner(snapshotOf()).line, '当前 3 个宿舍都正常');
+check('calm 时没有理由也没有跨端说明',
+  [focusBanner(snapshotOf()).reason, focusBanner(snapshotOf()).cross], ['', '']);
+check('★ 没收到快照时也是 calm（不是抛异常）', focusBanner(null).mode, 'calm');
+
+const pb = focusBanner(busySnapshot());
+check('有重点、没人点名 -> mode 是 priority', pb.mode, 'priority');
+check('priority 的标签是「当前重点」', pb.tag, '当前重点');
+check('nodeId 是重点那个宿舍', pb.nodeId, 'dorm-b');
+check('status 原样来自快照', pb.status, '偏热');
+check('★ 那一行是「宿舍｜处理到哪一步｜温度往哪走」', pb.line, 'dorm-b｜处理中｜温度正在下降');
+check('★ 理由就是 core 写的那句（一个字的加工都没有）', pb.reason, '已连续偏热 20 分钟（3 次）');
+check('没点名时没有跨端补充（「重点是 X」已经写在理由里了）', pb.cross, '');
+
+/* 8-3 那条分工：状态名**不进**那一行（图标和颜色单独表意）。
+   进了的话，这一行会变成「dorm-b｜偏热｜处理中｜温度正在下降」——
+   四个词挤在一起，扫一眼反而看不出哪个是重点。 */
+check('★★ 那一行里没有状态名（「偏热」由图标 + 颜色说，不挤进正文）',
+  pb.line.indexOf('偏热'), -1);
+
+/* 没有处理动作、历史也不够两条时，那一行只剩宿舍名 ——
+   不补一个「—」也不补一句「正常」，宁可短。 */
+const plain = focusBanner(snapshotOf({
+  priority: { nodeId: 'dorm-a', status: '偏湿', reason: '已连续偏湿 3 分钟（3 次）' },
+  nodes: [nodeRow('dorm-a', { status: '偏湿', history: [] }), nodeRow('dorm-b'),
+    nodeRow('dorm-c')],
 }));
-check('★ 路径只留文件名（那份 JSON 里本来就只有名字，这里再挡一道）',
-  [longPath.note.includes('C:\\Users'), longPath.note.includes('/tmp/'),
-    longPath.note.includes('dorm-a_history_sim.csv'),
-    longPath.note.includes('new_samples.csv')],
-  [false, false, true, true]);
-/* 两个文件名都要挡：一个给空串，一个给 null（不是字符串）。
-   早先这条只断言了新数据那一半，historyFile: null 那一半没人管 ——
-   函数里那句 typeof 判断于是可以整个换成 String(value) 还照样绿，
-   页面上会印出「拿 null（40 条）训练的」。变异测试把它抓出来了。 */
-const blankName = buildMlNote(mlJson({ newFile: '', historyFile: null })).note;
-check('文件名给空了就说「那两份文件」，不留一个空括号',
-  [blankName.includes('那两份文件（6 条）'),
-    blankName.includes('那两份文件（40 条）训练的'),
-    blankName.includes('（），'), blankName.includes('null')],
-  [true, true, false, false]);
-check('文件名只有空格时也算没给（trim 过，不留一格空白）',
-  buildMlNote(mlJson({ newFile: '   ' })).note.includes('那两份文件（6 条）'), true);
-/* 条数写不出来时说「若干」—— 不能写 0，0 是「一条都没有」的意思。 */
-check('条数缺了说「若干」，不说 0',
-  buildMlNote(mlJson({ newRows: undefined })).note.includes('（若干 条）'), true);
+check('★ 没有处理动作、历史也不够两条时，那一行就是宿舍名',
+  plain.line, 'dorm-a');
+check('这条也是 priority', plain.mode, 'priority');
 
-/* ---- 时刻缺了 ---- */
+/* 只要有两条历史，那一行就会多出趋势那半句 —— 上面那条之所以「只剩宿舍名」，
+   是因为历史不够，不是因为趋势那一节被删了。 */
+const withTrend = focusBanner(snapshotOf({
+  priority: { nodeId: 'dorm-a', status: '偏湿', reason: 'x' },
+  nodes: [nodeRow('dorm-a', { status: '偏湿', history: [
+    { time: '2026-09-22 20:29:00', temperature: 26, humidity: 80 },
+    { time: '2026-09-22 20:30:00', temperature: 25, humidity: 81 }] }),
+  nodeRow('dorm-b'), nodeRow('dorm-c')],
+}));
+check('★ 有两条历史才多出趋势那半句', withTrend.line, 'dorm-a｜温度正在下降');
 
-const noStamp = buildMlNote(mlJson({ generatedAt: '' }));
-check('★ 没记时刻时不写「undefined 那次」，说「上一次」',
-  [noStamp.note.includes('undefined'), noStamp.note.includes('上一次跑 analysis.py 留下的')],
-  [false, true]);
+const fb = focusBanner(busySnapshot({
+  focus: { nodeId: 'dorm-c', by: 'mobile', at: '2026-09-22 20:32:00' },
+}));
+check('有人点名 -> mode 是 focus', fb.mode, 'focus');
+check('标签是「跨端焦点」', fb.tag, '跨端焦点');
+check('nodeId 是被点名那个（不是重点那个）', fb.nodeId, 'dorm-c');
+check('★ 理由是「谁点的名」', fb.reason, '跨端焦点：mobile 发来的 focus 指令');
+check('★ 跨端补充里说清了 core 排出来的重点是谁、凭什么',
+  fb.cross, '数据选出的重点是 dorm-b：已连续偏热 20 分钟（3 次）');
+check('被点名的宿舍状态也照实给（dorm-c 正常）', fb.status, '正常');
 
-/* ---- 坏数据：一句都不许往外抛 ---- */
+const sameOne = focusBanner(busySnapshot({
+  focus: { nodeId: 'dorm-b', by: 'mobile' },
+}));
+check('★ 点名的正好是重点那个 -> 理由用 core 写的那句（不说两遍）',
+  sameOne.reason, '已连续偏热 20 分钟（3 次）');
+check('★ 这种情况下跨端补充说的是「也是它」', sameOne.cross, '数据选出的重点也是它');
+check('跟数据选出来的一致时，模式仍然是 focus（是人点的就该说是人点的）',
+  sameOne.mode, 'focus');
 
-const BROKEN = [
-  ['null', null], ['undefined', undefined], ['空对象', {}],
-  ['少了结论那句', mlJson({ text: '' })], ['结论不是字符串', mlJson({ text: 123 })],
-  ['少了那个数', mlJson({ mismatchForward: undefined })],
-  ['数是个字符串', mlJson({ mismatchForward: '2' })],
-  ['整个是字符串', '{"text":"x"}'], ['整个是数组', [1, 2, 3]],
-];
-BROKEN.forEach(function (item) {
-  let got;
-  try { got = buildMlNote(item[1]); } catch (err) { got = 'THREW: ' + err.message; }
-  const ok = got && typeof got === 'object' && got.count === '' && typeof got.text === 'string'
-    && got.text.indexOf('这一段没跑：') === 0 && got.note === '';
-  check('★ [' + item[0] + '] 降级成一句「这一段没跑」，不抛', ok, true);
-});
-/* 降级那句话里必须是**这三样**都齐的形状，页面才只有一条渲染路径 */
-check('降级时三样东西照样齐（页面那边不用分情况）',
-  Object.keys(buildMlNote(null)).sort(), KEYS);
+const noPriority = focusBanner(snapshotOf({
+  focus: { nodeId: 'dorm-c', by: 'mobile' }, priority: null,
+}));
+check('★ 有人点名、但此刻没有任何重点 -> 跨端补充明说这件事',
+  noPriority.cross, '此刻没有需要关注的异常节点');
+check('没有重点时理由仍然是「谁点的名」', noPriority.reason,
+  '跨端焦点：mobile 发来的 focus 指令');
+check('没有重点时 mode 还是 focus', noPriority.mode, 'focus');
 
-/* ---- 读不到那份文件 ---- */
+check('★ focus.by 缺失时兜一句「别的端」（不写 undefined）',
+  focusBanner(snapshotOf({ focus: { nodeId: 'dorm-c' } })).reason,
+  '跨端焦点：别的端 发来的 focus 指令');
+check('★ focus.by 是空串时也兜住',
+  focusBanner(snapshotOf({ focus: { nodeId: 'dorm-c', by: '' } })).reason,
+  '跨端焦点：别的端 发来的 focus 指令');
+check('★ 点名的宿舍还没收到数据 -> status 是 null（页面据此画中性色），不是硬编一个「正常」',
+  focusBanner(snapshotOf({ focus: { nodeId: 'dorm-c', by: 'mobile' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'),
+      nodeRow('dorm-c', { status: null })] })).status, null);
+check('★ 点名的宿舍根本不在名单里（core 改了配置）也照样能显示这个名字',
+  focusBanner(snapshotOf({ focus: { nodeId: 'dorm-x', by: 'mobile' } })).line, 'dorm-x');
 
-const missing = mlFetchFailed('HTTP 404');
-check('★ 读不到时说的话里带着原始原因', missing.text.includes('HTTP 404'), true);
-check('★ 也带着「这一段没跑」这个前缀（和报告里那句同一个口径）',
-  missing.text.indexOf('这一段没跑：') === 0, true);
-check('说明里告诉人怎么办（跑哪个脚本）',
-  missing.note.includes('py -3.14 analysis/analysis.py'), true);
-check('读不到时条数是空的（不写「0 条」，那看着像「一条都没差」）', missing.count, '');
-check('原因取不到时也有句实话，不留个 undefined 在页面上',
-  [mlFetchFailed(undefined).text.includes('undefined'),
-    mlFetchFailed('   ').text.includes('不知道什么原因')],
-  [false, true]);
-
-/* ---- 纯函数：不改输入、同样输入同样输出 ---- */
-
-const K_SNAPSHOT = JSON.stringify(mlJson());
-buildMlNote(mlJson());
-buildMlNote(mlJson({ text: '' }));
-check('★ 两个函数都不改传进来的东西', JSON.stringify(mlJson()), K_SNAPSHOT);
-/* 页面只在启动时算一次，但这一条和上面那些一样：纯函数是它的硬约束。
-   带上任何时间/随机成分，「这一块是上一次跑脚本的快照」这个说法就不成立了。 */
-check('★ 同样输入连着算两遍，三样东西一字不差',
-  [JSON.stringify(buildMlNote(mlJson())) === JSON.stringify(buildMlNote(mlJson())),
-    mlFetchFailed('x').text === mlFetchFailed('x').text],
-  [true, true]);
-
-/* ---------- K2. 按下处理按钮之后那行说明（Step D3 收尾） ---------- */
-
-console.log('\n=== K2. cmdNote：那条指令发给 core 没有 ===');
-
-const okNote = cmdNote(true, '');
-/* 发出去的那句必须点明「好没好由后面的报文判」。这是 D3 红线在界面上的那一半：
-   按钮只把事件推到处理中，按一下不能等于已恢复。 */
-check('★ 发出去时说的是「好没好由后面收到的报文判」',
-  [okNote.includes('好没好'), okNote.includes('后面收到的报文'),
-    okNote.includes('不结案')],
-  [true, true, true]);
-check('发出去时这句话里没有「已恢复」这三个字（按一下不是结案）',
-  okNote.includes('已恢复'), false);
-
-const badNote = cmdNote(false, '还没连上 broker');
-check('★ 发不出去时带着原始原因', badNote.includes('还没连上 broker'), true);
-check('★ 发不出去时如实说「core 那边的事件不会变」（这才是要命的那半句）',
-  [badNote.includes('只记在页面上'), badNote.includes('core 那边的事件不会变')],
-  [true, true]);
-check('发不出去时也不说「已恢复」', badNote.includes('已恢复'), false);
-check('原因取不到时也有句实话，不留个空括号在页面上',
-  [cmdNote(false, undefined).includes('（）'),
-    cmdNote(false, undefined).includes('不知道什么原因'),
-    cmdNote(false, '   ').includes('不知道什么原因')],
-  [false, true, true]);
-/* 原样贴出来，不翻译也不加工：「还没连上 broker」和「mqtt.js 没加载」
-   是两个排查方向，糊成一句「发送失败」就把线索丢了。 */
-check('原因原样贴出来，不加工', cmdNote(false, 'HTTP 500').includes('HTTP 500'), true);
-check('纯函数：同样输入连着算两遍一字不差',
-  cmdNote(true, '') === cmdNote(true, ''), true);
-
-/* ---------- L. 和 Python 读同一份期望表 ---------- */
-
-console.log('\n=== L. 共用期望表：和 Python 的 rules.py 逐条对齐 ===');
-
-/* 这一段的期望值**不是**在这里写的，是从 tests/fixtures/priority_cases.json
-   读的 —— Python 那边的 tests/test_rules_priority.py 读的是同一份。
-   两边各写一套测试治不了「改了一边忘了另一边」：两套都绿，
-   而它们期望的不是同一件事。
-
-   要跑的东西不一样：那边直接调 rank_priority 拿到整张表，
-   这边只有两个对外的口 —— pickPriority（赢家 + 那句理由）和
-   buildReasons（一整段话）。所以这边用「整段话里含不含某句、
-   几条的相对先后」来钉同一批事实，钉的是**页面上真会出现的字**。 */
-const FIXTURE = path.join(ROOT, 'tests', 'fixtures', 'priority_cases.json');
-const fix = JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
-
-/* fixture 里给的是秒，这边要的是 time 字符串。换算只在这一处显式做，
-   不藏进 fixture —— 一次换算看不懂的时候，第一个该被怀疑的就是单位。 */
-const FIX_BASE = '2026-09-22 20:00:00';
-const FIX_BASE_MS = parseTime(FIX_BASE);
-
-function pad2(n) { return n < 10 ? '0' + n : String(n); }
-
-/* parseTime 用的是 Date.UTC，这里也照 UTC 拼回来。
-   拼成本地时间的话，时区一偏，同一个 360 秒就变成「6 小时」了。 */
-function timeAfter(seconds) {
-  const d = new Date(FIX_BASE_MS + seconds * 1000);
-  return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate())
-    + ' ' + pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
-}
-
-function nodesOf(c) {
-  const nodes = {};
-  c.nodes.forEach(function (n) {
-    /* count 为 0 的走正常那条：起点给 null，和页面里维护的正常节点一样 */
-    nodes[n.nodeId] = n.count > 0
-      ? node(timeAfter(n.durationSec), FIX_BASE, n.count, n.status)
-      : node(FIX_BASE, null, 0, n.status);
-  });
-  return nodes;
-}
-
-check('期望表读得到（坏掉的样子是一条都跑不到）', fix.cases.length >= 8, true);
-
-/* ---- 时长说法：同一张表 ---- */
-fix.duration.forEach(function (row) {
-  check('时长 ' + row.seconds + ' 秒 -> ' + row.expect,
-    fmtDuration(row.seconds * 1000), row.expect);
+/* 【和 alertLine 必须指向同一个宿舍】两处各自挑一遍「被点名 > 是重点」，
+   挑法要是走岔了，屏幕上就会出现「横幅写着 dorm-c、语音念着 dorm-b」——
+   两条出口说的话不一样，而两边看着都对。 */
+[
+  ['只有重点', busySnapshot()],
+  ['只有焦点', snapshotOf({ focus: { nodeId: 'dorm-c', by: 'mobile' } })],
+  ['焦点和重点不同', busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } })],
+  ['焦点和重点相同', busySnapshot({ focus: { nodeId: 'dorm-b', by: 'mobile' } })],
+  ['都没有', snapshotOf()],
+].forEach(function (pair) {
+  const banner = focusBanner(pair[1]);
+  const line = alertLine(pair[1]);
+  check('★ ' + pair[0] + '：横幅和语音说的是同一个宿舍',
+    banner.nodeId === null ? line.indexOf('宿舍') > 0 : line.indexOf(banner.nodeId) === 0, true);
 });
 
-/* ---- 每个用例：赢家、赢家的理由、输家各自输在哪、以及先后 ---- */
-fix.cases.forEach(function (c) {
-  const nodes = nodesOf(c);
-  const top = pickPriority(nodes);
-  const reason = buildReasons(nodes);
+/* ---------- J. alertLine ---------- */
 
-  if (c.order.length === 0) {
-    check('★ ' + c.name + '：没有要优先处理的', top, null);
-    return;
-  }
+console.log('\n=== J. alertLine ===');
 
-  const winner = c.order[0];
-  check('★ ' + c.name + '：挑出来的是 ' + winner, top.nodeId, winner);
+check('★ 平静时就是 calmLine 加个句号',
+  alertLine(snapshotOf()), '当前 3 个宿舍都正常。');
+check('没收到快照时也成一句话', alertLine(null), '还没有收到 core 的快照。');
+check('★ 异常 + 处理中 + 在降温，整句读得通',
+  alertLine(busySnapshot()),
+  'dorm-b 偏热已持续 20 分钟（已按下开始处理，处理中），温度正在下降。');
+check('★ 正常节点的 durationText 是 null，所以不会有「已持续」那半句',
+  alertLine(snapshotOf({ priority: { nodeId: 'dorm-a', status: '正常', reason: 'x' },
+    nodes: [nodeRow('dorm-a', { history: [] }), nodeRow('dorm-b'), nodeRow('dorm-c')] })),
+  'dorm-a 正常。');
+check('没开案的时候不说处理的事',
+  alertLine(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热',
+    reason: 'x' }, nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热',
+    durationText: '5 分钟', history: [] }), nodeRow('dorm-c')] })),
+  'dorm-b 偏热已持续 5 分钟。');
+check('★ 开了案还没人动 -> 「（已开案，还没人处理）」',
+  alertLine(snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热', history: [] }),
+      nodeRow('dorm-c')],
+    events: { summary: {}, events: [eventRow({ nodeId: 'dorm-b', state: 'OPEN' })] } })),
+  'dorm-b 偏热（已开案，还没人处理）。');
+/* ★ 这一条顺带钉住一件事：**状态是从节点那一行读的**，不是从 priority 里读的。
+   priority 是 core 排重点时写下的那份副本，节点那一行才是权威 ——
+   两份要是不一致（节点已经恢复了、priority 还停在旧的），页面按节点那一行说。 */
+check('★ 还没收到数据的宿舍 -> 念「还没有收到数据」，不念「正常」',
+  alertLine(snapshotOf({ priority: { nodeId: 'dorm-c', status: null, reason: 'x' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'),
+      nodeRow('dorm-c', { status: null, history: [] })] })),
+  'dorm-c 还没有收到数据。');
+check('★ 状态读的是节点那一行，不是 priority 里那份副本',
+  alertLine(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' } })),
+  'dorm-b 正常，温度持平。');
+check('★ 每一句都以句号收尾（语音那边靠这个断句）',
+  alertLine(busySnapshot()).slice(-1), '。');
+check('★ 念的是人话，没有 ｜ 那种只给眼睛看的符号',
+  alertLine(busySnapshot()).indexOf('｜'), -1);
+/* 「持续多久」直接用 core 算好的 durationText，这边不碰秒数 ——
+   格式化只留一份，不然会同时存在「20 分钟」和「1200 秒」两个说法。 */
+check('★ 念出来的是 core 给的 durationText（不是这边用 durationSec 重算的）',
+  alertLine(snapshotOf({ priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热',
+      durationSec: 1200, durationText: '不到 1 分钟' }), nodeRow('dorm-c')] }))
+    .indexOf('不到 1 分钟') > 0, true);
 
-  /* 两边唯一那个故意的差别：pickPriority 的 reason 前面有节点名，
-     Python 的 RankedNode.reason 没有。差别在这里被**显式**对上，
-     而不是靠 fixture 含糊过去。 */
-  check('★ ' + c.name + '：赢家的理由',
-    top.reason, winner + ' ' + c.reasons[winner]);
+/* ---------- K. snapshotSummary（日志里那一行） ---------- */
 
-  /* 同一句话在 B2 依据里是「优先关注 X：…」—— 那里名字在冒号前，
-     所以理由那半句不带名字。两处都得对。 */
-  check('★ ' + c.name + '：依据里那句「优先关注 ' + winner + '：…」',
-    reason.includes('优先关注 ' + winner + '：' + c.reasons[winner]), true);
+console.log('\n=== K. snapshotSummary ===');
 
-  /* 输家：每一个都要在整段话里，且说的是 fixture 里那句。
-     只查「含不含」不够 —— 先后顺序也得对，否则「谁排在谁前面」这件事
-     在页面上就是错的，而每条单独看都挑不出毛病。 */
-  const losers = c.order.slice(1);
-  losers.forEach(function (id) {
-    check('★ ' + c.name + '：' + id + ' 输在哪',
-      reason.includes(id + ' ' + c.reasons[id]), true);
-  });
-  for (let i = 0; i + 1 < losers.length; i += 1) {
-    check('★ ' + c.name + '：' + losers[i] + ' 排在 ' + losers[i + 1] + ' 前面',
-      reason.indexOf(losers[i] + ' ') < reason.indexOf(losers[i + 1] + ' '), true);
-  }
-});
+check('没收到快照', snapshotSummary(null), '还没有收到快照');
+check('★ 整行', snapshotSummary(busySnapshot()),
+  '快照 v2 · 宿舍 3（异常 1） · 重点 dorm-b · 事件 8（未结案 1）'
+  + ' · 拒绝 1 · 指令 2');
+check('★ 有焦点时末尾补一句', snapshotSummary(busySnapshot({
+  focus: { nodeId: 'dorm-c', by: 'mobile' } })),
+  '快照 v2 · 宿舍 3（异常 1） · 重点 dorm-b · 事件 8（未结案 1）'
+  + ' · 拒绝 1 · 指令 2 · 焦点 dorm-c');
+check('★ 没焦点时不补那一句（不是「焦点 无」）',
+  snapshotSummary(snapshotOf()).indexOf('焦点'), -1);
+check('没有重点时写「重点 无」', snapshotSummary(snapshotOf()),
+  '快照 v2 · 宿舍 3（异常 0） · 重点 无 · 事件 0（未结案 0） · 拒绝 0 · 指令 0');
+check('★ 一个宿舍都没数据时「异常」是 0（不知道 ≠ 异常）',
+  snapshotSummary(snapshotOf({ nodes: [nodeRow('dorm-a', { status: null })] }))
+    .indexOf('宿舍 1（异常 0）') > 0, true);
+check('★ summary 里缺字段时报 0 不报 NaN', snapshotSummary(snapshotOf({
+  events: { summary: {}, events: [] }, rejects: {}, counters: {} })),
+  '快照 v2 · 宿舍 3（异常 0） · 重点 无 · 事件 0（未结案 0） · 拒绝 0 · 指令 0');
+check('★ 「未结案」是 OPEN + HANDLING 两个加起来（不是只看 OPEN）',
+  snapshotSummary(snapshotOf({ events: { summary: { total: 9, OPEN: 2, HANDLING: 3 },
+    events: [] } })).indexOf('（未结案 5）') > 0, true);
+check('★ 版本号读的是快照里的 v（不是这边写死的 2）',
+  snapshotSummary(snapshotOf({ v: 2 })).indexOf('快照 v2') === 0, true);
 
-/* ---- 输入顺序不影响结果（第 4 步存在的唯一理由）---- */
-const shuffled = fix.cases.filter(function (c) {
-  return c.name.indexOf('与数据到达顺序无关') >= 0;
-})[0];
-check('期望表里有那条「顺序无关」的用例', Boolean(shuffled), true);
-if (shuffled) {
-  const forward = nodesOf(shuffled);
-  const backward = nodesOf({ nodes: shuffled.nodes.slice().reverse() });
-  check('★ 同一份数据倒着喂，挑出来的人和理由一字不差',
-    [pickPriority(forward).nodeId === pickPriority(backward).nodeId,
-      pickPriority(forward).reason === pickPriority(backward).reason],
-    [true, true]);
+/* ---------- L. buildMlNote / mlFetchFailed（Rule-ML 那一段） ---------- */
+
+console.log('\n=== L. buildMlNote / mlFetchFailed ===');
+
+const ML_OK = {
+  text: '规则和 ML 在这份数据上大体一致，只有少数几条对不上。',
+  mismatchForward: 2,
+  mismatchReverse: 1,
+  generatedAt: '2026-09-22 21:00:00',
+  newFile: 'data/sim_log.csv',
+  newRows: 300,
+  historyFile: 'data/history.csv',
+  historyRows: 1200,
+};
+
+check('★ 结论那句是从 JSON 里原样搬的（看板不另写一句）',
+  buildMlNote(ML_OK).text, ML_OK.text);
+check('★ 条数两个方向分开报',
+  buildMlNote(ML_OK).count, '规则说正常、ML 说不同：2 条；规则说异常、ML 说正常：1 条');
+check('反向是 0 时只报正向',
+  buildMlNote(Object.assign({}, ML_OK, { mismatchReverse: 0 })).count,
+  '规则说正常、ML 说不同：2 条');
+check('正向是 0 时只报反向',
+  buildMlNote(Object.assign({}, ML_OK, { mismatchForward: 0, mismatchReverse: 3 })).count,
+  '规则说异常、ML 说正常：3 条');
+check('★ 一条都没差时也有一句话（不是空白）',
+  buildMlNote(Object.assign({}, ML_OK, { mismatchForward: 0, mismatchReverse: 0 })).count,
+  '规则和 ML 一条都没差');
+check('★ 说明里点明判的是哪份文件、几条', buildMlNote(ML_OK).note,
+  '这一段判的不是看板上这些实时读数，是 sim_log.csv（300 条）；'
+  + '模型是拿 history.csv（1200 条）训练的。它是 2026-09-22 21:00:00 那次'
+  + '跑 analysis.py 留下的，不是实时数据。');
+check('★ 说明里写明了「不是实时数据」（少了这句，看板上那些实时数字会背锅）',
+  buildMlNote(ML_OK).note.indexOf('不是实时数据') > 0, true);
+check('★ 路径被剥成文件名（本机全路径不许露到页面上）',
+  buildMlNote(Object.assign({}, ML_OK, { newFile: 'C:\\Users\\xdj\\data\\sim_log.csv' }))
+    .note.indexOf('C:\\Users') , -1);
+check('文件名缺失时说「那两份文件」，不写 undefined',
+  buildMlNote(Object.assign({}, ML_OK, { newFile: null })).note.indexOf('那两份文件') > 0, true);
+check('★ 条数缺失时说「若干」而不是 0（0 是「一条都没有」，是另一回事）',
+  buildMlNote(Object.assign({}, ML_OK, { newRows: null })).note.indexOf('（若干 条）') > 0, true);
+check('生成时刻缺失时说「上一次」',
+  buildMlNote(Object.assign({}, ML_OK, { generatedAt: null })).note
+    .indexOf('它是 上一次跑 analysis.py') > 0, true);
+check('结论那句前后的空白被收拾掉',
+  buildMlNote(Object.assign({}, ML_OK, { text: '  一句话  ' })).text, '一句话');
+
+function badShape(data) {
+  const note = buildMlNote(data);
+  return [note.count, note.note];
 }
+check('★ null（文件里是个 null）', badShape(null), ['', '']);
+check('★ 空对象', badShape({}), ['', '']);
+check('★ text 不是字符串', badShape({ text: 3, mismatchForward: 1 }), ['', '']);
+check('★ text 是空串', badShape({ text: '   ', mismatchForward: 1 }), ['', '']);
+check('★ mismatchForward 不是数字', badShape({ text: 'x', mismatchForward: null }), ['', '']);
+check('★ 字段缺了时那句降级话点明了原因',
+  buildMlNote({}).text.indexOf('report/ml_result.json 里没有 analysis.py 该写的字段') > 0, true);
+check('降级话里也带着「这一段没跑」这个口径（和报告里那句一致）',
+  buildMlNote({}).text.indexOf('这一段没跑') === 0, true);
 
-/* ---- logic.js 里也不许写死节点名 ---- */
-/* 和 Python 那边同一个checker思路，只是 JS 没有文档字符串，
-   要摘的只有注释：块注释和行注释。 */
-const logicCode = raw
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/^[ \t]*\/\/.*$/gm, '');
-check('★ logic.js 的代码里不出现任何具体节点名（注释里的例子不算）',
-  /dorm-/.test(logicCode), false);
+check('★ 读不到时说的是「读不到 + 原因」',
+  mlFetchFailed('HTTP 404').text, '这一段没跑：读不到 report/ml_result.json —— HTTP 404');
+check('★ 原因原样贴出来（「HTTP 404」和「读不到」指向完全不同的排查方向）',
+  mlFetchFailed('Unexpected token < in JSON at position 0').text
+    .indexOf('Unexpected token <') > 0, true);
+check('原因缺失时兜一句「不知道什么原因」',
+  mlFetchFailed('').text.indexOf('不知道什么原因') > 0, true);
+check('原因不是字符串时也兜住',
+  mlFetchFailed(null).text.indexOf('不知道什么原因') > 0, true);
+check('★ 降级时条数那一栏是空的（不是 0）', mlFetchFailed('x').count, '');
+check('★ 降级时说明里告诉人怎么补（跑一次 analysis.py），并点明看板其余部分不受影响',
+  mlFetchFailed('x').note.indexOf('analysis/analysis.py') > 0
+    && mlFetchFailed('x').note.indexOf('看板其余部分不受影响') > 0, true);
+
+/* ---------- M. cmdNote ---------- */
+
+console.log('\n=== M. cmdNote（按下「开始处理」之后那行字）===');
+
+const sent = cmdNote(true);
+check('★ 发出去时点明「好没好由 core 判，这一步不结案」',
+  sent.indexOf('由 core 后续收到的报文判') > 0, true);
+check('★ 而且说了「这一步不结案」（红线写在人看得见的地方）',
+  sent.indexOf('这一步不结案') > 0, true);
+check('★ 并且预先说明「处理中」要等 core 发回新快照才出现（免得以为点了没反应）',
+  sent.indexOf('要等 core 发回新快照') > 0, true);
+check('★ 不提「已恢复」两个字（那不是点出来的）',
+  sent.indexOf('已恢复'), -1);
+
+const failed = cmdNote(false, '还没连上 broker');
+check('★ 发不出去时把原因原样贴出来',
+  failed.indexOf('还没连上 broker') > 0, true);
+check('★ 并且明说「这一次点击没有任何效果」（页面不替 core 记账）',
+  failed.indexOf('没有任何效果') > 0, true);
+check('失败时不说「已记下这一笔」之类的话（页面不记账）',
+  failed.indexOf('记下这一笔'), -1);
+check('原因缺失时兜一句', cmdNote(false, '').indexOf('不知道什么原因') > 0, true);
+check('原因不是字符串时也兜住', cmdNote(false, null).indexOf('不知道什么原因') > 0, true);
+
+/* ---------- N. 纯函数：不改输入 ---------- */
+
+console.log('\n=== N. 纯函数 ===');
+
+/* 【为什么用「跑完再比一遍 JSON」而不是 Object.freeze】
+   freeze 只在严格模式下才抛，而 logic.js 不是严格模式（它是个普通模块，
+   顶层没有 'use strict'）—— 冻结之后赋值会**静默失败**，测试照样绿。
+   所以改成前后各序列化一次对比：不管什么模式，改过的字段一定看得出来。 */
+const before = JSON.stringify(busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } }));
+const frozen = busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } });
+focusBanner(frozen);
+alertLine(frozen);
+snapshotSummary(frozen);
+calmLine(frozen);
+actionState(frozen, 'dorm-b');
+handlingOf(frozen, 'dorm-b');
+fanOn(frozen, 'dorm-b');
+openEvent(frozen, 'dorm-b');
+latestEvent(frozen, 'dorm-b');
+nodeOf(frozen, 'dorm-b');
+readSnapshot(frozen);
+check('★ 把这些函数全跑一遍，那一份快照一个字节都没变',
+  JSON.stringify(frozen), before);
+
+/* 同一个输入两次调用结果一样 —— 纯函数的定义。挑几个会拼字符串的验：
+   要是在里面偷偷读了时间或者存了缓存，两次就会不一样。 */
+const twice = busySnapshot();
+check('★ focusBanner 两次调用一模一样',
+  JSON.stringify(focusBanner(twice)) === JSON.stringify(focusBanner(twice)), true);
+check('★ alertLine 两次调用一模一样', alertLine(twice), alertLine(twice));
+check('★ snapshotSummary 两次调用一模一样',
+  snapshotSummary(twice), snapshotSummary(twice));
+
+/* ---------- O. 变异：改坏一处，看抓不抓得住 ---------- */
+
+console.log('\n=== O. 变异（真跑一遍，不是看代码猜）===');
+
+/* 「横幅的理由必须是 core 给的那串字」——理由要是这边拼的，改一下快照里的
+   reason，横幅就该跟着变。不变就说明那句话是写死在代码里的。 */
+const r1 = focusBanner(busySnapshot({ priority: { nodeId: 'dorm-b', status: '偏热',
+  reason: '理由甲' } })).reason;
+const r2 = focusBanner(busySnapshot({ priority: { nodeId: 'dorm-b', status: '偏热',
+  reason: '理由乙' } })).reason;
+check('★ 改快照里的 reason，横幅的理由跟着变（不是写死的）', [r1, r2], ['理由甲', '理由乙']);
+
+/* 「异常个数是数出来的」——多一个异常宿舍，那句平静话就该变。 */
+check('★ 多一个异常宿舍，calmLine 跟着变（不是写死「都正常」）',
+  calmLine(snapshotOf({ nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏暖' }),
+    nodeRow('dorm-c')] })).indexOf('另有 1 个异常') > 0, true);
+
+/* 「那一行是照着字段拼的」——给 dorm-b 加一笔待处理动作，line 里就多一段。 */
+check('★ 给事件改成 OPEN，横幅那一行里就没有「处理中」了',
+  focusBanner(busySnapshot({ events: { summary: { total: 1 },
+    events: [eventRow({ nodeId: 'dorm-b', state: 'OPEN' })] } })).line
+    .indexOf('处理中'), -1);
+
+/* 「状态来自快照，不是算的」——把快照里的 status 换成没人见过的词，
+   页面照搬。反过来，要是这边有判断，就会把它改回「正常」或者丢掉。 */
+const typhoon = snapshotOf({
+  priority: { nodeId: 'dorm-a', status: '台风', reason: 'x' },
+  nodes: [nodeRow('dorm-a', { status: '台风', history: [] }), nodeRow('dorm-b'),
+    nodeRow('dorm-c')],
+});
+check('★ 快照说「台风」，页面就显示「台风」（一个字的判断都没有）',
+  focusBanner(typhoon).status, '台风');
+check('★ 快照说「台风」，语音也念「台风」',
+  alertLine(typhoon), 'dorm-a 台风。');
+/* 颜色那一档认不出来就退回中性色（dashboard.js 的 viewFor），
+   所以「台风」这个状态下页面依然画得出来，只是没有状态色 ——
+   这正是「前端不认识规则」该有的样子：多一个状态名不会让页面崩，
+   也不会被页面悄悄改回「正常」。 */
 
 console.log(`\n结果：${pass} 通过，${fail} 不通过`);
 process.exit(fail === 0 ? 0 : 1);

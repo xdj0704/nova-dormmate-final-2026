@@ -229,23 +229,30 @@ class TestFaultList(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 class TestFrontEndsDifferOnUnknownNode(unittest.TestCase):
-    """`dashboard/` 挡住未知节点，`web/` 照画不误。
+    """节点名单在两边的来路不一样：`web/` 自己收遥测攒，`dashboard/` 只认快照。
 
-    不一样是有道理的，不是漏改：看板是三节点横向对比，版面就是三张卡，多一个
-    没地方放；`web/` 订阅通配符、来几个节点画几张卡，多一个节点它天生就画得下。
+    Step E3-2 之前，看板里有一份写死的 NODE_IDS 名单（三节点横向对比，版面就是
+    三张卡），收到名单外的节点直接挡掉。那一轮看板改成**只订 core 的快照**，
+    名单跟着没了 —— 「现在有哪几个节点」是 core 说了算（快照里的 nodes 数组），
+    页面按那个数组画，一个不多一个不少。
 
-    README 上写着这句话，所以这里拿源码把它钉住 —— 哪天有人给 `web/` 也加了名单，
-    这一条会红，提醒去把文档一起改。"""
+    所以两边的差别从「谁有名单」变成了「谁在管节点」：`web/` 是从一条条遥测
+    报文里**现攒**出节点清单（所以来几个画几个，多一个也画得下）；看板是等
+    core 算好整帧发过来（所以它连一个节点名都不认识）。
 
-    def test_dashboard_has_a_node_whitelist(self):
+    README 上写着这句话，所以这里拿源码把它钉住 —— 哪天有人又在前端写死一份
+    名单，这一条会红，提醒去把文档一起改。"""
+
+    def test_dashboard_never_hardcodes_a_node_list(self):
         src = (ROOT / "dashboard" / "dashboard.js").read_text(encoding="utf-8")
-        self.assertIn("NODE_IDS", src)
-        self.assertIn("未知节点", src)
+        self.assertNotIn("NODE_IDS", src)
+        # 卡片是按快照里的数组画的，节点名从报文里来
+        self.assertIn("snapshot.nodes", src)
 
-    def test_web_has_no_node_whitelist(self):
+    def test_web_discovers_nodes_from_telemetry(self):
         src = (ROOT / "web" / "script.js").read_text(encoding="utf-8")
         self.assertNotIn("NODE_IDS", src)
-        self.assertNotIn("未知节点", src)
+        self.assertIn("telemetry", src)
 
 
 # --------------------------------------------------------------------------

@@ -12,19 +12,26 @@
   <header class="top">
     <div>
       <h1>DormMate 多节点 Dashboard</h1>
-      <p class="sub">dorm-a · dorm-b · dorm-c 三节点对比 · 订阅 <code>dormmate/v1/nodes/+/telemetry</code></p>
+      <!-- 这一行写的是**这个页面订什么**，Step E3-2 起变了：以前订遥测、
+           自己算一遍；现在只订快照。地址和 topic 都不在这里写死 ——
+           它们来自 shared/config.js，这一行只是给人看的说明。 -->
+      <p class="sub">dorm-a · dorm-b · dorm-c 三节点对比 · 只订阅 <code>dormmate/v1/state</code>（core 发布的全局快照）</p>
     </div>
     <div class="top-actions">
       <span id="conn" class="conn conn--pending">
         <span class="conn-dot"></span><span id="conn-text">未连接</span>
       </span>
       <button id="toggle" class="ghost" type="button">连接</button>
-      <button id="simulate" class="primary" type="button">模拟三节点数据</button>
+      <!-- 这里原本有一个「模拟三节点数据」按钮（凭空造一份本地数据让界面动起来）。
+           Step E3-2 把它删了：E3 明确禁止「两边手动输入数据伪造同步效果」，
+           而这个按钮干的正是这件事 —— 它造出来的数字和 core 手里那份毫无关系，
+           屏幕上却看不出区别。要数据就跑 simulator/，或者用 MQTTX 发。 -->
       <button id="clear" class="ghost" type="button">清空</button>
     </div>
   </header>
 
-  <!-- 当前重点（Step 8-3｜B4）。看板顶部只有这一行：谁、在不在处理、温度往哪走。
+  <!-- 当前重点（Step 8-3｜B4）+ 跨端焦点（Step E3-2）。
+       看板顶部只有这一行：谁、在不在处理、温度往哪走。
 
        这一步是**信息分工**，不是又加一块。8-1 之前这里有一条「优先关注」栏和
        一块「当前总览 + 判断依据」，它们说的都是「谁是重点」，只是详略不同。
@@ -35,11 +42,21 @@
          语音提醒   把同一件事念成一句人话（声音是线性的，只能听一遍）
          report.html 开始 / 处理 / 恢复 / 持续了多久（完整的账）
 
-       内容由 dashboard.js 的 renderFocus() 现算现贴，容器里一开始什么都不放。
-       它做成**按钮**是因为它可以点 —— 点它等于点对应那张卡片（两边走的都是
-       selectNode），卡片、趋势图、3D 一起切过去。
+       内容由 dashboard.js 的 renderFocus() 现贴，容器里一开始什么都不放。
+       这一轮它有**两个来源**，看标签就分得出来：
 
-       为什么不用 aria-live：这一行每收到一条报文都要重画（时长、趋势都在变），
+         [跨端焦点]  移动端发了 focus 指令点名的 —— core 把名字记在快照的
+                     focus 字段里，这里和 3D 一起跟过去。前面那行字会写明是谁发的。
+         [当前重点]  core 自己排出来的（rules.rank_priority）—— 数据说是谁就是谁。
+
+       两个来源不打架：有焦点时显示焦点，焦点取消（同一个节点再发一次）之后
+       回落到底下那行 core 选出的重点。
+
+       它做成**按钮**是因为它可以点 —— 点它等于点对应那张卡片（两边走的都是
+       selectNode），卡片、趋势图、3D 一起切过去。看板自己**不发** focus
+       （那是移动端的事）：两边都能改焦点的话，两个人一起看就会互相抢。
+
+       为什么不用 aria-live：这一行每收到一帧快照都要重画（时长、趋势都在变），
        现场演示时几秒一条，读屏软件会跟着念个不停，反而把真正要看的东西盖住。
        要听就按旁边那个「语音提醒」—— 那是个明确的动作，念的也是完整的一句。 -->
   <section class="panel focus-panel">
@@ -52,6 +69,9 @@
     <p id="speak-note" class="note speak-note"></p>
   </section>
 
+  <!-- 三张卡片。内容全部来自快照里那一条（温度、湿度、状态、持续多久），
+       dashboard.js 的 renderCards() 现贴 —— 状态是 core 算好的，这里连
+       温度阈值都不认识。 -->
   <section id="cards" class="cards"></section>
 
   <section class="panel">
@@ -61,23 +81,31 @@
     </div>
 
     <!-- 处理动作。作用在**当前正在看的那个节点**上，所以它跟着 #detail-node 走。
-         按钮的禁用状态和旁边那行字都由 dashboard.js 的 renderAction() 填：
-         没有数据、或者状态已经正常时按不动（没有要处理的事）。 -->
+       按钮的禁用状态和旁边那行字都由 dashboard.js 的 renderAction() 填，
+       判断写在一个纯函数里（logic.js 的 actionState，单独可测）。
+
+       【按下去会发生什么】只往 dormmate/v1/cmd 发一条 handle，**页面上一个字都不改**。
+       卡片上那行「处理中」要等 core 把新快照发回来才出现 —— 那一拍就是 core 的往返。
+       以前这里按一下就地改四个字段、屏幕上立刻写「处理中」，那正是 E3 要拆掉的东西：
+       点击直接把事件置成处理中（更别说置成已恢复）本来就是红线。
+
+       能不能按由 **core 的事件**说了算：这个节点有一条「待处理」的事件才能按。
+       为什么按不动，旁边那行字会说 —— 灰按钮不说明原因，用的人只会以为页面坏了。 -->
     <div class="action-bar">
-      <button id="action-fan" class="primary" type="button">开启风扇 / 通风</button>
+      <button id="action-handle" class="primary" type="button">开始处理</button>
       <span id="action-state" class="action-state"></span>
     </div>
 
     <!-- 按下去之后这一行才出现，说的是「那条指令发给 core 没有」。
-         必须留着：发不出去的时候页面其余部分看不出任何区别（本地那几个字段
-         照旧改），而 core 那边的事件一步都没动 —— 不说就成了「按了没反应」。
-         措辞在 logic.js 的 cmdNote()，这里一个字都不拼。 -->
+         必须留着：发不出去的时候页面上其余部分**完全看不出区别**（现在连本地
+         那几个字段都不动了），而 core 那边的事件一步都没动 —— 不说就成了
+         「按了没反应」。措辞在 logic.js 的 cmdNote()，这里一个字都不拼。 -->
     <p id="cmd-note" class="note cmd-note"></p>
 
     <p id="chart-note" class="note chart-note"></p>
 
-    <!-- 3D 视图。跟着当前选中的节点走：点卡片切节点、或当前这个节点收到
-         新消息时，dashboard.js 会调 updateScene + setLabel。
+    <!-- 3D 视图。跟着当前选中的节点走：点卡片切节点、收到 focus 时跟着切，
+         或者当前这个节点收到新快照时，dashboard.js 会调 updateScene + setLabel。
          容器的高度写在 style.css 里，必须是确定值 ——
          读不到 clientHeight 的话相机就算不出宽高比。 -->
     <figure class="scene-box">
@@ -87,7 +115,11 @@
 
     <!-- 温湿度分成两张图，不用双 Y 轴：两者的单位和量级都不同，
          叠在一张图上要么把温度压成一条直线，要么让两条线的交叉点
-         变成毫无意义的视觉暗示。两张图共用同一组时间刻度，趋势照样能横向比。 -->
+         变成毫无意义的视觉暗示。两张图共用同一组时间刻度，趋势照样能横向比。
+
+         数据来自快照里每个节点自带的 history（core 每帧跟着发最近 50 条）。
+         Step E3-2 之前这里画的是页面自己攒的那份 —— 现在页面不攒数据了，
+         刷新一下图上还有没有东西，全看 core 发不发。 -->
     <div class="charts">
       <figure class="chart-box">
         <figcaption>温度 ℃</figcaption>
@@ -104,6 +136,10 @@
        那边一条报文一行，这边一段连续异常一行。节点从正常变成异常时开一条，
        恢复正常时结案；中途状态从偏热变成偏湿**不会**另开一条，
        和「优先关注」那边「统计的是连续异常、不是连续偏热」是同一个口径。
+
+       Step E3-2 起这些事件**由 core 记**（core.py + events.py），页面只画 ——
+       以前这里画的是页面自己攒的一份，于是同一段时间在屏幕上有两个说法
+       （看板记的恢复时刻和 report.html 里那份不一样）。现在两边是同一份数据。
 
        整张表由 dashboard.js 的 renderEvents() 填，导出按钮的点击也在那边挂
        （exportEventsCSV）。一条事件都没有时按钮是禁用的 —— 不然点了会得到
@@ -132,8 +168,45 @@
     </div>
   </section>
 
+  <!-- 被拒绝消息（Step E3-2 新增）。core 拒收的每一条都在这里：什么时候、
+       哪条 topic、为什么、**原文是什么**。
+
+       为什么要有这一块：发一条坏报文过去，看板上其余每一块都毫无反应 ——
+       卡片不动、事件不增、日志区只会多一行「快照更新」。看不出「到底是谁没收」
+       还是「压根没发出去」。core 的终端上有 [拒绝] 那行，但演示的时候
+       没人愿意一直盯着终端。
+
+       原文一定要摆出来：只写一句「JSON 解析失败」，发消息的人不知道
+       自己哪里写错了。这一段照着抄就能改对，不用去 core 的日志里翻。
+
+       数据来自**快照里的 rejects 那一块**（不是另订一条 topic）：前端只订
+       dormmate/v1/state 是 E3 的硬约束，而且两条流合成一张表还要自己处理
+       「刷新页面时之前那几条哪去了」和「reject 和快照谁先到」。
+       一帧快照就是那一刻的全貌，画一帧没有对不齐的中间状态。
+
+       dormmate/v1/log/reject 那条 topic 照旧保留（MQTTX 直接看、D4 的
+       inject_faults.py 要订它数条数），只是这个页面不再依赖它。 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>被拒绝消息 <span id="reject-count" class="count"></span></h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>Topic</th>
+            <th>原因</th>
+            <th>原文</th>
+          </tr>
+        </thead>
+        <tbody id="reject-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- ML 辅助判断（Step 9-3 的进阶项）。这一块和上面几块**不是一路数据**：
-       上面全是刚收到的报文算出来的，这一块是 analysis/analysis.py 上一次跑完
+       上面全是 core 刚发布的快照，这一块是 analysis/analysis.py 上一次跑完
        写在 report/ml_result.json 里的快照，页面只是取过来摆在这儿。
 
        所以 #ml-note 里那句「判的不是看板上这些实时读数……不是实时数据」
@@ -173,20 +246,29 @@
     </div>
   </section>
 
+  <!-- 这一段是**认账**用的：页面上那些字是谁算的。Step E3-2 起这一页
+       **不再复核 status** —— 它连温度阈值都不认识（logic.js 里没有 18/30/75
+       这三个数，有测试盯着）。以前这里写着「一律用规则复核，不一致时以规则为准」，
+       那句话现在是错的：页面拿到的 status 就是 core 用同一套规则算的那一个，
+       页面没有第二份判断可以拿来跟它比。
+
+       规则本身仍然在仓库里有**唯一一份 JS 实现**（shared/rules.js），
+       给 miniapp 那两个不能跑 Python 的地方用；dashboard 已经不引它了。 -->
   <footer class="foot">
     状态判定规则（按顺序，命中即停）：<code>&lt;18</code> 偏冷 →
-    <code>≥30</code> 偏热 → <code>湿度 ≥75</code> 偏湿 → 正常。
-    收到报文里的 <code>status</code> 只作参考，一律用规则复核，不一致时以规则为准。
+    <code>&ge;30</code> 偏热 → <code>湿度 &ge;75</code> 偏湿 → 正常。
+    这份规则由 core 执行（<code>core/rules.py</code>），本页面的每一个字
+    —— 状态、优先关注、事件、时长 —— 都是 core 算完发过来的，页面只负责画。
   </footer>
 
 </div>
 
-<!-- 三个库的顺序不能换：mqtt 和 rules 都要在 dashboard.js 之前加载完，
-     dashboard.js 打开页面就会调 connect() 和 judgeStatus()。
+<!-- 三个库的顺序不能换：mqtt 和 config 都要在 dashboard.js 之前加载完，
+     dashboard.js 打开页面就会调 connect() 去读 DormMateConfig。
      Step 6-3 起它们还必须是**普通 script** —— dashboard.js 已经是 ES 模块了，
-     但 mqtt / Chart / judgeStatus 这三个仍然走全局变量：
+     但 mqtt / Chart / DormMateConfig 这三样仍然走全局变量：
      mqtt.min.js 和 chart.umd.min.js 是 UMD 包，本来就没有 export；
-     shared/rules.js 同理（一个 IIFE，往 globalThis 上挂函数）。
+     shared/config.js 同理（一个 IIFE，往 globalThis 上挂一个冻住的对象）。
      在模块里 import 它们是 import 一个没有 export 的文件，拿到的是 undefined。 -->
 
 <!-- mqtt.js 5.10.1：用本地的，不走 CDN。
@@ -206,7 +288,11 @@
      （把这一行也换成 lib/ 之后，整个页面就完全不依赖外网了。） -->
 <script src="https://registry.npmmirror.com/chart.js/4.5.1/files/dist/chart.umd.min.js"></script>
 
-<script src="../shared/rules.js"></script>
+<!-- Broker 的 WebSocket 地址 + topic 常量，三个前端（dashboard / 3d / mobile）
+     共用这一份（Step E3-1）。E3 之前这里是 <script src="../shared/rules.js"> ——
+     那是在「页面自己复核状态」的年代，页面得有规则才能算；
+     现在页面不算了，规则那一份就没用了。换成了配置这一份。 -->
+<script src="../shared/config.js"></script>
 
 <!-- three.js 0.160.0 的 importmap，和 3d/index.html 里那张是同一张。
 

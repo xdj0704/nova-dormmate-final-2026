@@ -1,106 +1,100 @@
 // dashboard.js
-// Step 5-3 / 5-4：三节点 Dashboard。订阅 MQTT 显示真实数据，
-// 「模拟三节点数据」按钮则在没接 Broker 时也能把界面跑起来。
+// Step 5-3 / 5-4：三节点 Dashboard。
 // Step 6-3：详情区嵌一个 3D 视图，跟着当前选中的节点走。
-// Step 7-1：自动挑出最该先看的那个节点。
-// Step 8-3：顶部只剩一行「当前重点」，另加一个「语音提醒」按钮 ——
-//           信息按出口分工，细节分给 3D / 语音 / report.html（见 index.html 那段注释）。
+// Step 8-3：顶部只剩一行「当前重点」，另加一个「语音提醒」按钮。
+// Step E3-2：**改成只订阅 core 发布的 `dormmate/v1/state`**，页面只渲染。
 //
-// handleMessage(topic, payloadText) 是唯一的消息入口，两个来源都走它：
-//   client.on('message')  -> 真实 MQTT
-//   simulate()            -> 本地模拟
-// 校验、复核 status、落库、刷新这一整条链路两端共用，所以模拟数据看到的行为
-// 和真实数据完全一致 —— 反过来说，改 handleMessage 就等于同时改了两边。
+// 【这一轮最大的改动：数据从哪来】
+// E3 之前，这个页面订的是 `dormmate/v1/nodes/+/telemetry`，于是它得自己把
+// 原始读数加工一遍：复核 status、维护连续异常段、挑优先关注、记事件、判处理
+// 到哪一步了。core 那边其实**也在做同一件事**，两边各有一份实现。
+//
+// 现在整个反过来：
+//     simulator ——> core.py（唯一业务大脑）——> dormmate/v1/state ——> 这个页面
+// 页面订的是那一条 retained 快照，画的是快照里的字段。所以：
+//   - 这个文件里**没有**温度阈值、没有「连续几条算异常」、没有排序规则、
+//     没有事件状态机 —— 它们全在 core 里，只有一份（有测试盯着这件事）
+//   - 页面上那些字（谁是重点、因为什么、处理到没有）都是 core 写好的，
+//     这边一个结论都不下；`./logic.js` 那一份也只剩「读字段 + 拼人话」
+//   - 顺带去掉的：「模拟三节点数据」按钮。E3 明确禁止「两边手动输入数据
+//     伪造同步效果」—— 那个按钮干的正是这件事（凭空造一份本地数据让界面
+//     动起来）。要数据就跑 simulator/，或者用 MQTTX 发。
+//
+// 【代价：没有 core 就没有画面】页面打开时如果 core 没起，这里只会显示
+// 「还没有收到 core 的快照」。这是**有意的** —— 快照是 retained 的，core
+// 一上线，页面立刻补上；而本地造一份假数据顶上去，就再也分不清屏幕上的
+// 数字是真的还是编的。README 的「已知限制」里写了这一条。
+//
+// handleMessage(topic, payloadText) 是唯一的消息入口。
 //
 // 这个文件是 **ES 模块**（index.html 里写的是 type="module"），因为它 import 了
 // ../3d/scene.js 和 ./logic.js。三件事跟着变了，改的时候别漏：
 //   1) 页面必须走 http 服务器打开，file:// 下模块会被 CORS 拒掉
 //   2) index.html 里要有 importmap，且排在模块脚本之前（scene.js 用的是裸名字 'three'）
-//   3) mqtt / Chart / judgeStatus 仍然走全局变量，它们不是 import 进来的
-//
-// 这个文件负责「维护状态 + 摆到页面上」，不负责「怎么比」：
-// 比大小、算时长、拼那句原因都在 ./logic.js 里，那边是纯函数，单独测。
+//   3) mqtt / Chart 仍走全局变量，DormMateConfig 也是（shared/config.js 是普通
+//      script，挂全局而不是 export —— 见那个文件开头那段）
 
 /* 3D 场景。拿的是 createDorm3D 这个工厂，不是场景本身 ——
-   这个页面只建一个，但工厂的返回值里带着 updateScene / setLabel / dispose，
-   后续要加第二个视角（比如三节点并排）时不用改这里。
-   路径相对**本文件**算：本文件在 dashboard/ 下，所以是 ../3d/scene.js。 */
+   这个页面只建一个，但工厂的返回值里带着 updateScene / setLabel / dispose。 */
 import { createDorm3D } from '../3d/scene.js';
 
-/* 看板的判断逻辑。只有这几个函数被这里用到，其余（parseTime / fmtDuration /
-   abnormalDuration / ranked 那一套）是给测试单独钉的，页面不直接调。
-   nextAbnormal 维护每个节点那两个字段，pickPriority 拿它们挑出最该看的那个，
-   buildFocus 把它压成顶部那一行，buildAlert 把它说成语音要念的一句话（8-3）。
-
-   buildOverview / buildReasons（8-1）**这里不 import 了**：8-3 起页面上不再
-   渲染那两句，顶上只有 buildFocus 那一行。那两个函数仍然留在 logic.js 里
-   ——「为什么是它、别人为什么不是」那套说法要去 report.html，那边要复用它，
-   而且 pickPriority 记进事件、跟着导出的 CSV 走的 reason 也在那儿。 */
-import { pickPriority, nextAbnormal, beginHandling, nextHandling, cmdNote,
-  beginEvent, markPriority, markAction, closeEvent,
-  buildFocus, buildAlert,
-  buildMlNote, mlFetchFailed } from './logic.js';
+/* 看板剩下来的那一半：读快照字段 + 把它们摆成人话。
+   全是纯函数，不碰 DOM，所以 tests/logic.test.js 不用打任何桩就能整个测一遍。 */
+import { readSnapshot, nodeOf, eventStateText, handlingOf, fanOn,
+  focusBanner, alertLine, snapshotSummary, actionState,
+  buildMlNote, mlFetchFailed, cmdNote } from './logic.js';
 'use strict';
 
-/* ---------- 节点数据 ---------- */
+/* ---------- 配置 ---------- */
 
-/* 三个阶段各自独立：latest 是这个节点最新的一条，history 是这个节点自己的
-   全部记录。三个 history 是三个不同的数组，绝不共用 —— 往哪个数组里 push
-   只由报文里的 nodeId 决定，见 handleMessage 第 4 步。 */
-const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
+/* Broker 地址和 topic 常量来自 shared/config.js（Step E3-1）—— 三个前端
+   （dashboard / 3d / mobile）共用一份。以前这里写着「有意重复」，E3 起
+   反过来：三个页面订的是**同一条**快照 topic，再各写一份就不是重复两三行，
+   而是「改了 topic 有一处没跟上」变成了常态。
 
-/* abnormalStart / abnormalCount 是 Step 7-1 加的：当前这段**连续异常**
-   从哪条消息开始、已经有几条。怎么变由 logic.js 的 nextAbnormal 决定，
-   这里只负责存。0 / null = 不在异常中。
-   「谁是当前重点」比的就是这两个字段 —— 见 renderFocus。
+   它是普通 script 挂的全局，所以这里读 window 上的属性而不是 import。
+   读不到就**什么都不做**并说清楚 —— 硬着头皮往下走的话，连的是 undefined
+   地址、订的是 undefined topic，错误信息会飘到很远的地方去。 */
+const CFG = typeof window !== 'undefined' ? window.DormMateConfig : null;
 
-   handling / action / actionTime / dataAfterAction 是 Step 7-2 加的：
-   这个节点被「处理」过没有、做了什么、什么时候做的、做完之后收到了什么。
-   怎么变由 logic.js 的 beginHandling（按按钮）和 nextHandling（来新消息）
-   决定，这里同样只负责存。
-     handling  '无' | '处理中' | '已恢复'
-   这一份就是**唯一**的处理状态：卡片上那句「处理中｜风扇已开启」、
-   详情区那行字、3D 里风扇转不转，全都读这几个字段，谁都不另存一份。
+/* ---------- 页面状态 ---------- */
 
-   event 是 Step 7-4 加的：这个节点**当前这段**连续异常对应的事件对象，
-   段结束了就置回 null。它和 node.latest 一样是「指向 events 里某个元素的
-   引用」，不是副本 —— 见 events 那边的说明。 */
-const nodes = {};
-NODE_IDS.forEach(function (id) {
-  nodes[id] = {
-    latest: null, history: [], abnormalStart: null, abnormalCount: 0,
-    handling: '无', action: null, actionTime: null, dataAfterAction: null,
-    event: null,
-  };
-});
+/* 最近一帧通过校验的快照。null = 还没收到过。
+   页面上**所有**数字都从这一份里读，没有第二份数据可以跟它不一致 ——
+   这正是「只有一份」的写法：换一帧就是整页重画。 */
+let snapshot = null;
 
-/* 事件记录，新的在前。每条事件整条留档，结案之后也不删 —— 「事件记录」区
-   和导出的 CSV 显示的就是这整个数组，不只是还没结束的那些。
+/* 当前正在查看的宿舍。点卡片会改它；移动端发来 focus 时也会跟着切过去。
+   null = 还没从快照里知道有哪些宿舍（快照里带的就是全部，这个文件里
+   没有写死的节点名）。 */
+let selected = null;
 
-   ⚠ 这里存的是**对象本身**，和 nodes[id].event 指向同一个。
-   往 events 里 push/unshift 的是引用，不是深拷贝，所以更新一条事件只能
-   就地改（Object.assign），绝不能整个换掉 node.event —— 一换，
-   events 里的那条就还是旧的，两边各自说各的话。
-   这也是「处理状态、页面显示、导出读同一份数据」那条要求的写法：
-   只有一份，没有第二份可以跟它不一致。 */
-const events = [];
+/* 上一次**跟过**的焦点 / 重点。用来区分「焦点变了」和「同一条焦点又发了一遍」：
+   跟过之后用户点别人看，不该被下一条一模一样的快照拽回去。 */
+let followed = undefined;
 
-/* 每个节点最多留多少条历史。不设上限的话挂机久了数组会一直涨，图上也会挤成
-   一片。要更长的趋势改这个数就行。 */
-const HISTORY_MAX = 50;
+/* 上一次记进日志的焦点，用来只在**变化时**记一行（跨端联动的证据）。
+
+   初值是空串而不是 undefined：空串就是「没有焦点」，和快照里没有焦点时
+   算出来的那个值**一模一样**。初值写成 undefined 的话，第一帧（本来就没焦点）
+   会被当成一次「从有到无」的变化，于是每次刷新页面都会先记一行
+   「跨端焦点已取消」—— 一件根本没发生过的事。 */
+let loggedFocus = '';
+
+/* 上一次快照里「一共拒过多少条」。涨了就记一行警告，人不用一直盯着下面那块面板。 */
+let loggedRejects = null;
+
+/* 消息日志，新的在前。这是**本页面收到的东西**的流水，和「被拒绝消息」那块
+   面板不是一回事 —— 那块是 core 拒掉的东西（跟着快照来）。 */
+const messages = [];
 
 /* 消息日志最多留多少条 */
 const LOG_MAX = 100;
 
-/* 当前正在查看的节点。点卡片会改它。 */
-let currentNodeId = NODE_IDS[0];
-
-/* 消息日志，新的在前 */
-const messages = [];
-
 /* ---------- 状态 -> class / 图标 ---------- */
 
-/* 和 web/script.js 里的 STATUS_VIEW 是同一份映射，class 名也刻意保持一致，
+/* status 是从快照里读来的（core 用 rules.py 算的），这里只负责决定它长什么样。
+   和 web/script.js 里的 STATUS_VIEW 是同一份映射，class 名也刻意保持一致，
    这样两个页面的卡片配色用的是同一套定义（见 dashboard/style.css 里的 --c）。 */
 const STATUS_VIEW = {
   '正常': { cls: 'is-good',     icon: 'check' },
@@ -129,9 +123,11 @@ function esc(value) {
   });
 }
 
-/* 31 显示成 31，25.5 显示成 25.5 */
+/* 31 显示成 31，25.5 显示成 25.5。null / undefined 显示成 —（还没收到数据） */
 function fmt(value) {
+  if (value === null || value === undefined) return '—';
   const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
@@ -140,83 +136,16 @@ function pad2(n) {
 }
 
 /**
- * 把 Date 格式化成 "YYYY-MM-DD HH:mm:ss"（本地时间）。
+ * 把 Date 格式化成 "YYYY-MM-DD HH:mm:ss"（本地时间）。只用在**消息日志**上
+ * （那是浏览器收到这一条的时刻），页面别处显示的时刻全来自快照。
  *
  * 不用 toLocaleString()：它的输出跟着浏览器和系统区域设置走，中文环境下
- * 可能给出 "2026/9/26 20:30:00"，连补零都不保证，和统一 JSON 约定的格式
- * 对不上，和 Python 侧发布的时间串也对不齐。
- *
- * @param {Date} date
- * @returns {string} "YYYY-MM-DD HH:mm:ss"，非法输入返回空串
+ * 可能给出 "2026/9/26 20:30:00"，连补零都不保证。
  */
 function formatTime(date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
   return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate())
     + ' ' + pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
-}
-
-/* topic 的形状只写一遍，下面三个东西都从这两个片段拼出来。
-   以前是订阅、解析、演示数据三处各写一遍字符串：从旧的三段式迁到 v1 那次，
-   批量替换只扫到字面量，演示数据那处是 'dormmate/' + nodeId + '/env' 拼的，
-   于是漏了下来 —— 而它**照样能跑**，因为形状不对时 topicNode 返回空串、
-   topic 与 nodeId 的一致性检查整段被跳过，谁也没发现发出去的 topic
-   应用自己不认识。收成一处之后，这种漏改不会再静默通过。 */
-const TOPIC_PREFIX = 'dormmate/v1/nodes/';
-const TOPIC_SUFFIX = '/telemetry';
-
-/* 指令那条 topic，以及这条协议里的两个字符串。和上面两个片段同一个道理：
-   只在这里写一遍 —— 写两遍的话，改一边忘一边就是「发到一条 core 不认的
-   topic 上」，而两边都不报错，只是按了按钮没反应。
-
-   CMD_ACTION 的值必须和 events.py 的 COMMANDS 对上（目前只有 'handle' 一个）。
-   这和规则那两份实现是同一类约定：跨语言没有共享的常量，所以**两边各钉一条
-   测试**把字面量定住（Python 侧 test_events.py，JS 侧 logic.test.js）。
-   core 那边不做大小写折叠，发 'Handle' 会被拒。 */
-const CMD_TOPIC = 'dormmate/v1/cmd';
-const CMD_ACTION = 'handle';
-
-/* 指令里带的来源。core 会把它打进日志：`[指令] dorm-b handle（dashboard）`——
-   演示的时候一眼分出这一条是人按的还是 send_cmd.py 发的。 */
-const SOURCE_DASHBOARD = 'dashboard';
-
-/**
- * 拼出某个节点的上报 topic。演示数据按钮走这条，别再手写字符串。
- *
- * @param {string} nodeId
- * @returns {string} 例如 dormmate/v1/nodes/dorm-a/telemetry
- */
-function topicFor(nodeId) {
-  return TOPIC_PREFIX + nodeId + TOPIC_SUFFIX;
-}
-
-/**
- * 订阅用的通配符 topic。
- *
- * @returns {string} dormmate/v1/nodes/+/telemetry
- */
-function topicWildcard() {
-  return TOPIC_PREFIX + '+' + TOPIC_SUFFIX;
-}
-
-/**
- * 从 topic 里取出节点名。约定是 dormmate/v1/nodes/<nodeId>/telemetry。
- * 形状不对就返回空串 —— 调用方据此跳过 topic 与 nodeId 的一致性检查，
- * 而不是拿一个猜出来的节点名去报警。
- *
- * 头尾都是从 TOPIC_PREFIX / TOPIC_SUFFIX 上切的，不另写一份字面量：
- * 上面注释里那次的漏改，根子就是「同一件事写了两遍」。
- *
- * @param {string} topic
- * @returns {string} 节点名，或空串
- */
-function topicNode(topic) {
-  const text = String(topic == null ? '' : topic);
-  if (!text.startsWith(TOPIC_PREFIX) || !text.endsWith(TOPIC_SUFFIX)) return '';
-  const nodeId = text.slice(TOPIC_PREFIX.length, text.length - TOPIC_SUFFIX.length);
-  /* 节点名里不许再出现分隔符：dormmate/v1/nodes/a/b/telemetry 头尾都对得上，
-     但那是两个节点名拼出来的，取出来是个不存在的节点。 */
-  if (nodeId === '' || nodeId.indexOf('/') !== -1) return '';
-  return nodeId;
 }
 
 /* ---------- DOM ---------- */
@@ -227,7 +156,7 @@ const el = {
   logCount: document.getElementById('log-count'),
   detailNode: document.getElementById('detail-node'),
   detailMeta: document.getElementById('detail-meta'),
-  actionFan: document.getElementById('action-fan'),
+  actionHandle: document.getElementById('action-handle'),
   actionState: document.getElementById('action-state'),
   cmdNote: document.getElementById('cmd-note'),
   chartNote: document.getElementById('chart-note'),
@@ -238,7 +167,8 @@ const el = {
   evBody: document.getElementById('event-body'),
   evCount: document.getElementById('event-count'),
   exportEvents: document.getElementById('export-events'),
-  simulate: document.getElementById('simulate'),
+  rjBody: document.getElementById('reject-body'),
+  rjCount: document.getElementById('reject-count'),
   clear: document.getElementById('clear'),
   conn: document.getElementById('conn'),
   connText: document.getElementById('conn-text'),
@@ -287,153 +217,150 @@ function renderLog() {
 
 /* ---------- 卡片 ---------- */
 
-function cardHTML(nodeId) {
-  const node = nodes[nodeId];
-  const active = nodeId === currentNodeId;
+/**
+ * 一张卡片。三个宿舍画的是同一套东西，内容全部来自快照里那一条。
+ *
+ * 「处理中｜handle」那一行来自 core 的事件（handlingOf）—— 这个宿舍有一条
+ * 未结案的事件时才出现。没按过按钮就整行不出现，不多一行空占位。
+ */
+function cardHTML(node) {
+  const nodeId = node.nodeId;
+  const active = nodeId === selected;
   const head = '<span class="card-head">'
     + '<span class="node-name">' + esc(nodeId) + '</span>';
 
-  if (!node.latest) {
+  const handling = handlingOf(snapshot, nodeId);
+  const handlingHTML = handling.label === '无' ? ''
+    : '<span class="card-action">' + esc(handling.label
+      + (handling.event && handling.event.action ? '｜' + handling.event.action : '')) + '</span>';
+
+  if (node.status == null) {
     return '<button class="card is-empty' + (active ? ' is-active' : '') + '"'
       + ' type="button" data-node="' + esc(nodeId) + '" aria-pressed="' + active + '">'
       + head + '<span class="badge badge--wait">等待数据</span></span>'
-      + '<span class="card-wait">还没收到这个节点的消息</span>'
+      + '<span class="card-wait">core 还没收到这个节点的数据</span>'
+      + handlingHTML
       + '</button>';
   }
 
-  const p = node.latest;
-  const view = viewFor(p.status);
+  const view = viewFor(node.status);
 
-  /* 处理动作那一行。没按过按钮就整行不出现 ——
-     那时候卡片和 7-1 长得一模一样，不多一行空占位。 */
-  const handling = node.handling === '无' ? ''
-    : '<span class="card-action">' + esc(node.handling + '｜' + node.action) + '</span>';
+  /* 离线是个**状态之外**的事实（core 的优先排序不排离线的节点），
+     所以它单独一个小标，不挤进那个状态徽章里。 */
+  const offline = node.online ? ''
+    : '<span class="badge badge--wait">已离线</span>';
 
   return '<button class="card ' + view.cls + (active ? ' is-active' : '') + '"'
     + ' type="button" data-node="' + esc(nodeId) + '" aria-pressed="' + active + '">'
     + head
-    + '<span class="badge">' + ICONS[view.icon] + '<span>' + esc(p.status) + '</span></span>'
+    + '<span class="badge">' + ICONS[view.icon] + '<span>' + esc(node.status) + '</span></span>'
     + '</span>'
     + '<span class="tiles">'
     + '<span class="tile"><span class="tile-label">温度</span>'
-    + '<span class="tile-value">' + fmt(p.temperature) + '<i class="tile-unit">℃</i></span></span>'
+    + '<span class="tile-value">' + fmt(node.temperature) + '<i class="tile-unit">℃</i></span></span>'
     + '<span class="tile"><span class="tile-label">湿度</span>'
-    + '<span class="tile-value">' + fmt(p.humidity) + '<i class="tile-unit">%</i></span></span>'
+    + '<span class="tile-value">' + fmt(node.humidity) + '<i class="tile-unit">%</i></span></span>'
     + '</span>'
-    + handling
-    + '<span class="card-foot">更新于 ' + esc(p.time) + '</span>'
+    + handlingHTML
+    + '<span class="card-foot">' + esc(node.durationText
+      ? '已持续 ' + node.durationText : '更新于 ' + (node.time || '—')) + '</span>'
+    + offline
     + '</button>';
 }
 
 function renderCards() {
-  el.cards.innerHTML = NODE_IDS.map(cardHTML).join('');
+  const nodes = snapshot && Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+  el.cards.innerHTML = nodes.length === 0
+    ? '<p class="cards-empty">还没有收到 core 的快照 —— 先起 core.py，'
+      + '它会把三节点状态发布到 dormmate/v1/state（保留消息，页面一订就能拿到）。</p>'
+    : nodes.map(cardHTML).join('');
 }
 
 /* ---------- 详情区 ---------- */
 
 function renderDetailHead() {
-  const node = nodes[currentNodeId];
-  el.detailNode.textContent = currentNodeId;
-  el.detailMeta.textContent = node.latest
-    ? '最新一条 ' + node.latest.time + ' · 这个节点已收到 ' + node.history.length + ' 条'
-    : '还没有收到这个节点的数据';
-}
-
-/**
- * 详情区那行处理状态的文字。
- *
- * 说的是**当前这个节点**的事，所以整个跟着 currentNodeId 走。
- * 处理过就把三个字段原样摆出来：做了什么、记在哪条数据上、之后收到了什么。
- * 这几个值全从节点上读，没有第二份副本可以跟它不一致。
- */
-function actionText(node) {
-  if (node.handling !== '无') {
-    const head = node.handling + '｜' + node.action + '（记在 ' + node.actionTime + ' 这条数据上）';
-    const d = node.dataAfterAction;
-    if (!d) return head + ' · 还没收到动作之后的数据';
-    return head + ' · 之后收到 ' + d.time + '：'
-      + fmt(d.temperature) + '℃ / ' + fmt(d.humidity) + '% ' + d.status;
+  const node = selected ? nodeOf(snapshot, selected) : null;
+  el.detailNode.textContent = selected || '—';
+  if (!node) {
+    el.detailMeta.textContent = '还没有收到 core 的快照';
+    return;
   }
-  if (!node.latest) return '还没有收到这个节点的数据';
-  if (node.latest.status === '正常') return '当前状态正常，不需要处理';
-  /* 有异常、还没按过按钮：按钮就在旁边，不必再多说一句 */
-  return '';
+  el.detailMeta.textContent = node.status == null
+    ? 'core 还没收到这个节点的数据'
+    : '最新一条 ' + (node.time || '—') + ' · core 手里有这个节点的 '
+      + fmt(node.historyCount) + ' 条读数';
 }
 
 /**
- * 重画那个「开启风扇 / 通风」按钮和它旁边那行字。
+ * 重画「开始处理」按钮和它旁边那行字。
  *
- * 按钮只在「有数据、且不是正常」时可点：
- *   - 一条数据都没有 -> 连 actionTime 都没地方取，点不了；
- *   - 状态正常      -> 没有要处理的事，按规格书禁用。
- * 「已恢复」的节点状态就是正常的，所以那时候按钮同样是灰的 —— 这两条一致。
+ * **能不能按由 core 说了算**：这个宿舍有一条「待处理」的事件才能按
+ * （`actionState` 判的，在 logic.js 里，单独可测）。
+ *   - 一条数据都没有        -> 按了也没有对应的事件，按钮灰着并说明原因
+ *   - 状态正常、也没有事件  -> 没有要处理的事
+ *   - 异常但 core 还没开案  -> 「连续几条异常才开案」是 core 的规矩，按钮等着
+ *   - 已经在处理中          -> 按下去只是多记一笔动作，core 那边用不上
  */
 function renderAction() {
-  const node = nodes[currentNodeId];
-  el.actionFan.disabled = !(node.latest && node.latest.status !== '正常');
-  el.actionState.textContent = actionText(node);
+  const state = selected ? actionState(snapshot, selected)
+    : { enabled: false, note: '还没有收到 core 的快照' };
+  el.actionHandle.disabled = !state.enabled;
+  el.actionState.textContent = state.note;
 }
 
-/* ---------- 当前重点一行（Step 8-3｜B4） ---------- */
+/* ---------- 顶部横幅（优先关注 / 跨端焦点） ---------- */
 
 /**
- * 重画看板顶部那一行。
+ * 重画看板顶部那条横幅。
  *
- *   「dorm-b｜处理中｜温度正在下降」
+ *   [跨端焦点] dorm-b｜处理中｜温度正在下降
+ *              跨端焦点：mobile 发来的 focus 指令
+ *              数据选出的重点是 dorm-a：已连续偏热 12 分钟（3 次）……
  *
- * 挑哪个节点、那句话怎么拼，全交给 logic.js 的 buildFocus，这个函数只负责
- * 把结果摆到页面上，一个比较都不做 —— 比较的规矩只有一份，写在 logic.js 里，
- * 那边有单独的测试。这里再拼一份的话，页面上迟早出现「这一行说的是 dorm-b、
- * 语音念的是 dorm-c」这种自相矛盾。
+ * 挑哪个宿舍、那几行字怎么写，全交给 logic.js 的 focusBanner —— 这个函数只
+ * 负责把结果摆到页面上，一个比较都不做。两个来源（core 排出来的 priority、
+ * 人在移动端点名的 focus）各自怎么说话，写在那边。
  *
- * 整块用 innerHTML 重画，和卡片一样。所以点击也是事件委托，
- * 挂在容器上，不给每次重画出来的那个按钮单独绑。
- *
- * 它跟着 currentNodeId 变（要标出「正在查看」），所以切节点时也得重画 ——
- * 这也是它不能只跟 handleMessage 走的原因。
- *
- * 【为什么状态图标还在，状态两个字却没了】那一行的文字里没有「偏热」，
- * 但颜色不能就此单独表意（项目里状态色一律配图标 + 文字）。所以这里放一个
- * **形状**（太阳 / 雪花 / 水滴 / 对勾）：形状本身就把状态区分开了，颜色只是
- * 让它在三步之外也能被看见。这也是卡片和 7-1 那条栏一直在用的同一套 ICONS。
+ * 整块用 innerHTML 重画，和卡片一样，所以点击也是事件委托挂在容器上。
+ * 它跟着 selected 变（要标出「正在查看」），切节点时也得重画。
  */
 function renderFocus() {
-  const pick = pickPriority(nodes);
+  const banner = focusBanner(snapshot);
 
-  /* 没挑出人来有两种情况，说的话不能一样 ——
-     「都正常」在一条数据都没收到时是句假话：页面刚打开、还没连上 broker 的
-     那几秒，那三个节点是**不知道**，不是正常。pickPriority 两种情况都返回 null
-     （约定就是「没有要优先的」），所以这层区分由 buildFocus 那侧做。
-     这里只负责画，不管那句该说什么。 */
-  if (!pick) {
+  if (banner.mode === 'calm') {
     el.focus.innerHTML = '<p class="focus focus--calm">'
       + '<span class="focus-tag">当前重点</span>'
-      + '<span class="focus-text">' + esc(buildFocus(nodes)) + '</span>'
+      + '<span class="focus-text">' + esc(banner.line) + '</span>'
       + '</p>';
     return;
   }
 
-  /* 颜色跟着这个节点的状态走，和卡片用同一套 class、同一套状态色。
-     状态色是保留色，所以那个图标永远配着形状一起出现，不靠颜色单独表意。 */
-  const view = viewFor(nodes[pick.nodeId].latest.status);
-  const current = pick.nodeId === currentNodeId;
+  /* 颜色跟着这个宿舍的状态走，和卡片用同一套 class、同一套状态色。
+     状态可能为 null（被点名的宿舍还没收到数据）—— 那就用中性那套。 */
+  const view = viewFor(banner.status);
+  const current = banner.nodeId === selected;
+  const reason = banner.reason
+    ? '<span class="focus-reason">' + esc(banner.reason) + '</span>' : '';
+  const cross = banner.cross
+    ? '<span class="focus-cross">' + esc(banner.cross) + '</span>' : '';
 
   el.focus.innerHTML = '<button class="focus ' + view.cls
     + (current ? ' is-active' : '') + '"'
-    + ' type="button" data-node="' + esc(pick.nodeId) + '" aria-pressed="' + current + '">'
-    + '<span class="focus-tag">当前重点</span>'
+    + ' type="button" data-node="' + esc(banner.nodeId) + '" aria-pressed="' + current + '">'
+    + '<span class="focus-tag">' + esc(banner.tag) + '</span>'
     + '<span class="focus-icon" aria-hidden="true">' + ICONS[view.icon] + '</span>'
-    + '<span class="focus-text">' + esc(buildFocus(nodes)) + '</span>'
+    + '<span class="focus-text">' + esc(banner.line) + '</span>'
     + '<span class="focus-state">' + (current ? '正在查看' : '查看详情') + '</span>'
+    + reason + cross
     + '</button>';
 }
 
-/* ---------- 语音提醒（Step 8-3｜B4） ---------- */
+/* ---------- 语音提醒 ---------- */
 
-/* 语音合成用浏览器自带的 speechSynthesis。和 3-2 的语音识别一样，
-   Chrome / Edge / Safari 都有，Firefox 也有。念的是**当前最重要的一句**，
+/* 语音合成用浏览器自带的 speechSynthesis。念的是**当前最重要的一句**，
    不是把三个宿舍从头到尾念一遍 —— 声音是线性的，说过就过去了，
-   念三段话听的人只记得住最后一句。 */
+   念三段话听的人只记得住最后一句。那句话由 logic.js 的 alertLine 从快照里
+   拼出来（和上面那条横幅说的是同一个宿舍）。 */
 const SPEECH_LANG = 'zh-CN';
 
 function setSpeakNote(text) {
@@ -459,13 +386,13 @@ function speechSupported() {
  *
  * 先 cancel() 再 speak()：连点两次的话，第二句会老老实实排在队列里等着，
  * 等第一句念完（好几秒）它才开口，而那时候念的是**按下按钮那一刻**算出来的话，
- * 早就不算数了。掐掉上一句、立刻念最新的，才符合「念的是此刻的重点」。
+ * 早就不算数了。
  *
  * 无论成功还是失败，都把念的内容写到按钮下面那行 —— 静音、没音箱、
  * 声音太小的时候，那一行是唯一能确认「它到底念了什么」的地方。
  */
 function speakAlert() {
-  const text = buildAlert(nodes);
+  const text = alertLine(snapshot);
 
   if (!speechSupported()) {
     setSpeakNote('这个浏览器不支持语音合成（window.speechSynthesis 不存在）。'
@@ -478,8 +405,8 @@ function speakAlert() {
   const utterance = new window.SpeechSynthesisUtterance(text);
   utterance.lang = SPEECH_LANG;
 
-  /* 出错也要说出来。原始的错误码写在最前面 —— 解释文案可能对不上，错误码不会骗人
-     （和 3-2 那张 VOICE_ERRORS 表同一条原则）。 */
+  /* 出错也要说出来。原始的错误码写在最前面 —— 解释文案可能对不上，
+     错误码不会骗人（和 3-2 那张 VOICE_ERRORS 表同一条原则）。 */
   utterance.onerror = function (event) {
     const code = event && event.error ? event.error : 'unknown';
     setSpeakNote('朗读失败（' + code + '）。要念的是：' + text);
@@ -491,30 +418,25 @@ function speakAlert() {
 
 /* ---------- 事件记录 ---------- */
 
-/**
- * 表格里一格「时间 + 一句说明」。
- *
- * 这两格（优先关注、处理动作）的内容比别的格子长得多 —— 优先关注那句原因
- * 可以有二十来个字。所以说明另起一行、用淡一点的颜色，不跟时间挤在一起，
- * 也不让整张表被撑得横向滚动。
- *
- * @param {string|null} time
- * @param {string|null} note
- * @returns {string} HTML
- */
+/* 表格里一格「时间 + 一句说明」。
+   这两格（优先关注、处理动作）的内容比别的格子长得多，所以说明另起一行、
+   用淡一点的颜色，不跟时间挤在一起，也不让整张表被横向撑开。 */
 function eventCell(time, note) {
   if (!time) return '<span class="ev-none">—</span>';
   return '<span class="mono">' + esc(time) + '</span>'
     + (note ? '<span class="ev-reason">' + esc(note) + '</span>' : '');
 }
 
+/* 一行事件。字段名和 core 的 `Event.view()` 一个一个对齐（那边有注释说明
+   为什么对齐）：改这里就得改那边，改那边这条表就空一格。 */
 function eventRowHTML(e) {
-  /* 还没结案的那条，用中性灰标「进行中」而不是留个空格子 ——
-     空着看的人分不清是「还在异常中」还是「这一格没数据」。
-     数据上 result 仍然是空串（约定如此），这里只是把它画出来。 */
-  const result = e.result
-    ? '<span class="ev-result ev-result--done">' + esc(e.result) + '</span>'
-    : '<span class="ev-result ev-result--open">进行中</span>';
+  /* 还没结案的那条，用中性灰标出 core 那边的状态名，而不是留个空格子 ——
+     空着看的人分不清是「还在异常中」还是「这一格没数据」。 */
+  const state = eventStateText(e.state);
+  const closed = e.state === 'RECOVERED' || e.state === 'UNRESOLVED';
+  const result = closed
+    ? '<span class="ev-result ev-result--done">' + esc(e.result || state) + '</span>'
+    : '<span class="ev-result ev-result--open">' + esc(state) + '</span>';
 
   return '<tr>'
     + '<td class="mono">' + esc(e.startTime) + '</td>'
@@ -529,25 +451,49 @@ function eventRowHTML(e) {
 }
 
 /**
+ * 最近这一帧快照里的那几条事件，**最新的在最上面**。
+ *
+ * core 的快照是**从旧到新**给的（那是这份名单该有的读法：一件事从头到尾
+ * 怎么走过来的）。看板要的是「最近发生了什么」，所以这里翻一下 ——
+ * 翻的是**显示顺序**，不是数据：导出的 CSV 跟着表格走（「导出的东西和屏幕上
+ * 看到的一模一样」是 7-4 定下的口径）。
+ *
+ * @returns {Array<Object>}
+ */
+function eventRows() {
+  const block = snapshot && snapshot.events && Array.isArray(snapshot.events.events)
+    ? snapshot.events.events : [];
+  return block.slice().reverse();
+}
+
+/**
  * 重画「事件记录」区。
  *
- * 显示的是 events 整个数组 —— 结过案的也留着，这一区的意义正是回头看看
- * 这些事都是怎么过去的，只显示还没结束的那些等于把它变成第二个详情区。
+ * 「共 N 条」读的是 core 的 `summary.total`，**不是**这一屏摆了几行 ——
+ * 快照里只带最近 20 条，挂机久了真实的条数比能显示的多。两个数混成一个的话，
+ * 「一共发生过多少条」会跟着屏幕一起封顶。
  */
 function renderEvents() {
-  el.evCount.textContent = events.length > 0 ? '共 ' + events.length + ' 条' : '';
-  el.evBody.innerHTML = events.length === 0
+  const rows = eventRows();
+  const block = snapshot && snapshot.events ? snapshot.events : {};
+  const total = Number.isFinite(block.summary && block.summary.total)
+    ? block.summary.total : rows.length;
+
+  el.evCount.textContent = total > 0
+    ? '共 ' + total + ' 条' + (total > rows.length ? '（显示最近 ' + rows.length + ' 条）' : '')
+    : '';
+  el.evBody.innerHTML = rows.length === 0
     ? '<tr><td colspan="7" class="log-empty">还没有事件'
-      + '（节点从正常变成异常时才会记一条）</td></tr>'
-    : events.map(eventRowHTML).join('');
+      + '（core 那边连续几条异常才会开一条）</td></tr>'
+    : rows.map(eventRowHTML).join('');
 
   /* 没什么可导的时候把按钮按掉，而不是让人点了弹一个空文件 ——
      空 CSV 只有一行表头，拿到的人会以为导出坏了。 */
-  el.exportEvents.disabled = events.length === 0;
+  el.exportEvents.disabled = rows.length === 0;
 }
 
-/* 导出 CSV 的表头。顺序就是约定里那 9 个字段的顺序，
-   也是 logic.js 里 beginEvent 返回值的字段顺序 —— 两处要对得上。 */
+/* 导出 CSV 的表头。顺序就是 core 那边 `Event.view()` 与这张表的九个字段，
+   两边要对得上（字段名对齐是 core 侧有意做的，见 events.py 里 view() 的注释）。 */
 const EVENT_HEADER = ['nodeId', 'startTime', 'problem', 'priorityTime', 'priorityReason',
   'action', 'actionTime', 'recoverTime', 'result'];
 
@@ -564,21 +510,19 @@ function csvCell(value) {
 /**
  * 拼出事件 CSV 的全文（不含 BOM，加 BOM 是下载那一步的事）。
  *
- * 行顺序和「事件记录」区里看到的一致（最新在前），和 web/ 那边导出
- * 录入历史是同一个口径：导出的东西和屏幕上看到的一模一样。
- * 复盘要按时间正着看，那是 Python 侧读进来之后自己排（EventRecord 那边
- * 按 startTime 排一遍），不靠这里把顺序改掉。
+ * 行顺序和「事件记录」区里看到的一致（最新在前），和 web/ 那边导出录入历史
+ * 是同一个口径：导出的东西和屏幕上看到的一模一样。复盘要按时间正着看，
+ * 那是 Python 侧读进来之后自己排，不靠这里把顺序改掉。
  *
  * @returns {string} CRLF 换行、末尾也带一个 CRLF
  */
 function buildEventsCSV() {
   const lines = [EVENT_HEADER.join(',')];
-  events.forEach(function (e) {
+  eventRows().forEach(function (e) {
     lines.push(EVENT_HEADER.map(function (key) {
       const v = e[key];
       /* 还没发生的格子是 null，要写成空 —— String(null) 会变成四个字母的
-         "null"，Excel 里看着像真存了一个叫 null 的值，而且 Python 那边
-         读到 "null" 也判不出「这条还没结束」。 */
+         "null"，Excel 里看着像真存了一个叫 null 的值。 */
       return csvCell(v == null ? '' : v);
     }).join(','));
   });
@@ -587,10 +531,10 @@ function buildEventsCSV() {
 }
 
 function exportEventsCSV() {
-  /* '\uFEFF' 是 UTF-8 BOM。少了它 Excel/WPS 会按本地代码页解析，
+  /* '﻿' 是 UTF-8 BOM。少了它 Excel/WPS 会按本地代码页解析，
      problem 和 result 里的中文就会变成乱码。这里写成转义而不是字面量字符，
      否则源码里是一段隐形字符，看起来像个空字符串。 */
-  const blob = new Blob(['\uFEFF' + buildEventsCSV()], { type: 'text/csv;charset=utf-8' });
+  const blob = new Blob(['﻿' + buildEventsCSV()], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
 
   const a = document.createElement('a');
@@ -603,6 +547,53 @@ function exportEventsCSV() {
   /* 不能立刻 revoke：部分浏览器会在下载真正开始前就把 blob 释放掉，
      表现为「点了没反应」。留一点时间再回收。 */
   setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+/* ---------- 被拒绝消息（Step E3-2 新增） ---------- */
+
+/**
+ * 一行被拒绝的消息：什么时候、哪条 topic、为什么、原文是什么。
+ *
+ * **原文一定要摆出来**（core 那边特意存的是没转过义的原文，见
+ * `publish_reject`）：只写一句「JSON 解析失败」的话，发消息的人根本不知道
+ * 自己哪里写错了。这是 D4 那套故障注入的对照面 —— 发出去之后不用去 core 的
+ * 终端里翻，看板上这一块直接对着抄。
+ */
+function rejectRowHTML(item) {
+  const reasons = Array.isArray(item.reasons) ? item.reasons : [];
+  return '<tr>'
+    + '<td class="mono">' + esc(item.time) + '</td>'
+    + '<td class="mono">' + esc(item.topic) + '</td>'
+    + '<td class="rj-reasons">' + reasons.map(function (r) {
+      return '<span class="rj-reason">' + esc(r) + '</span>';
+    }).join('') + '</td>'
+    + '<td><code class="rj-payload">' + esc(item.payload) + '</code></td>'
+    + '</tr>';
+}
+
+/**
+ * 重画「被拒绝消息」区。
+ *
+ * 【这一块为什么不订 `dormmate/v1/log/reject`】core 那条 topic 照发不误
+ * （MQTTX 和 D4 的 inject_faults.py 都靠它），但看板不订它 —— 前端只订一条
+ * topic 是 E3 的硬约束，而且两条流合成一张表还要自己处理「刷新页面时之前那几条
+ * 哪去了」和「reject 和快照谁先到」。快照里那一块是**那一帧的全貌**，
+ * 一帧就是一次重画，没有对不齐的中间状态。
+ *
+ * 顺序反过来摆（最新的在最上面）：core 的环形缓冲是从旧到新追加的。
+ */
+function renderRejects() {
+  const block = snapshot && snapshot.rejects ? snapshot.rejects : {};
+  const items = Array.isArray(block.items) ? block.items : [];
+  const rows = items.slice().reverse();
+  const total = Number.isFinite(block.total) ? block.total : rows.length;
+
+  el.rjCount.textContent = total > 0
+    ? '共 ' + total + ' 条' + (total > rows.length ? '（显示最近 ' + rows.length + ' 条）' : '')
+    : '';
+  el.rjBody.innerHTML = rows.length === 0
+    ? '<tr><td colspan="4" class="log-empty">core 一条都没拒过</td></tr>'
+    : rows.map(rejectRowHTML).join('');
 }
 
 /* ---------- 3D 视图 ---------- */
@@ -622,53 +613,39 @@ function initScene3D() {
 }
 
 /**
- * 把当前选中节点的状态画到 3D 视图上。
+ * 把当前选中宿舍的状态画到 3D 视图上。
  *
- * 每次都从 nodes[currentNodeId].latest 重新算，不看上一次画的是什么 ——
- * 幂等，所以切节点时直接调，不用先判断「变了没有」。
+ * 每次都从快照里重新读，不看上一次画的是什么 —— 幂等，所以切节点时直接调，
+ * 不用先判断「变了没有」。
  *
- * 调用它的三个地方各有各的时机，都在外面把关：
- *   selectNode   —— 选中项变了
- *   handleMessage—— 且只在收到的那条属于当前选中的节点时（见那边的注释）
- *   clearAll / 启动 —— 无条件画一遍
- *
- * status 直接用 latest.status 就行，那是 handleMessage 里 judgeStatus 复核过的。
- * 这里不再复核一遍：复核逻辑只留一份，两处各写一遍迟早会不一致。
+ * status 直接用快照里的（那是 core 算好的），这里**不复核也不重算** ——
+ * 页面这一轮起连阈值都不认识。
  */
 function renderScene() {
   if (!dorm3d) return;
 
-  const node = nodes[currentNodeId];
+  const node = selected ? nodeOf(snapshot, selected) : null;
 
-  /* 还没收到数据的节点。scene.js 认不出「没有状态」这件事（它只认那四个字），
+  /* 还没收到数据的宿舍。scene.js 认不出「没有状态」这件事（它只认那四个字），
      所以退回「正常」的外观，再在覆盖层上如实写明还没收到 ——
      空白或者半成品的样子，看的人分不清是「还没收到」还是「页面坏了」。 */
-  if (!node.latest) {
+  if (!node || node.status == null) {
     dorm3d.updateScene('正常');
-    dorm3d.setLabel('当前宿舍：' + currentNodeId + '（还没有收到数据）');
+    dorm3d.setLabel('当前宿舍：' + (selected || '—') + '（core 还没收到数据）');
   } else {
-    dorm3d.updateScene(node.latest.status);
-    /* 标签上**只留宿舍名**（8-3 改的）。原来这里还写着状态和温湿度，
-       那是把卡片上的信息又抄了一遍 —— 而这一行落在画面正中间，
-       一眼看过去分不清哪个是「场景」哪个是「文字面板」。
-       分工是这样：宿舍名是场景答不出来的（画面里只有一间屋，不说不知道是哪个），
-       所以留在这儿；「这间怎么了」交给画面自己说（地板颜色、窗户开合、风扇转不转）；
-       温湿度是卡片的事，3D 一个字都不重复。 */
-    dorm3d.setLabel('当前宿舍：' + currentNodeId);
+    dorm3d.updateScene(node.status);
+    /* 标签上**只留宿舍名**（8-3 改的）：宿舍名是场景答不出来的（画面里只有
+       一间屋，不说不知道是哪个），「这间怎么了」交给画面自己说。 */
+    dorm3d.setLabel('当前宿舍：' + selected);
   }
 
-  /* 风扇。两个来源，都是这个节点自己的字段：
+  /* 风扇。两个来源，都和上面那次 updateScene **叠在一起**，谁也不覆盖谁：
        1) 状态要它转 —— scene.js 的 LOOK 表里「偏热」本来就是 fan: true，
           updateScene 内部已经调过一次 setFanOn 了；
-       2) 有人按过那个按钮 —— handling 不是「无」就转，不管现在什么状态。
-     按钮的效果是**叠在状态之上**的，不是取代它：偏湿的宿舍按一下会转起来，
-     而本来就偏热的宿舍不会因为「没人按过按钮」被这里按停。
-     （「已恢复」之后照样转 —— 动作开了就一直开着，只有「清空」才停。）
-     转不转只由 handling 这一个字段说了算，不另外存一份开关。
-
+       2) 有人按过「开始处理」 —— core 的事件里记着那笔动作，扇叶就一直转着。
      位置必须在 updateScene **之后**：scene.js 里写着「后调用的那次为准」，
      放在前面会被 updateScene 自己那次盖掉。 */
-  if (node.handling !== '无') dorm3d.setFanOn(true);
+  if (selected && fanOn(snapshot, selected)) dorm3d.setFanOn(true);
 
   /* 切节点之后那圈「当前重点」的环也要跟着改口 */
   renderFocusMark();
@@ -677,20 +654,17 @@ function renderScene() {
 /**
  * 只更新「当前重点」那圈标记，画面其余部分一动不动。
  *
- * 单独一个函数，是因为它和「重画场景」的**时机不一样**：
- *   场景只跟当前选中的那个宿舍有关 —— 收到别的节点的报文时一次都不该动
- *   （动了屏幕上就会写着 dorm-a、画的却是 dorm-b）；
- *   而「谁是重点」是**全局**的事 —— dorm-b 的一条数据就可能让正在看的
- *   dorm-a 不再是重点，那圈环得当场灭掉。
- * 两件事捆在一起写的话，后一种情况就只能靠「碰巧也在看那个节点」才更新得过来。
+ * 单独一个函数，是因为它和「重画场景」的**时机**可以不一样：收到新快照时
+ * 「谁是重点」可能换人，而画面本身不用重画（换重点不等于换选中项）。
  *
- * 它不读 currentNodeId 以外的东西，也不改任何数据 —— 就是个开关。
+ * 判据是**横幅上说的那个宿舍**（被点名 > 是重点），和顶部那条横幅同源 ——
+ * 环亮着的地方，就是横幅上写的那个宿舍。两处各判一遍的话，迟早出现
+ * 「环亮在 dorm-a、横幅写着 dorm-b」。
  */
 function renderFocusMark() {
   if (!dorm3d) return;
-
-  const pick = pickPriority(nodes);
-  dorm3d.setFocus(!!pick && pick.nodeId === currentNodeId);
+  const banner = focusBanner(snapshot);
+  dorm3d.setFocus(banner.mode !== 'calm' && banner.nodeId === selected);
 }
 
 /* ---------- 图表 ---------- */
@@ -805,18 +779,28 @@ function ensureCharts() {
   return true;
 }
 
+/**
+ * 画当前选中宿舍的曲线。
+ *
+ * 数据来自**快照里那个 `history` 数组**（core 每个周期跟着快照一起发的
+ * 最近 50 条）。这是 E3 里一个不显眼但很要紧的地方：页面不再订遥测，
+ * 所以如果快照不带历史，刷新一下图上就什么也没有，得干等几分钟才看得出走势 ——
+ * 而「刚刚是不是在降」正是最该看的时候。
+ */
 function renderCharts() {
   if (!ensureCharts()) return;
 
-  const node = nodes[currentNodeId];
-  const rows = node.history;
+  const node = selected ? nodeOf(snapshot, selected) : null;
+  const rows = node && Array.isArray(node.history) ? node.history : [];
   /* "2026-09-22 20:30:00" 的第 11 位起就是 "20:30:00"，横轴只要时分秒 */
-  const labels = rows.map(function (r) { return String(r.time).slice(11, 19); });
+  const labels = rows.map(function (r) { return String(r && r.time).slice(11, 19); });
 
   CHART_SPECS.forEach(function (spec) {
     const chart = charts[spec.id];
     chart.data.labels = labels;
-    chart.data.datasets[0].data = rows.map(function (r) { return r[spec.id]; });
+    chart.data.datasets[0].data = rows.map(function (r) {
+      return r ? r[spec.id] : null;
+    });
     chart.update();
   });
 }
@@ -847,59 +831,59 @@ function applyChartTheme() {
 
 /* ---------- 选择当前节点 ---------- */
 
+/**
+ * 换成看另一个宿舍。趋势图、3D、详情区、按钮都跟着走。
+ *
+ * 这个函数**不发任何消息**：移动端那一侧的「点一下切换焦点」才发 focus 指令，
+ * 看板这边点卡片只是换个视角（想看哪个宿舍是自己屏幕上的事，没必要广播出去）。
+ * 跨端联动是**单向**的：移动端 -> core -> 看板。反过来的话，两个人同时看
+ * 看板就会互相抢焦点。
+ */
 function selectNode(nodeId) {
-  if (!Object.prototype.hasOwnProperty.call(nodes, nodeId)) return;
-  if (nodeId === currentNodeId) return;
-  currentNodeId = nodeId;
+  if (!nodeId || nodeId === selected) return;
+  if (!nodeOf(snapshot, nodeId)) return;
+  selected = nodeId;
   renderCards();
   renderDetailHead();
-  /* 按钮和那行字说的是「当前这个节点」的事，切了就得重画 ——
-     按钮的禁用状态、处理进度都是跟着节点走的。 */
   renderAction();
   renderScene();
   renderCharts();
-  /* 顶部那一行的**内容**一个字都没变（谁是重点跟选中谁没关系），
-     但它上面标着「正在查看 / 查看详情」，那两个字跟着 currentNodeId 走，
-     所以还是得重画一次。 */
+  /* 横幅上标着「正在查看 / 查看详情」，那两个字跟着 selected 走，
+     所以内容一个字没变也得重画一次。 */
   renderFocus();
 }
 
 /* ---------- 唯一的消息入口 ---------- */
 
-/* 统一 JSON 里必须齐全的 5 个字段及其类型 */
-const REQUIRED_FIELDS = [
-  ['nodeId', 'string'],
-  ['temperature', 'number'],
-  ['humidity', 'number'],
-  ['status', 'string'],
-  ['time', 'string'],
-];
-
 /**
- * 处理一条环境报文。整个页面只有这一个入口。
+ * 处理一条快照。整个页面只有这一个入口。
  *
  * 顺序是刻意的，前面一步没过就 return，不做下一步：
- *   1) JSON.parse 包 try/catch —— 任何脏数据都可能让它抛异常
- *   2) 五个字段齐不齐、类型对不对
- *   3) 用 judgeStatus 复核 status，不一致就警告，并以规则结果为准；
- *      顺带检查 topic 里的节点和报文里的对不对得上
- *   4) 按 nodeId 写进那个节点自己的 latest / history，再刷新界面
+ *   1) topic 必须就是那一条 —— 只订了它，别的都当没看见（写进日志）
+ *   2) JSON.parse 包 try/catch —— 坏数据什么都能抛
+ *   3) readSnapshot 校验形状与版本（在 logic.js 里，单独可测）
+ *   4) 换掉内存里那一帧，然后整页重画
  *
- * 第 3 步里发现的问题不丢弃报文，只在日志那一行里标成「警告」并说明原因 ——
- * 结论一律用规则算出来的，收到什么就记什么，但显示以规则为准。
+ * **没有第 5 步**：页面不加工、不合并、不记账。一帧快照就是全部事实。
  *
- * @param {string} topic       消息来自哪个 topic
- * @param {string} payloadText 报文原文（字符串）
+ * @param {string} topic
+ * @param {string} payloadText 报文原文
  * @returns {boolean} true = 收下了；false = 被拦下，原因见消息日志
  */
 function handleMessage(topic, payloadText) {
-  /* rules.js 没加载上时说清楚，而不是在这里抛 undefined 错 */
-  if (typeof judgeStatus !== 'function') {
-    logLine('error', topic, '未加载 shared/rules.js，请检查 <script> 的引入顺序');
+  if (!CFG) {
+    logLine('error', topic, '未加载 shared/config.js，请检查 <script> 的引入顺序');
     return false;
   }
 
-  /* 1) 解析 */
+  /* 1) 只认那一条 topic。多订一条都会走这个入口，不挡的话「别的 topic 上的
+        一条消息把整页刷成空的」这种事迟早发生。 */
+  if (topic !== CFG.STATE_TOPIC) {
+    logLine('warn', topic, '不是快照 topic（' + CFG.STATE_TOPIC + '），已忽略');
+    return false;
+  }
+
+  /* 2) 解析 */
   let payload;
   try {
     payload = JSON.parse(payloadText);
@@ -908,276 +892,154 @@ function handleMessage(topic, payloadText) {
     return false;
   }
 
-  /* JSON.parse('null') / '123' / '"x"' / '[1]' 都算解析成功，但都不是我们要的
-     对象。不先挡掉的话，下面读字段会读到 undefined。 */
-  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
-    logLine('error', topic, 'payload 顶层不是对象（收到 '
-      + (Array.isArray(payload) ? 'array' : String(payload)) + '）');
+  /* 3) 形状与版本 */
+  const result = readSnapshot(payload);
+  if (!result.ok) {
+    logLine('error', topic, '快照校验不通过：' + result.reason);
     return false;
   }
 
-  /* 2) 字段齐不齐、类型对不对 */
-  const problems = [];
-  REQUIRED_FIELDS.forEach(function (field) {
-    const key = field[0];
-    const type = field[1];
-    if (!Object.prototype.hasOwnProperty.call(payload, key)) {
-      problems.push('缺少 ' + key);
-    } else if (typeof payload[key] !== type) {
-      problems.push(key + ' 应为 ' + type + '，实际是 ' + typeof payload[key]);
-    }
-  });
-  if (problems.length > 0) {
-    logLine('error', topic, '字段校验不通过：' + problems.join('；'));
-    return false;
-  }
+  /* 4) 换帧。注意是**整份替换**（不是逐字段合并）—— 快照的意义就在于
+        「这一帧就是此刻的全部」，残留上一帧的字段会做出一个不存在的状态。 */
+  snapshot = result.snapshot;
 
-  /* typeof NaN 也是 'number'，所以上面那关拦不住它，单独再挡一次 */
-  if (!Number.isFinite(payload.temperature) || !Number.isFinite(payload.humidity)) {
-    logLine('error', topic, '温度/湿度不是有限数字（NaN 或 Infinity）');
-    return false;
-  }
+  syncSelection();
 
-  /* 节点必须是约定里的三个之一，否则没有可以写进去的地方 */
-  if (!Object.prototype.hasOwnProperty.call(nodes, payload.nodeId)) {
-    logLine('error', topic, '未知节点 ' + payload.nodeId);
-    return false;
-  }
+  const banner = focusBanner(snapshot);
+  const focusId = snapshot.focus && typeof snapshot.focus.nodeId === 'string'
+    ? snapshot.focus.nodeId : '';
 
-  /* 3) 复核 status。不直接相信发过来的值，一律用规则重算。 */
-  const expected = judgeStatus(payload.temperature, payload.humidity);
-
-  /* 这一条报文里所有不对劲的地方，攒起来。
-     一条报文只写一行日志 —— 分两行记的话，日志区就不再是「每条消息一行」，
-     对不上数了。级别取最严重的那个。 */
-  const notes = [];
-
-  /* topic 和 payload.nodeId 应当指向同一个节点。不一致只警告不丢弃 ——
-     节点身份以报文自己声明的为准（统一 JSON 里 nodeId 是必填字段）。
-     topic 形状不对时 topicNode 返回空串，这里跳过检查而不是瞎猜一个节点名。 */
-  const topicId = topicNode(topic);
-  if (topicId && topicId !== payload.nodeId) {
-    notes.push('topic 里是 ' + topicId + '，报文里是 ' + payload.nodeId + '，按报文里的算');
-  }
-
-  if (payload.status !== expected) {
-    notes.push('status 不一致：收到「' + payload.status + '」，规则算出「'
-      + expected + '」，以规则为准');
-  }
-
-  const record = {
-    nodeId: payload.nodeId,
-    temperature: payload.temperature,
-    humidity: payload.humidity,
-    status: expected,
-    time: payload.time,
-  };
-
-  /* 4) 只动这个节点自己的那份数据。写错了地方就是「串线」，
-      所以下面这几行只认 record.nodeId，不看别的。 */
-  const node = nodes[record.nodeId];
-  node.latest = record;
-  node.history.push(record);
-  if (node.history.length > HISTORY_MAX) {
-    node.history.splice(0, node.history.length - HISTORY_MAX);
-  }
-
-  /* 5) 维护「当前这段连续异常」。用的是**复核之后**的 status ——
-      报文里写「正常」但规则算出「偏热」时，算它还在异常里，段不中断。
-      nextAbnormal 是纯函数，只读 node 上那两个字段，别的不碰。
-
-      先留一份改之前的状态：下面第 7 步要靠「0 -> 正」和「正 -> 0」
-      这两个翻转来判断事件该开还是该结，改完就看不出来了。 */
-  const wasAbnormal = node.abnormalCount > 0;
-  const abnormal = nextAbnormal(node, record.status, record.time);
-  node.abnormalStart = abnormal.abnormalStart;
-  node.abnormalCount = abnormal.abnormalCount;
-
-  /* 6) 处理动作走到哪一步了。按过按钮之后，动作之后收到的**最新那条**说了算：
-     正常了就是「已恢复」，还异常就留在「处理中」。
-     record.status 同样是复核之后的结果，所以报文谎称正常也骗不过去。
-     nextHandling 返回 null 表示不用改（没按过按钮 / 这条比动作还早）。 */
-  const moved = nextHandling(node, record);
-  if (moved) {
-    node.handling = moved.handling;
-    node.dataAfterAction = moved.dataAfterAction;
-  }
-
-  /* 7) 事件记录。开案和结案的判据就是上面第 5 步那段异常段的起止，
-      不另立一套 —— 否则「顶部那一行说的这段」和「事件里记的这段」
-      会出现两个对不上的起点，而它们说的明明是同一件事。 */
-  if (wasAbnormal && node.abnormalCount === 0) {
-    /* 正 -> 0：来了一条正常数据，这段结束了。写 recoverTime 和 result，
-       再把节点上那个引用摘掉 —— 摘的是**引用**，events 里那条还在，
-       只是这个节点从此没有「当前这段」了。 */
-    const closed = closeEvent(node.event, record.time);
-    if (closed) Object.assign(node.event, closed);
-    node.event = null;
-  } else if (!wasAbnormal && node.abnormalCount > 0) {
-    /* 0 -> 正：新的一段开始了。beginEvent 造的是个新对象，
-       下面两行存的是**同一个引用** —— 节点和总表从此指向同一条，
-       之后就地改谁都看得见，不会有一边留着旧副本。 */
-    const opened = beginEvent(record);
-    if (opened) {
-      node.event = opened;
-      events.unshift(opened);
+  /* 跨端联动那件事只在**变化时**记一行 —— 快照是会反复发的，
+     每次都记的话日志会被同一句话刷屏，反而看不出哪一次真的变了。 */
+  if (focusId !== loggedFocus) {
+    loggedFocus = focusId;
+    if (focusId) {
+      const by = snapshot.focus.by ? String(snapshot.focus.by) : '别的端';
+      logLine('ok', topic, '跨端焦点 → ' + focusId + '（' + by + ' 发的 focus），'
+        + '趋势图和 3D 跟着切过去');
+    } else {
+      logLine('ok', topic, '跨端焦点已取消，回落到 core 选出的重点'
+        + (banner.nodeId ? '（' + banner.nodeId + '）' : ''));
     }
   }
 
-  const summary = record.nodeId + ' ' + fmt(record.temperature) + '℃ '
-    + fmt(record.humidity) + '% ' + expected;
-
-  if (notes.length > 0) {
-    logLine('warn', topic, summary + ' —— ' + notes.join('；'));
-  } else {
-    logLine('ok', topic, summary);
+  /* core 又拒了一条。数量涨了就提醒一句，原因摆在被拒绝消息那块面板上。 */
+  const rejects = snapshot.rejects && Number.isFinite(snapshot.rejects.total)
+    ? snapshot.rejects.total : 0;
+  if (loggedRejects !== null && rejects > loggedRejects) {
+    const items = Array.isArray(snapshot.rejects.items) ? snapshot.rejects.items : [];
+    const last = items.length > 0 ? items[items.length - 1] : null;
+    logLine('warn', topic, 'core 拒收了 ' + (rejects - loggedRejects) + ' 条消息'
+      + (last ? '：「' + (last.reasons || []).join('；') + '」' : '')
+      + '，原文见下面「被拒绝消息」那块');
   }
+  loggedRejects = rejects;
 
-  renderCards();
-  renderDetailHead();
-  /* 处理状态变了，详情区那行字和 3D 里的风扇都得跟着走 ——
-     两者读的都是上面刚写完的 node.handling。 */
-  renderAction();
-  renderCharts();
+  logLine('ok', topic, snapshotSummary(snapshot));
 
-  /* 3D 只在「收到的这条正好是当前正在看的那个节点」时才重画。
-     三个宿舍的数据混在同一个通配符 topic 里进来，不加这一句的话，
-     dorm-b 的数据会顺手把画面刷成 dorm-b 的样子 —— 那一刻屏幕上写着
-     dorm-a，看着却是 dorm-b，而且没有任何地方会报错。
-
-     卡片和图表是「三个节点一起显示」，所以它们每次都刷；
-     3D 是「只显示当前选中的那个」，所以它要挑。 */
-  if (record.nodeId === currentNodeId) renderScene();
-  /* 但「谁是重点」是全局的，收到哪个节点的报文都可能换人 ——
-     正在看的这间可能**因此不再是重点**，那圈环得当场灭掉。
-     所以这一句不带条件。 */
-  else renderFocusMark();
-
-  /* 这里算的 pick 只有一个去处：下面记事件时那句 reason。
-     8-3 之后页面顶上那一行**不读这个 pick**（它是 logic.js 里现拼的，
-     见下面 renderFocus 那段注释），所以别看到「算了却没人用」就想删 ——
-     事件里记的必须是 pickPriority 此刻的判断，不能是别处凑出来的。 */
-  const pick = pickPriority(nodes);
-
-  /* 被选中的那个节点，如果这一段还没记过「第一次被关注」，就把这一刻记上。
-     时间取**它自己**最新那条的 time，不是这条报文的 record.time ——
-     胜出的很可能是另一个节点（比如 dorm-a 刚恢复正常，轮到 dorm-b 上位），
-     拿 record.time 去记它就是把别人的时间写在了它头上。 */
-  if (pick) {
-    const won = nodes[pick.nodeId];
-    const stamped = markPriority(won.event, won.latest.time, pick.reason);
-    if (stamped) Object.assign(won.event, stamped);
-  }
-
-  renderEvents();
-  /* 顶部那一行每次收到报文都重算。它里面全是会变的东西（谁、在不在处理、
-     温度往哪走），缓存下来的话，页面上的重点会停在某一刻不再动，
-     而下面的卡片一直在涨 —— 看着像数据不更新了。
-
-     这里**不把上面算好的 pick 传进去**：那一行是 logic.js 现拼的
-     （buildFocus 内部自己走一遍 pickPriority），多算一遍不值一提，
-     而多一条「把结果传进去」的路，就多一个「传岔了」的机会。 */
-  renderFocus();
+  renderAll();
   return true;
 }
 
-/* ---------- 模拟三节点数据 ---------- */
+/**
+ * 从快照里定下来「现在看哪个宿舍」。
+ *
+ * 两条规矩：
+ *   1) 快照里有哪几个宿舍是 core 说了算 —— 选中的那个要是已经不在名单里了，
+ *      退回第一个（core 改了配置就会发生）。
+ *   2) **焦点变了就跟着切**（E3 的跨端联动：移动端点一下，看板和 3D 一起跟过去）。
+ *      但跟着切过之后就不再抢：用户点别处看，下一条一模一样的快照不该把他拽回来。
+ *      所以比的是「这个目标跟过了没有」，不是「这一帧里有没有焦点」。
+ */
+function syncSelection() {
+  const nodes = snapshot && Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+  const ids = nodes.map(function (n) { return n && n.nodeId; }).filter(Boolean);
+  if (ids.length === 0) return;
 
-/* 先按 dorm-a / dorm-b / dorm-c 各喂一条，再交错着各喂 2 条。
-   交错是有意的：三份数据轮着进同一个入口，要是 history 串了线（比如三个
-   节点写进了同一个数组），下面的图和卡片会立刻露馅。
-   dorm-a 和 dorm-c 的温度区间故意重叠（都在 24~26），但湿度差得很远
-   （58~62 vs 79~82），所以哪怕只串了一点点也看得出来。 */
-const SIM_ROWS = [
-  ['dorm-a', 25, 60], ['dorm-b', 31, 60], ['dorm-c', 25, 80],   /* 约定的三条：正常 / 偏热 / 偏湿 */
-  ['dorm-a', 26, 62], ['dorm-b', 33, 55], ['dorm-c', 26, 82],   /* 后续 1 */
-  ['dorm-a', 24, 58], ['dorm-b', 32, 58], ['dorm-c', 24, 79],   /* 后续 2 */
-];
-
-function simulate() {
-  if (typeof judgeStatus !== 'function') {
-    logLine('error', '—', '未加载 shared/rules.js，无法生成模拟数据');
-    return;
+  if (!selected || ids.indexOf(selected) === -1) {
+    selected = ids[0];
+    followed = undefined;
   }
 
-  const base = Date.now();
-  SIM_ROWS.forEach(function (row, i) {
-    const nodeId = row[0];
-    const temperature = row[1];
-    const humidity = row[2];
+  const focusId = snapshot.focus && typeof snapshot.focus.nodeId === 'string'
+    ? snapshot.focus.nodeId : '';
+  const topId = snapshot.priority && typeof snapshot.priority.nodeId === 'string'
+    ? snapshot.priority.nodeId : '';
+  const target = focusId || topId;
 
-    /* 时间逐条往后推 1 秒，图上的横轴才是单调的 */
-    const payload = {
-      nodeId: nodeId,
-      temperature: temperature,
-      humidity: humidity,
-      status: judgeStatus(temperature, humidity),
-      time: formatTime(new Date(base + i * 1000)),
-    };
+  if (!target || ids.indexOf(target) === -1) return;
+  if (target === followed) return;
 
-    handleMessage(topicFor(nodeId), JSON.stringify(payload));
-  });
+  followed = target;
+  selected = target;
+}
+
+/** 整页重画。收到一帧快照之后走一遍。 */
+function renderAll() {
+  renderCards();
+  renderDetailHead();
+  renderAction();
+  renderFocus();
+  renderEvents();
+  renderRejects();
+  renderScene();
+  renderCharts();
 }
 
 /* ---------- 清空 ---------- */
 
+/**
+ * 把页面上的东西擦干净。
+ *
+ * 【它清的是**屏幕**，不是 core】快照是 retained 的，core 手里那份数据一点
+ * 没动 —— 所以清空之后下一条快照一到，画面立刻原样回来。这一点必须说清楚：
+ * 以前「清空」清的是页面自己攒的那份数据，看起来像「把数据删了」；
+ * 现在页面根本没有那份数据可删。
+ */
 function clearAll() {
-  NODE_IDS.forEach(function (id) {
-    nodes[id].latest = null;
-    nodes[id].history = [];
-    /* 连异常段一起清。留着的话，清空之后明明一条数据都没有，
-       顶部还挂着「dorm-b 已连续偏热 12 分钟」—— 那是上一次的账。 */
-    nodes[id].abnormalStart = null;
-    nodes[id].abnormalCount = 0;
-    /* 处理动作也一起清。留着的话，清空之后明明什么都没了，
-       卡片上还写着「已恢复｜风扇已开启」—— 那是上一次的账。
-       风扇会跟着回到不转：renderScene 读的就是这个字段，它一变「无」，
-       下面那次 setFanOn 就不会再调了。 */
-    nodes[id].handling = '无';
-    nodes[id].action = null;
-    nodes[id].actionTime = null;
-    nodes[id].dataAfterAction = null;
-    /* 事件的引用也摘掉 —— 下面还会把整个 events 清空，
-       这里不摘的话节点上会留着一个已经不在总表里的野对象，
-       下一条数据一来，那段异常看起来就像「早就开过案了」。 */
-    nodes[id].event = null;
-  });
+  snapshot = null;
+  selected = null;
+  followed = undefined;
+  loggedFocus = '';
+  loggedRejects = null;
   messages.length = 0;
-  /* 事件记录也一起清。这条和上面几条是同一个道理：不清的话，清空之后
-     卡片全写着「等待数据」，下面却还列着上一轮的「连续偏热」——
-     那是上一次的账。要留就趁清空前先按「导出事件 CSV」存下来。 */
-  events.length = 0;
-  renderCards();
-  renderDetailHead();
-  renderAction();
-  renderScene();
-  renderCharts();
-  renderFocus();
-  renderEvents();
+
+  el.cards.innerHTML = '<p class="cards-empty">屏幕已清空 —— '
+    + 'core 手里那份数据没动，下一条快照一到画面就回来了。</p>';
+  el.detailNode.textContent = '—';
+  el.detailMeta.textContent = '屏幕已清空';
+  el.actionHandle.disabled = true;
+  el.actionState.textContent = '';
+  el.focus.innerHTML = '';
+  el.evBody.innerHTML = '<tr><td colspan="7" class="log-empty">屏幕已清空</td></tr>';
+  el.evCount.textContent = '';
+  el.exportEvents.disabled = true;
+  el.rjBody.innerHTML = '<tr><td colspan="4" class="log-empty">屏幕已清空</td></tr>';
+  el.rjCount.textContent = '';
   renderLog();
-  /* 清空之后「要念的那一句」也变了（变回「还没有收到任何节点的数据」），
-     但按钮下面那行字是**上一次念的内容**，不清的话它会一直挂在那儿，
-     看上去像是刚刚念过。 */
+
+  /* 图表也清掉：留着上一条曲线的话，屏幕上就有一份「已经不在快照里的数据」。 */
+  if (ensureCharts()) {
+    CHART_SPECS.forEach(function (spec) {
+      charts[spec.id].data.labels = [];
+      charts[spec.id].data.datasets[0].data = [];
+      charts[spec.id].update();
+    });
+  }
+
+  if (dorm3d) {
+    dorm3d.updateScene('正常');
+    dorm3d.setLabel('当前宿舍：—');
+    dorm3d.setFocus(false);
+  }
+
+  /* 那两行说明也擦掉：它们说的是**上一次**发生了什么，
+     清空之后还挂着，看上去像是刚刚发生的。 */
   setSpeakNote('');
-  /* 「指令发出去没有」那行同理：那是上一次按的结果，清空之后页面上什么都没有
-     了，它却还在说「已通知 core」——像是刚刚发过。 */
   el.cmdNote.textContent = '';
 }
 
 /* ---------- MQTT ---------- */
-
-/* Broker 地址跟着页面的访问地址走：本机打开就是 ws://localhost:9001，
-   手机用 http://10.102.196.160:8000/dashboard/ 打开就是
-   ws://10.102.196.160:9001。写死 localhost 的话，手机浏览器里的 localhost
-   指的是手机自己，连不回来。
-   （和 web/script.js 里那份是同一套写法，故意各留一份：两个页面互不依赖，
-   为三行代码共用一个 shared/ 文件反而要多发一次请求。改的时候两边一起改。） */
-function brokerUrl(hostname) {
-  return 'ws://' + (hostname || 'localhost') + ':9001';
-}
-
-const BROKER_URL = brokerUrl(location.hostname);
-const TOPIC = topicWildcard();
 
 /* 当前那根连接。null 表示没连上，或已被主动断开。 */
 let client = null;
@@ -1189,6 +1051,17 @@ function setConn(kind, text) {
 
 function updateToggle() {
   el.toggle.textContent = client ? '断开' : '连接';
+}
+
+/**
+ * 订阅用的那一条 topic —— 就是快照那条，别的都不订。
+ *
+ * 以前这里是 `dormmate/v1/nodes/+/telemetry`（三个宿舍的原始读数混在一条
+ * 通配符 topic 里）。E3 之后页面**一条遥测都不订**：收原始读数就意味着
+ * 又要自己算一遍，那正是这一轮要拆掉的东西。
+ */
+function snapshotTopic() {
+  return CFG ? CFG.STATE_TOPIC : '';
 }
 
 /**
@@ -1207,16 +1080,20 @@ function disconnect() {
 }
 
 function connect() {
+  if (!CFG) {
+    setConn('off', '未加载 shared/config.js');
+    return;
+  }
   if (typeof mqtt === 'undefined') {
     setConn('off', '未加载 mqtt.js');
-    logLine('error', TOPIC, '缺少 dashboard/lib/mqtt.min.js，请重新下载后刷新');
+    logLine('error', CFG.STATE_TOPIC, '缺少 dashboard/lib/mqtt.min.js，请重新下载后刷新');
     return;
   }
   if (client) return;   // 已经连着了，别叠第二根
 
   setConn('pending', '连接中…');
 
-  const c = mqtt.connect(BROKER_URL, {
+  const c = mqtt.connect(CFG.brokerUrlFor(), {
     clientId: 'dormmate-dash-' + Math.random().toString(16).slice(2, 8),
     clean: true,
     reconnectPeriod: 2000,
@@ -1233,7 +1110,7 @@ function connect() {
     if (!current()) return;
     setConn('on', '已连接');
     updateToggle();
-    c.subscribe(TOPIC, { qos: 1 }, function (err) {
+    c.subscribe(snapshotTopic(), { qos: CFG.QOS }, function (err) {
       if (err) {
         console.error('[DormMate] 订阅失败：', err);
         setConn('off', '订阅失败');
@@ -1263,15 +1140,13 @@ function connect() {
   });
 
   /* 唯一的接入口。mqtt.js 给的是二进制，转成字符串交给 handleMessage ——
-     校验、复核 status、落库、刷新全在那边，这里不做第二遍。 */
+     校验、换帧、重画全在那边，这里不做第二遍。 */
   c.on('message', function (topic, payload) {
     const text = payload.toString();
 
     /* 每条原始报文都往 Console 打一行。排错时先看这里 ——
        「压根没收到消息」和「收到了但被 handleMessage 拦下了」是两回事，
-       排查方向完全不同，而页面上的日志区只记后者，前者完全不显示。
-       打印放在这个边界上、而不是放进 handleMessage：那边是所有来源共用的，
-       模拟按钮的数据不该混进来冒充实收报文。 */
+       排查方向完全不同，而页面上的日志区只记后者，前者完全不显示。 */
     console.log('[DormMate] 收到 MQTT 原始消息', topic, text);
 
     handleMessage(topic, text);
@@ -1280,14 +1155,14 @@ function connect() {
   updateToggle();
 }
 
-/* ---------- ML 辅助判断（Step 9-3 的进阶项）---------- */
+/* ---------- Rule-ML 辅助判断（Step 9-3 的进阶项）---------- */
 
 /* 这一段和上面所有东西都不一样：它**不来自 MQTT**。
    那份 JSON 是 analysis/analysis.py 上一次跑完写下的（见那个文件的
    write_ml_result），页面只是取过来摆在这儿。两件事跟着来：
 
      1) 它是个静态文件 —— 页面开一次读一次，读完就不再变。看板上别的数字
-        都在跟着报文动，只有这一块不动。所以 #ml-note 里那句「不是实时数据」
+        都在跟着快照动，只有这一块不动。所以 #ml-note 里那句「不是实时数据」
         得留在页面上（由 buildMlNote 给），不能嫌啰嗦删掉。
      2) 跟 Broker 没关系 —— 现场没网、mqtt.js 没加载、broker 没起，
         这一段照样显示（当然，前提是页面本身是从 http 服务器打开的）。
@@ -1333,7 +1208,6 @@ function loadMlResult() {
 
 /* ---------- 启动 ---------- */
 
-el.simulate.addEventListener('click', simulate);
 el.clear.addEventListener('click', clearAll);
 el.exportEvents.addEventListener('click', exportEventsCSV);
 
@@ -1348,45 +1222,47 @@ el.cards.addEventListener('click', function (e) {
   if (card && card.dataset.node) selectNode(card.dataset.node);
 });
 
-/* 顶部那一行也是重绘的，同样用委托。
+/* 顶部那条横幅也是重绘的，同样用委托。
    它跟卡片走的是**同一条路**（selectNode）—— 点它和点对应那张卡片
-   没有任何区别，卡片、趋势图、3D 一起切过去。
-   没有重点的时候那里是个没有 data-node 的 <p>，这个判断顺手把它挡掉了。 */
+   没有任何区别，详情区、趋势图、3D 一起切过去。
+   平静时候那里是个没有 data-node 的 <p>，这个判断顺手把它挡掉了。 */
 el.focus.addEventListener('click', function (e) {
-  const focus = e.target && e.target.closest ? e.target.closest('.focus') : null;
-  if (focus && focus.dataset.node) selectNode(focus.dataset.node);
+  const banner = e.target && e.target.closest ? e.target.closest('.focus') : null;
+  if (banner && banner.dataset.node) selectNode(banner.dataset.node);
 });
 
-/* 「语音提醒」。念什么完全由 buildAlert 现算 —— 这里一个字都不拼。
-   它不读 currentNodeId：提醒说的是**全局的重点**，不是「正在看的那个」，
-   跟顶部那一行、优先关注记进事件的那条 reason 是同一个来源。 */
+/* 「语音提醒」。念什么完全由 alertLine 现算 —— 这里一个字都不拼。 */
 el.speak.addEventListener('click', speakAlert);
 
 /**
  * 把一条「开始处理」发给 core。返回 `{ok, reason}`，**不抛异常**。
  *
  * 【只发事实，不发结论】这条消息里没有 status、没有 state、没有任何「已恢复」。
- * core 收到它只会把事件从待处理推到处理中，之后好没好由它后面收到的报文说了算
- * —— 这条红线在 core 那边是结构上成立的（`handle_command` 拿不到节点状态），
- * 这边只需要不往消息里塞那些东西。
+ * core 收到它只会把事件从待处理推到处理中，之后好没好由它后面收到的报文
+ * 说了算 —— 这条红线在 core 那边是结构上成立的（`handle_command` 拿不到
+ * 节点状态），这边只需要不往消息里塞那些东西。
  *
- * 【带 time】带的是**这次动作记的那个时刻**（也就是最新那条报文的 time），
- * 不是浏览器时钟。不给的话 core 会用自己的当下时刻盖章，于是页面上写着
- * 「记在 2026-09-22 20:02:30 这条数据上」、core 的事件里却是墙上时间 ——
- * 同一次动作两个说法。给的是报文里的时刻，所以没有三台机器钟不对的问题；
- * 模拟器的剧本也是这么把 handle 帧写在两条报文中间的。
+ * 【E3-2 起页面**不再本地记账**】以前按一下会就地改四个字段（handling /
+ * action / actionTime / dataAfterAction），于是屏幕上立刻写「处理中」。
+ * 现在什么都不改：卡片上那行「处理中」要等 core 把新快照发回来才出现。
+ * 这条路更慢，但它是**唯一**能保证「屏幕上写的和 core 想的是同一件事」的做法 ——
+ * 点击直接把事件置成处理中（更别说置成已恢复）本来就是红线。
+ *
+ * 【带 time】带的是**最新那条快照里这个节点的时刻**，不是浏览器时钟。
+ * 不给的话 core 会用自己的当下时刻盖章，于是同一个动作两个说法。
  *
  * 【不 retained】指令是一次性的。留在 broker 上的话，下一次起 core 时会
- * 凭空把某条事件推进「处理中」——那条指令是上一次演示发的，人早忘了。
+ * 凭空把某条事件推进「处理中」—— 那条指令是上一次演示发的，人早忘了。
  *
- * 【不进消息日志】日志区的约定是「一条报文一行」，行数是排查时用来对数的。
- * 这里只往 Console 打一行 —— 和收到消息那条边界同一个做法。
+ * 【不进消息日志】日志区的约定是「一条快照一行」，行数是排查时用来对数的。
+ * 这里只往 Console 打一行。
  *
  * @param {string} nodeId
  * @param {string} actionTime
  * @returns {{ok: boolean, reason: string}}
  */
 function sendHandle(nodeId, actionTime) {
+  if (!CFG) return { ok: false, reason: '未加载 shared/config.js' };
   if (!client || !client.connected) {
     return {
       ok: false,
@@ -1394,75 +1270,56 @@ function sendHandle(nodeId, actionTime) {
     };
   }
 
-  const payload = { nodeId: nodeId, action: CMD_ACTION, source: SOURCE_DASHBOARD };
+  const payload = { nodeId: nodeId, action: CFG.CMD_ACTION, source: SOURCE_DASHBOARD };
   /* time 只在真的是个非空字符串时才带上。JSON.stringify 会把 undefined 的键
      直接丢掉，所以这里显式判一下，别靠它的副作用。 */
   if (typeof actionTime === 'string' && actionTime) payload.time = actionTime;
 
   const text = JSON.stringify(payload);
-  client.publish(CMD_TOPIC, text, { qos: 1, retain: false });
-  console.log('[DormMate] 发出 MQTT 指令', CMD_TOPIC, text);
+  client.publish(CFG.CMD_TOPIC, text, { qos: CFG.QOS, retain: CFG.CMD_RETAIN });
+  console.log('[DormMate] 发出 MQTT 指令', CFG.CMD_TOPIC, text);
   return { ok: true, reason: '' };
 }
 
-/* 「开启风扇 / 通风」。作用在**当前正在看的那个节点**上。
-   写完这四个字段之后，卡片、详情区那行字、3D 里的风扇都是下一次
-   render 时从同一份节点数据里读出来的 —— 这里不额外记任何东西。 */
-el.actionFan.addEventListener('click', function () {
-  const node = nodes[currentNodeId];
-  const started = beginHandling(node);
-  /* 按钮这时是禁用的，正常点不到；键盘或脚本直接触发时兜一下，
-     别把一个 null 拆开写进节点。 */
-  if (!started) return;
+/* 指令里带的来源。core 会把它打进日志：`[指令] dorm-b handle（dashboard）`——
+   演示的时候一眼分出这一条是人按的还是 send_cmd.py 发的、还是手机发的。 */
+const SOURCE_DASHBOARD = 'dashboard';
 
-  node.handling = started.handling;
-  node.action = started.action;
-  node.actionTime = started.actionTime;
-  node.dataAfterAction = started.dataAfterAction;
-
-  /* 这段异常要是正记着，把这次动作也写进那条事件（只记第一次）。
-
-     必须 Object.assign 就地改，不能写成 node.event = {...}：events 里
-     存的是**同一个对象**，整个换掉的话总表里那条就永远停在旧值上，
-     导出 CSV 时「处理动作」那两列会是空的，而页面上一点异常都看不出来。 */
-  const marked = markAction(node.event, started.action, started.actionTime);
-  if (marked) Object.assign(node.event, marked);
-
-  /* 除了本地记账，把这次处理**发给 core**。发不发得出去都不影响上面那几个
-     字段 —— 看板自己那套显示照旧走，两边谁也不改谁。发不出去时那一行说明
-     会如实讲清楚，别让人以为 core 那边动了。 */
-  const sent = sendHandle(currentNodeId, started.actionTime);
+/**
+ * 「开始处理」。作用在**当前正在看的那个宿舍**上，只做两件事：
+ *   1) 把 handle 发给 core
+ *   2) 把那句说明写到按钮下面
+ * 屏幕上其余的东西**一个字都不动** —— 等 core 的新快照回来，renderAll 会照着
+ * 那一帧重画。所以按一下之后画面会「过一拍才变」，那一拍就是 core 的往返。
+ */
+el.actionHandle.addEventListener('click', function () {
+  if (!selected) return;
+  const node = nodeOf(snapshot, selected);
+  const sent = sendHandle(selected, node ? node.time : '');
   el.cmdNote.textContent = cmdNote(sent.ok, sent.reason);
-
-  renderCards();
-  renderAction();
-  renderScene();
-  renderEvents();
-  /* 顶部那一行里有「处理中」这三个字，所以按了按钮就得重画一次。
-     漏掉这一句的话，那两个字要等到**下一条报文进来**才出现 —— 中间那段时间
-     卡片上写着「处理中｜风扇已开启」、上面那一行里却什么都没有，
-     看的人会以为按钮没生效。 */
-  renderFocus();
 });
 
 const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
 if (darkQuery.addEventListener) darkQuery.addEventListener('change', applyChartTheme);
 
+/* 启动那一刻就把空状态画出来：卡片上和顶部那条横幅上都会写着「还没有收到
+   core 的快照」，而不是「三个宿舍都正常」—— 页面刚打开那几秒，那三个宿舍是
+   **不知道**，不是正常。 */
 renderCards();
 renderDetailHead();
 renderAction();
-renderScene();
-renderCharts();
 renderFocus();
 renderEvents();
+renderRejects();
+renderScene();
+renderCharts();
 renderLog();
 
 /* ML 那一段是**异步**的（要等 fetch 回来），所以它不在这串 render 里 ——
    放在这里只是「启动时读一次」这个动作的位置，真正的渲染在 fetch 回来
-   之后由 renderMl 做。没等它也是对的：那一段读不到不影响别的任何一块，
-   页面该显示的东西开头那几行就已经显示完了。 */
+   之后由 renderMl 做。没等它也是对的：那一段读不到不影响别的任何一块。 */
 loadMlResult();
 
-/* 打开页面就连。连不上也不影响「模拟三节点数据」按钮 —— 那是不经过 Broker 的，
-   现场没网的时候正好用来演示界面。 */
+/* 打开页面就连。连不上时页面只说「还没收到快照」，不会再造一份假数据顶上 ——
+   E3 明确禁止「手动输入数据伪造同步效果」。要数据就跑 simulator/。 */
 connect();

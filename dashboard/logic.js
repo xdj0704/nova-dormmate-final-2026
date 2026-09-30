@@ -1,721 +1,314 @@
 // dashboard/logic.js
-// 看板的判断逻辑：7-1 优先关注、7-2 处理动作、7-4 事件记录、8-1 总览与依据、
-// 8-3 当前重点一行 + 语音提醒那句话。
-// **纯函数**——不碰 DOM，不读全局变量，不调 Date.now()。
+// Step E3-2：看板只剩「把 core 发来的快照摆成几句话」这一件事。
 //
-// 单独拆一个文件出来，是因为这一整套判断（先比时长、再比次数、最后比名字）
-// 是「看一眼就知道该先管哪个宿舍」的全部依据，而它跟页面长什么样毫无关系。
-// 拆开之后 tests/logic.test.js 不用打任何桩就能把它整个测一遍 ——
-// 留在 dashboard.js 里的话，测它就得起一整套假 DOM。
+// 【这一轮砍掉了什么，为什么】
+// E3 之前，这个文件里有整整一套业务判断：连续异常段（nextAbnormal）、优先关注
+// 排序（pickPriority）、处理动作状态机（beginHandling / nextHandling）、事件
+// 记录（beginEvent / markAction / closeEvent）、总览与依据（buildOverview /
+// buildReasons）。那是「前端自己算一遍」时代的产物，代价是同一件事有两份实现：
+// core.py 一份、这里一份，而两边的恢复判据、事件开案时刻、时长口径**都不完全
+// 一样**（见 README 「恢复判据两边还不一样」那条）。
 //
-// 它只依赖每个节点上那两个字段，由 dashboard.js 在 handleMessage 里维护：
-//   abnormalStart —— 当前这段连续异常里**第一条**消息的 time
-//   abnormalCount —— 这段里已经有几条异常消息（0 = 不在异常中）
-// 这两个字段怎么变，见本文件里的 nextAbnormal()。
+// E3 定的规矩是「前端只订阅 dormmate/v1/state，只渲染，不做业务计算」。照着
+// 这条规矩，上面那一整套**整体搬去了 core**，这里一个判断都不再留：
+//   - 谁是重点、凭什么         -> core 的 rules.rank_priority，走 snapshot.priority
+//   - 一段异常从哪到哪          -> core 的事件状态机，走 snapshot.events
+//   - 处理到哪一步了            -> 同上（OPEN / HANDLING / RECOVERED / UNRESOLVED）
+//   - 异常持续了多久            -> core 的 durationText（连格式化都不在这边做）
+//   - 一条报文为什么被拒        -> core 的 snapshot.rejects
+//   - 现在在看哪个宿舍          -> core 的 snapshot.focus（跨端联动）
 //
-// 这里**不判断**什么是异常、什么是正常 —— 那是统一规则的事，只有 shared/rules.js
-// 说了算。传进来的 status 已经是 judgeStatus 复核过的结果，这里只负责比较。
+// 留下来的只有两种东西：
+//   1) **读**：把快照里的字段取出来（readSnapshot / nodeOf / openEvent / latestEvent）
+//   2) **说**：把那些字段摆成一句人话（focusBanner / alertLine / trendText / …）
+// 说的时候一个数字都不算、一个结论都不下 —— 「处理中」这三个字来自事件的
+// state 字段，不是这边判出来的；「偏热」来自 core 算好的 status，这边连
+// 温度阈值都不认识（这个文件里没有 18 / 30 / 75 这三个数，有测试盯着）。
+//
+// 【唯一一处「算」：温度往哪走】trendOf 拿最近两个读数比大小，得出
+// 上升 / 下降 / 持平。它不是业务判断：没有阈值、不产生状态、不影响任何结论，
+// 只是给那句提醒添半句话。真要让 core 算，快照就得再加一个字段，
+// 而它连「异常」的定义都碰不到。这个取舍写在 README 的 E3-2 那一节。
+//
+// 文件仍然是**纯函数**：不碰 DOM、不读全局、不调 Date.now()，
+// 所以 tests/logic.test.js 不用打任何桩就能把它整个测一遍。
 
 /**
- * 统一 JSON 里的时间格式，固定 "YYYY-MM-DD HH:mm:ss"。
- * 故意写死成一个精确的形状、不用宽松匹配：格式一旦不对就该算不出来，
- * 而不是被某条正则「差不多」地认下来，最后得出一个看着挺像样的错时长。
+ * 这份页面认的快照版本，必须和 core.py 的 SNAPSHOT_VERSION 对上。
+ *
+ * 单独写成一个常量而不是直接比 2：改的时候两边一起 grep 得到。
+ * 版本对不上时页面**不装作能读**（见 readSnapshot）—— 少一个字段就整块显示
+ * undefined，比直接说「版本不对」难查得多。
  */
-const TIME_RE = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/;
+export const SNAPSHOT_VERSION = 2;
+
+/* ---------- 读：把快照拆开 ---------- */
 
 /**
- * 把 "YYYY-MM-DD HH:mm:ss" 解析成毫秒数；解析不出来返回 NaN。
+ * 校验一条 `dormmate/v1/state` 报文。
  *
- * 不用 new Date(字符串)：
- *   1) "2026-09-22 20:30:00" 是**非标准**格式（ISO 8601 要求中间是 T），
- *      各引擎实现不一致 —— Safari 一类历史上直接给 Invalid Date。
- *      统一 JSON 的格式是定死的，自己按正则解析最稳，也不依赖运行环境。
- *   2) 这里算出来的绝对时刻没有意义，只用来做减法。两端都按 UTC 折算，
- *      时区就自动抵消了 —— 不会因为浏览器在东八区，把 7 分钟算成 7 小时。
+ * 前端从此**只订这一条 topic**，所以这是页面上唯一的入口校验：过了这一关，
+ * 后面每一处渲染都可以直接取字段，不用到处判 `undefined`。
  *
- * @param {string} text
- * @returns {number} 毫秒数，或 NaN
+ * 判据只针对**形状**，不针对内容：某个宿舍温度是 99℃ 照样放行（core 那边
+ * 就不拦，D4 第 5 条正是拿它演示的）。这里挡的是「这条消息压根不是快照」——
+ * 端口连错了订到别的 topic、新旧版本混跑、broker 上留着别人的数据。
+ *
+ * 返回 `{ok, snapshot, reason}`，**不抛异常**：调用方只有一条路要走
+ * （不 ok 就把 reason 写进日志），不用为「抛了」再写一套。
+ *
+ * @param {*} value JSON.parse 之后的快照
+ * @returns {{ok: boolean, snapshot: Object|null, reason: string}}
  */
-export function parseTime(text) {
-  const m = TIME_RE.exec(String(text == null ? '' : text));
-  if (!m) return NaN;
-  /* Date.UTC 的月份是 0 起数的，所以减 1 */
-  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]),
-    Number(m[4]), Number(m[5]), Number(m[6]));
+export function readSnapshot(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return bad('快照顶层不是对象（收到 '
+      + (Array.isArray(value) ? 'array' : String(value)) + '）');
+  }
+  if (!Number.isFinite(value.v)) {
+    return bad('快照里没有 v（版本号）字段，这不像是 core 发的那份');
+  }
+  if (value.v !== SNAPSHOT_VERSION) {
+    return bad('快照版本是 ' + value.v + '，这个页面认的是 ' + SNAPSHOT_VERSION
+      + '（core.py 改了字段就要一起改）');
+  }
+  if (!Array.isArray(value.nodes)) {
+    return bad('快照里没有 nodes 数组');
+  }
+  if (!isObject(value.events) || !Array.isArray(value.events.events)) {
+    return bad('快照里没有 events（事件那一块）');
+  }
+  if (!isObject(value.rejects) || !Array.isArray(value.rejects.items)) {
+    return bad('快照里没有 rejects（被拒绝消息那一块）');
+  }
+  if (!isObject(value.counters)) {
+    return bad('快照里没有 counters');
+  }
+  /* priority / focus 两个都可能是 null（没有重点 / 没人点名），那不是错，
+     是「此刻没有」—— 但也不能是别的类型，那说明字段搬了家。 */
+  if (value.priority !== null && !isObject(value.priority)) {
+    return bad('priority 既不是对象也不是 null');
+  }
+  if (value.focus !== null && !isObject(value.focus)) {
+    return bad('focus 既不是对象也不是 null（旧版 core 没有这个字段）');
+  }
+  return { ok: true, snapshot: value, reason: '' };
+}
+
+function bad(reason) {
+  return { ok: false, snapshot: null, reason: reason };
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
- * 把一段毫秒数说成人话。
+ * 快照里某个宿舍那一条。找不到就 null（不抛）—— 快照里有哪些宿舍是 core 的
+ * 配置说了算，这个文件里**没有**任何写死的节点名（@see tests/logic.test.js）。
  *
- * 取整一律向下：说「5 分钟」的时候，至少要真的过了 5 分钟。
- * 四舍五入会把 4 分 31 秒说成 5 分钟，往长了报 —— 这一栏是让人判断
- * 严重程度的，宁可少说不要多说。
- *
- * @param {number} ms
- * @returns {string} 例如 "不到 1 分钟" / "7 分钟" / "1 小时 5 分钟"
- */
-export function fmtDuration(ms) {
-  const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
-  if (total < 60) return '不到 1 分钟';
-
-  const minutes = Math.floor(total / 60);
-  if (minutes < 60) return minutes + ' 分钟';
-
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
-  return rest === 0 ? hours + ' 小时' : hours + ' 小时 ' + rest + ' 分钟';
-}
-
-/**
- * 这个节点当前这段连续异常持续了多久（毫秒）。
- *
- * 两端都取报文里的 time，不用浏览器当前时间 —— 现场演示时三台机器的钟
- * 不一定对得上，而且历史数据的 time 也可能是编的。「20:00 到 20:07」
- * 就永远是 7 分钟，跟什么时候跑的没关系，测试也才能写出定值。
- *
- * @param {{abnormalStart: string|null, latest: {time: string}|null}} node
- * @returns {number} 毫秒数；算不出来（缺字段、格式不对、起点晚于终点）返回 0
- */
-export function abnormalDuration(node) {
-  if (!node || !node.latest) return 0;
-
-  const start = parseTime(node.abnormalStart);
-  const end = parseTime(node.latest.time);
-  if (Number.isNaN(start) || Number.isNaN(end)) return 0;
-
-  /* 起点比终点还晚（脏数据、或手输的 time 前后颠倒）当 0 处理，不返回负数 ——
-     负数一路传到页面上就是「已连续偏热 -3 分钟」。 */
-  return end > start ? end - start : 0;
-}
-
-/**
- * 维护「当前这段连续异常」的状态机。纯函数：给旧的两个字段和一条新消息，
- * 返回新的两个字段，不修改传进来的东西。
- *
- * 规则只有两条：
- *   - 这条是正常 -> 这段结束，两个字段一起清零
- *   - 这条还是异常 -> 段继续，条数加一；**起点不动**
- *
- * 特别注意「起点不动」：段内状态从偏冷变成偏热，不算新的一段。
- * 这里统计的是「连续异常了多久」，不是「连续偏热了多久」。
- *
- * @param {{abnormalStart: string|null, abnormalCount: number}} prev
- * @param {string} status 这条消息**复核之后**的状态（正常 / 偏冷 / 偏热 / 偏湿）
- * @param {string} time   这条消息的 time
- * @returns {{abnormalStart: string|null, abnormalCount: number}}
- */
-export function nextAbnormal(prev, status, time) {
-  const count = prev && Number.isFinite(prev.abnormalCount) && prev.abnormalCount > 0
-    ? prev.abnormalCount : 0;
-
-  if (status === '正常') return { abnormalStart: null, abnormalCount: 0 };
-
-  /* 上一段已经结束了（或压根还没开始）—— 这条就是新一段的第一条，起点是它自己。
-     判断「上一段还在不在」只看 abnormalCount 这一个字段。
-     换成看 abnormalStart 空不空，就多出第二个真相来源：两个字段一旦对不上
-     （比如 time 传了空串），起点会被后来每条消息顶掉，界面上的时长永远停在
-     「不到 1 分钟」，而且不会有任何地方报错。 */
-  if (count === 0) return { abnormalStart: time, abnormalCount: 1 };
-
-  return { abnormalStart: prev.abnormalStart, abnormalCount: count + 1 };
-}
-
-/* ---------- Step 7-2：处理动作 ---------- */
-
-/**
- * 按下那个按钮之后，节点上 action 字段记的名字。
- *
- * 单独拎成一个常量，是因为这串字会**原样出现在卡片上**（「处理中｜风扇已开启」），
- * 测试断言的也是这一串。写死两处的话，改了这边忘了那边，
- * 页面上就会显示一个谁也发现不了的错名字。
- */
-const ACTION_FAN = '风扇已开启';
-
-/**
- * 按下「开启风扇 / 通风」之后，这个节点的处理字段该变成什么。
- *
- * 纯函数：只读传进来的节点，返回新的那几个字段，不改任何东西。
- * 返回 null = 这个节点现在处理不了 —— 它连一条数据都没收到过，
- * actionTime 根本没地方取。界面上那个按钮这时本来就是禁用的，这里是兜底。
- *
- * actionTime 取**该节点最新那条消息的 time**，不用浏览器当前时间。
- * 和 7-1 算时长同一个理由：现场三台机器的钟不一定对得上；而且这样
- * 「动作发生在哪条数据之后」在日志和卡片上能一条条对上，不用猜。
- *
- * @param {{latest: {time: string}|null}} node
- * @returns {{handling: string, action: string, actionTime: string,
- *            dataAfterAction: null}|null}
- */
-export function beginHandling(node) {
-  if (!node || !node.latest) return null;
-  return {
-    handling: '处理中',
-    action: ACTION_FAN,
-    actionTime: node.latest.time,
-    /* 还没有「动作之后的数据」，等它来 —— 见 nextHandling */
-    dataAfterAction: null,
-  };
-}
-
-/**
- * 动作之后又来了一条消息，处理状态该怎么走。
- *
- * 规则只有一条：**看动作之后的最新那条**。
- *   这条（复核之后的）正常 -> 「已恢复」
- *   这条还是异常           -> 留在「处理中」
- * 环境再变坏就自动退回「处理中」—— 同一条规则，不用另写一条判断。
- *
- * actionTime 那条**自己不算数**（要严格晚于它）：动作就是记在那条数据上的，
- * 让它立刻把自己判成「已恢复」是错的。
- *
- * 返回 null = 什么都不用改：还没按过按钮、时间解析不出来、或者这条消息
- * 比动作还早（乱序到达，或者重发了一条旧的）。这时候保持原样，
- * 让一条迟到的旧数据改写「处理好了没有」是不对的。
- *
- * @param {{handling: string, actionTime: string|null}} node
- * @param {{status: string, time: string}} record 复核**之后**的那条记录
- * @returns {{handling: string, dataAfterAction: object}|null}
- */
-export function nextHandling(node, record) {
-  if (!node || !record) return null;
-  if (node.handling !== '处理中' && node.handling !== '已恢复') return null;
-
-  const at = parseTime(node.actionTime);
-  const t = parseTime(record.time);
-  if (Number.isNaN(at) || Number.isNaN(t)) return null;
-  if (!(t > at)) return null;
-
-  return {
-    handling: record.status === '正常' ? '已恢复' : '处理中',
-    dataAfterAction: record,
-  };
-}
-
-/* ---------- Step 7-4：事件记录 ---------- */
-
-/**
- * 一条事件。字段就是导出 CSV 的那 9 列，顺序也一致
- * （见 dashboard.js 的 EVENT_HEADER）：
- *
- *   nodeId         哪个宿舍
- *   startTime      这段连续异常是从哪条消息开始的
- *   problem        「连续偏热」这一串，**创建时定死**（见下）
- *   priorityTime   第一次被选为「优先关注」的那一刻，没有就是 null
- *   priorityReason 那次选它的原因原话，和页面上那条栏里说的是同一句
- *   action         按过按钮之后做了什么（「风扇已开启」）
- *   actionTime     那个动作记在哪条数据上
- *   recoverTime    这段结束的那条消息的 time，没有就是 null
- *   result         '已恢复'，或者空串表示还没结束
- *
- * 这一整条记录的是**一段连续异常**，和 nextAbnormal 维护的那一段同生共死：
- * 段开始就开一条，段结束（来了一条正常数据）就结案。中途不会另开一条，
- * 哪怕段里状态从偏热变成了偏湿 —— 和 7-1 那边「统计的是连续异常、
- * 不是连续偏热」是同一个口径。
- */
-
-/**
- * 段开始了：开一条新事件。
- *
- * problem 取**开始那一刻**的状态，之后不再改。理由：它是这条事件的名字，
- * 在复盘的时间线里就摆在 startTime 旁边，说的是「这件事是从什么开始的」。
- * 跟着最新状态改的话，一段从偏热恶化成偏湿的经历，事后看起来像是从头
- * 就是偏湿的 —— 那是另一件事了。
- *
- * 返回 null = 不该开：没有这条记录，或者它本身是「正常」。
- * 后面这条在页面里不会发生（段开始的前提就是这条不正常），
- * 写在这里是为了不让一个「连续正常」这种自相矛盾的名字有机会被造出来。
- *
- * @param {{nodeId: string, status: string, time: string}} record 复核之后的记录
+ * @param {Object|null} snapshot
+ * @param {string} nodeId
  * @returns {Object|null}
  */
-export function beginEvent(record) {
-  if (!record || record.status === '正常') return null;
+export function nodeOf(snapshot, nodeId) {
+  const list = snapshot && Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+  for (let i = 0; i < list.length; i += 1) {
+    if (list[i] && list[i].nodeId === nodeId) return list[i];
+  }
+  return null;
+}
+
+/** 快照里那几个宿舍，按 core 给的顺序。没有就直接给空数组。 */
+function nodeList(snapshot) {
+  return snapshot && Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+}
+
+/** 事件那一块（`snapshot.events`），形状不对时给一个空壳，省得每处都判。 */
+function eventBlock(snapshot) {
+  const block = snapshot && isObject(snapshot.events) ? snapshot.events : null;
   return {
-    nodeId: record.nodeId,
-    startTime: record.time,
-    problem: '连续' + record.status,
-    priorityTime: null,
-    priorityReason: null,
-    action: null,
-    actionTime: null,
-    recoverTime: null,
-    result: '',
+    summary: block && isObject(block.summary) ? block.summary : {},
+    events: block && Array.isArray(block.events) ? block.events : [],
   };
 }
 
 /**
- * 这个节点被选成「优先关注」了，把那一刻记到事件上。
+ * 某个宿舍**当前还没结案**的那条事件（状态是 OPEN 或 HANDLING）。
  *
- * **只记第一次**：之后再被选中也不覆盖。复盘想回答的是「这个宿舍是什么
- * 时候被注意到的、当时是因为什么」，而不是「最后一次看它时长什么样」。
- * 后者在页面顶上那条栏里一直是最新的，不必再存一份。
+ * 「处理到哪一步了」在 E3 之前是前端自己记的四个字段（handling / action /
+ * actionTime / dataAfterAction）。现在它是 core 事件机里那条事件的**状态**：
+ * 没有未结案的事件 = 这个宿舍此刻没什么在处理。
  *
- * 返回 null = 不用改：没有事件、没有时间，或者早就记过了。
+ * 取**最后**一条匹配的：core 保证一个宿舍同时只有一条没结案的事件，但如果
+ * 哪天不是了（比如重启后读到两条没结案的），拿最近那条总比拿最早那条对。
  *
- * @param {Object|null} event
- * @param {string} time 判定它胜出时，**它自己**最新那条消息的 time
- * @param {string} reason 和页面上那条栏里显示的原因原话
- * @returns {{priorityTime: string, priorityReason: string}|null}
+ * @param {Object|null} snapshot
+ * @param {string} nodeId
+ * @returns {Object|null}
  */
-export function markPriority(event, time, reason) {
-  if (!event || !time) return null;
-  if (event.priorityTime) return null;
+export function openEvent(snapshot, nodeId) {
+  const list = eventBlock(snapshot).events;
+  let found = null;
+  list.forEach(function (e) {
+    if (e && e.nodeId === nodeId && (e.state === 'OPEN' || e.state === 'HANDLING')) {
+      found = e;
+    }
+  });
+  return found;
+}
+
+/**
+ * 某个宿舍**最近**的那条事件，结过案的也算。
+ *
+ * 3D 里的风扇读的是它：动作一旦有人按过（`event.action` 有值），扇叶就一直
+ * 转着 —— 这和 7-2 定下的行为一样（「已恢复」之后照样转，只有清空才停），
+ * 只是判断依据从「前端记的 handling 字段」换成了 core 记的那笔动作。
+ *
+ * 拿的是 `snapshot.events.events` 里最近 20 条，所以挂机很久之后最早那几条
+ * 会被挤掉 —— 挤掉的是**结过案**的，判「风扇开着没」只需要最近那条。
+ *
+ * @param {Object|null} snapshot
+ * @param {string} nodeId
+ * @returns {Object|null}
+ */
+export function latestEvent(snapshot, nodeId) {
+  const list = eventBlock(snapshot).events;
+  let found = null;
+  list.forEach(function (e) {
+    if (e && e.nodeId === nodeId) found = e;
+  });
+  return found;
+}
+
+/** 事件状态那几个英文值对应的中文。认不出来的原样返回，不假装懂。 */
+export function eventStateText(state) {
+  const table = {
+    OPEN: '待处理',
+    HANDLING: '处理中',
+    RECOVERED: '已恢复',
+    UNRESOLVED: '未恢复',
+  };
+  if (typeof state !== 'string' || !state) return '';
+  return Object.prototype.hasOwnProperty.call(table, state) ? table[state] : state;
+}
+
+/**
+ * 某个宿舍此刻的处理状态，给卡片和详情区用。
+ *
+ *   {label, event, after}
+ *   label  '无' | '待处理' | '处理中'
+ *   event  那条未结案的事件（没有就是 null）
+ *   after  处理之后又收到几条异常（core 数好的，前端不自己数 verify 数组 ——
+ *          那个数组有上限，数出来的和判定用的不是一回事）
+ *
+ * **「已恢复」不在这里**：那是结过案的状态，属于事件表，不属于「卡片上这个
+ * 宿舍正在被处理吗」。一个宿舍恢复之后就是正常了，卡片上不该还挂着处理字样。
+ *
+ * @param {Object|null} snapshot
+ * @param {string} nodeId
+ * @returns {{label: string, event: Object|null, after: number}}
+ */
+export function handlingOf(snapshot, nodeId) {
+  const event = openEvent(snapshot, nodeId);
+  if (!event) return { label: '无', event: null, after: 0 };
+  const after = Number.isFinite(event.abnormalAfter) ? event.abnormalAfter : 0;
   return {
-    priorityTime: time,
-    priorityReason: reason == null ? '' : String(reason),
+    label: event.state === 'HANDLING' ? '处理中' : '待处理',
+    event: event,
+    after: after,
   };
 }
 
 /**
- * 有人在处理这段异常期间按了「开启风扇 / 通风」，把动作记到事件上。
+ * 「开始处理」这个按钮：能不能按、按不了的时候旁边那行字说什么。
  *
- * 同样**只记第一次**。按第二次时 actionTime 会往前挪（按钮那会儿是可点的），
- * 但复盘要看的是「这件事第一次被动手是什么时候、做了什么」——
- * 第二次按的是同一件事的重复，不该把第一次的功劳盖掉。
+ *   {enabled, note}
  *
- * 返回 null = 不用改：没有事件、没有动作名/时间，或者已经记过了。
+ * 返回的是**一对**而不是「一个布尔 + 另一处再拼一句解释」：能按与否和那句
+ * 解释说的是同一件事，分成两个函数写的话，改了一处忘了另一处，就会出现
+ * 「按钮灰着，旁边写着『可以开始处理』」。
  *
- * @param {Object|null} event
- * @param {string} action 动作名（就是按钮按下之后卡片上显示的那串）
- * @param {string} time 动作记在哪条数据上
- * @returns {{action: string, actionTime: string}|null}
+ * 能按的唯一条件：这个宿舍有一条**待处理**的事件（core 开过案、还没人动过）。
+ * 其余几种情况都不是「出错」，只是这个按钮此刻没有意义，所以每一种都把自己
+ * 的原因写出来 —— 灰按钮不说明原因，用的人只会以为页面坏了。
+ *
+ * 注意这里**不判断状态好不好**：状态正常但 core 那边还挂着一条未结案的事件
+ * （处理之后连着几条正常、还没到恢复的条数），按钮该是什么样由 core 的事件说，
+ * 不由 `node.status` 说。前后两句话要是有出入，以 core 的为准。
+ *
+ * @param {Object|null} snapshot
+ * @param {string} nodeId
+ * @returns {{enabled: boolean, note: string}}
  */
-export function markAction(event, action, time) {
-  if (!event || !action || !time) return null;
-  if (event.action) return null;
-  return { action: action, actionTime: time };
-}
-
-/**
- * 段结束了：结案。
- *
- * 触发条件是 nextAbnormal 把 abnormalCount 清零（也就是来了一条正常数据），
- * 所以这里不做时间比较 —— 该不该结案是那一步说了算的，这边只负责写下来。
- * （代价和页面上其它地方一样：一条迟到的正常数据同样会把它结掉，
- * 见 README「报文没有乱序保护」那一条。）
- *
- * result 只有一个终态：'已恢复'。没结案的才是空串，两者不会混。
- *
- * 返回 null = 不用改：没有事件、没有时间，或者已经结过案了。
- *
- * @param {Object|null} event
- * @param {string} time 让它恢复正常的那条消息的 time
- * @returns {{recoverTime: string, result: string}|null}
- */
-export function closeEvent(event, time) {
-  if (!event || !time) return null;
-  if (event.recoverTime) return null;
-  return { recoverTime: time, result: '已恢复' };
-}
-
-/* ---------- 优先关注 ---------- */
-
-/**
- * 严重度权重：数字越大越该先看。
- *
- * 这一档只在「连续异常时长和异常条数都打平」时才轮得到 —— 出现得很少，
- * 但前两步分不出胜负时，总得有个确定的说法，不能看谁先被遍历到。
- *
- * 取值不是随手定的，跟 `web/style.css` 里那四档状态色的角色是同一个意思：
- *   偏热 = critical / 偏湿 = serious / 偏冷 = warning / 正常 = good
- * 「正常」给 0 只是一个占位：它压根不会进这个排序（见 ranked）。
- *
- * ⚠ 这份表和 Python 侧 `rules.py` 的 SEVERITY_WEIGHTS 是同一套东西，
- * 而且 `core/config.json` 里还能改。两边的**行为**由
- * `tests/fixtures/priority_cases.json` 钉住 —— 那份文件 Python 和 Node
- * 各读一遍、逐条对上才算过。改了这里，那份 json 和 rules.py 要一起改。
- */
-const SEVERITY = { '偏热': 3, '偏湿': 2, '偏冷': 1, '正常': 0 };
-
-/**
- * 查一个状态的严重度。不认识的状态当 0：不猜、也不炸 ——
- * 状态是从报文里读来的，宁可排在后面，也不要让整个页面停摆。
- */
-function severityOf(status) {
-  return SEVERITY[status] || 0;
-}
-
-/**
- * 把「当前在异常中的节点」按那四步排好序，交给调用方。
- *
- * 抽出来是因为有四个地方要用这份排序：pickPriority（对外那一份）、
- * B1 总览里那句「是当前重点」（8-3 之后归 report.html）、B2 依据（同上）、
- * 以及 8-3 的 buildAlert。各写一份的话，「谁是重点」就有了四个出处 ——
- * 而且四份都「看着挺对」，对不上的时候没有任何地方会报错，
- * 只是页面上那一行说的是 dorm-b、语音念的是 dorm-c。
- *
- * 排序的四步和判据见 pickPriority 的注释。
- *
- * @param {Object} nodes
- * @returns {Array<{nodeId: string, status: string, count: number, duration: number, severity: number}>}
- *          全是异常节点，最该先看的排在第一个；都在正常时是空数组
- */
-function ranked(nodes) {
-  const list = [];
-
-  Object.keys(nodes || {}).forEach(function (nodeId) {
-    const node = nodes[nodeId];
-    if (!node || !node.latest) return;
-    /* 用 > 0 而不是 !== 0：abnormalCount 是 NaN 或负数时，同样按「不在异常中」处理 */
-    if (!(node.abnormalCount > 0)) return;
-
-    list.push({
-      nodeId: nodeId,
-      status: node.latest.status,
-      count: node.abnormalCount,
-      duration: abnormalDuration(node),
-      severity: severityOf(node.latest.status),
-    });
-  });
-
-  list.sort(function (a, b) {
-    if (a.duration !== b.duration) return b.duration - a.duration;
-    if (a.count !== b.count) return b.count - a.count;
-    if (a.severity !== b.severity) return b.severity - a.severity;
-    if (a.nodeId === b.nodeId) return 0;
-    /* 不用 localeCompare：它跟着运行环境的区域设置走，同一个数组在不同机器上
-       可能排出不同结果。这里要的是固定的字典序。 */
-    return a.nodeId < b.nodeId ? -1 : 1;
-  });
-
-  return list;
-}
-
-/**
- * 拼出「凭什么」那半句 —— 不含节点名。
- *
- * 不含节点名是因为有两个地方要它，而那两处节点名的位置不一样：
- * pickPriority 的 reason 是「dorm-b 已连续偏热 20 分钟（4 次），持续时间最长」
- * （reasonFor 在前面补上节点名），B2 的依据写
- * 「优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间最长」
- * —— 节点名在「优先关注 …：」那里已经说过了，再说一遍就成了
- * 「优先关注 dorm-b：dorm-b 已连续…」。各拼一份的话，两处对「赢在哪一步」
- * 的说法迟早会不一样，而这一栏存在的意义正是让人相信这个排序。
- *
- * 尾巴必须如实说明**赢在哪一步**。一律写「持续时间最长」是不行的：
- * 时长打平、靠次数赢的那次，说它「持续时间最长」就是假话。
- */
-function basisFor(winner, list) {
-  const head = '已连续' + winner.status + ' '
-    + fmtDuration(winner.duration) + '（' + winner.count + ' 次）';
-
-  /* 只有一个异常节点时，下面那三步一步都没比过。写「持续时间最长」
-     是在说一件没发生过的事。 */
-  if (list.length === 1) return head + '，是目前唯一的异常节点';
-
-  /* 排序保证 others[0] 就是除它以外最靠前的那个 */
-  const others = list.slice(1);
-  /* 跟它一样长的那些。为空 = 它就是最长的，赢在时长这一步。 */
-  const tied = others.filter(function (o) { return o.duration === winner.duration; });
-
-  if (tied.length === 0) return head + '，持续时间最长';
-
-  /* 只跟**时长相同**的那些比次数。跟所有人比是错的：一个只异常了一分钟
-     但有 99 条消息的节点，次数比谁都多，却根本没进到比次数这一步。 */
-  if (winner.count > tied[0].count) {
-    return head + '，持续时间和 ' + tied[0].nodeId + ' 一样长，异常次数最多';
+export function actionState(snapshot, nodeId) {
+  const node = nodeOf(snapshot, nodeId);
+  if (!node || node.status == null) {
+    return { enabled: false, note: 'core 还没收到这个节点的数据，现在按了也没有对应的事件' };
   }
 
-  /* 再只跟**时长和次数都一样**的那些比严重度。同样不能跟所有人比 ——
-     条数比它多的那些压根没走到这一步。 */
-  const same = tied.filter(function (o) { return o.count === winner.count; });
-  if (same.length > 0 && winner.severity > same[0].severity) {
-    return head + '，持续时间和 ' + same[0].nodeId + ' 一样长、异常次数也一样，'
-      + '但' + winner.status + '比' + same[0].status + '更要紧';
+  const handling = handlingOf(snapshot, nodeId);
+  if (handling.label === '处理中') {
+    return {
+      enabled: false,
+      note: 'core 那边这条事件正在处理中'
+        + (handling.after > 0 ? '（之后又收到 ' + handling.after + ' 条异常）' : '')
+        + '—— 再按一次只会多记一笔动作，不会让它更快结案',
+    };
   }
+  if (handling.label === '待处理') return { enabled: true, note: '' };
 
-  /* 四步全平。这里已经是最后的兜底，写的就是实话。 */
-  const peer = same.length > 0 ? same[0].nodeId : tied[0].nodeId;
-  return head + '，和 ' + peer + ' 完全并列，按节点名顺序排在前面';
-}
-
-/**
- * 顶上那条「优先关注」栏用的一整句 —— 比 basisFor 多一个开头的节点名。
- */
-function reasonFor(winner, list) {
-  return winner.nodeId + ' ' + basisFor(winner, list);
-}
-
-/**
- * 从三个节点里挑出最该先看的那一个。
- *
- * 只在异常节点里挑。「异常」的判据就是 abnormalCount > 0 这一个字段 ——
- * 它是 nextAbnormal 维护的，在这里再按 latest.status 复核一遍只会多出一个
- * 可能跟它打架的判据。这两个字段的对应关系由 dashboard 那边的测试钉住。
- *
- * 比较顺序是固定的四步：
- *   1) 连续异常时长，长的优先
- *   2) 时长一样，比这段里的消息条数，多的优先
- *   3) 还一样，比严重度：偏热 > 偏湿 > 偏冷（见上面的 SEVERITY）
- *   4) 全部并列，按 nodeId 字母顺序
- * 第 4 步不是为了「更准」，是为了**确定**：同样一份数据永远得到同一个结果，
- * 不会因为对象键的遍历顺序变了就换了个人。
- *
- * @param {Object} nodes 形如 { 'dorm-a': { latest, abnormalStart, abnormalCount }, ... }
- * @returns {{nodeId: string, reason: string}|null} 全部正常时返回 null
- */
-export function pickPriority(nodes) {
-  const list = ranked(nodes);
-  if (list.length === 0) return null;
-
-  return { nodeId: list[0].nodeId, reason: reasonFor(list[0], list) };
-}
-
-/* ---------- Step 8-1：B1 当前总览 + B2 判断依据 ---------- */
-
-/* 这两句都是**现算**的，一个字都不缓存：每收到一条报文，时长、次数、
-   状态都可能变，缓存下来的话，页面上就会出现一句「dorm-b 已持续偏热
-   5 分钟」挂在那里不再动 —— 而下面的卡片和栏里的数字一直在涨。
-   它们也**不读浏览器当前时间**，理由和 7-1 算时长完全一样。 */
-
-/**
- * 数一遍三个节点现在各是什么情况。
- *
- * 这里按 `latest.status` 数，不按 `abnormalCount > 0` 数 —— 两处口径
- * 本来应当一致（由 dashboard 那边的测试钉住），但「需要关注」这四个字
- * 是对着**卡片上那个状态徽章**说的，所以分母就用徽章读的那个字段：
- * 看的人一抬头就能对上，不用先知道还有另一套计数。
- *
- * @param {Object} nodes
- * @returns {{ids: string[], withData: string[], noData: string[],
- *            normal: string[], abnormal: string[]}}
- */
-function survey(nodes) {
-  const ids = Object.keys(nodes || {});
-  const withData = [];
-  const noData = [];
-
-  ids.forEach(function (nodeId) {
-    const node = nodes[nodeId];
-    if (node && node.latest) withData.push(nodeId);
-    else noData.push(nodeId);
-  });
-
+  if (node.status === '正常') {
+    return { enabled: false, note: '这个宿舍当前状态正常，core 那边也没有未结案的事件' };
+  }
   return {
-    ids: ids,
-    withData: withData,
-    noData: noData,
-    normal: withData.filter(function (id) { return nodes[id].latest.status === '正常'; }),
-    abnormal: withData.filter(function (id) { return nodes[id].latest.status !== '正常'; }),
+    enabled: false,
+    note: 'core 还没为这个宿舍开案 —— 它要连续收到几条异常才开一条'
+      + '（现在连着 ' + (Number.isFinite(node.abnormalCount) ? node.abnormalCount : 0) + ' 条）',
   };
 }
 
 /**
- * 一个节点正在被处理时，跟在句子后面的那个括号。
+ * 3D 里的风扇该不该转。判据只有一条：这个宿舍最近那条事件里有没有一笔
+ * **被接受的动作**（`event.action`）。有就转，而且一直转着。
  *
- * **处理状态不参与排序**，一个节点的「处理中」既不会让它更容易被选中，
- * 也不会让它落选（pickPriority 连这个字段都不读）。这里只是把当前状态
- * 如实报出来 —— 所以它写成一个括号，不写成「因为…所以…」。
- * 写成「虽然已经开了风扇，但还是先管 dorm-b」那种因果句就是在编：
- * 真要按「有没有人管」排，那是另一套规则，得先定下来。
+ * 转不转**不由状态决定**：偏热的宿舍按 LOOK 表本来就会转（那是 scene.js 的
+ * 事），这里回答的是「有没有人按过开始处理」——两者叠在一起，谁也不覆盖谁。
  *
- * 状态已经正常的不写这个括号：那说明风扇是按在旧数据上、之后来的
- * 那条正常数据比动作还早（见 nextHandling），此时「处理中」没有任何意义。
- *
- * @param {Object} node
- * @returns {string} 例如 '（风扇已开启，处理中）'，不需要时是空串
+ * @param {Object|null} snapshot
+ * @param {string} nodeId
+ * @returns {boolean}
  */
-function handlingNote(node) {
-  if (!node || !node.latest || node.latest.status === '正常') return '';
-  if (node.handling !== '处理中') return '';
-  return '（' + (node.action ? node.action + '，' : '') + '处理中）';
+export function fanOn(snapshot, nodeId) {
+  const event = latestEvent(snapshot, nodeId);
+  return Boolean(event && event.action);
 }
 
-/**
- * B1：一句说清三个宿舍现在什么样。
- *
- *   「当前 3 个宿舍中，1 个正常，2 个需要关注；dorm-b 已持续偏热 20 分钟，
- *     是当前重点；dorm-c 出现偏湿。」
- *
- * 四段：有多少 / 谁最要紧 / 还有谁不正常。除了重点之外的异常节点只报
- * 「谁还异常、异常成什么样」，为什么先不它们是 B2 的事 —— 两句都做对比的话，
- * 摆在一起读就是车轱辘话。
- *
- * 数字、节点名、状态一个都没写死：宿舍数取自 nodes 的键，正常/需要关注
- * 是按当前状态数出来的，重点来自 ranked()，时长来自 fmtDuration()。
- * 换个宿舍数、换成四个节点，同一份代码说的还是实话。
- *
- * 「还没有收到数据」的节点单独说，不算进「正常」里 —— 页面刚打开那几秒
- * 那三个节点是**不知道**，不是正常。这一点和 8-3 的 calmLine 是同一个口径。
- *
- * @param {Object} nodes
- * @returns {string}
- */
-export function buildOverview(nodes) {
-  const s = survey(nodes);
-  const total = s.ids.length;
-
-  if (s.withData.length === 0) return '还没有收到任何节点的数据。';
-
-  /* 都在正常。没收到数据的那些要单独说 —— 「3 个宿舍都正常」在只收到
-     2 条消息时是句假话，第 3 个是不知道。 */
-  if (s.abnormal.length === 0) {
-    return s.noData.length === 0
-      ? '当前 ' + total + ' 个宿舍都正常。'
-      : '当前 ' + total + ' 个宿舍中，' + s.normal.length + ' 个正常，另有 '
-        + s.noData.length + ' 个还没有收到数据。';
-  }
-
-  /* 三个数字（正常 / 需要关注 / 没数据）加起来正好是宿舍数 —— 挪走一个
-     都会让这句话自相矛盾。**为 0 的那一档不写**：「0 个正常」是一句
-     又长又没信息的话，而且和上面「都正常时不写 0 个需要关注」是同一个口径。
-
-     三个都不正常时，前两档一起塌成「3 个需要关注」，读起来反而更顺。 */
-  const bits = [];
-  if (s.normal.length > 0) bits.push(s.normal.length + ' 个正常');
-  bits.push(s.abnormal.length + ' 个需要关注');
-  if (s.noData.length > 0) bits.push('另有 ' + s.noData.length + ' 个还没有收到数据');
-
-  const head = '当前 ' + total + ' 个宿舍中，' + bits.join('，');
-
-  const list = ranked(nodes);
-  /* 到不了：abnormal 非空时 ranked 也非空。留着是为了不让一个 undefined
-     的 top 把整句拼成「undefined 已持续…」——那还不如少说一句。 */
-  if (list.length === 0) return head + '。';
-
-  const top = list[0];
-  const others = list.slice(1).map(function (o) { return o.nodeId + ' 出现' + o.status; });
-
-  return head + '；' + top.nodeId + ' 已持续' + top.status + ' '
-    + fmtDuration(top.duration) + '，是当前重点' + handlingNote(nodes[top.nodeId])
-    + (others.length > 0 ? '；' + others.join('、') : '')
-    + '。';
-}
+/* ---------- 说：把字段摆成人话 ---------- */
 
 /**
- * 一个落后于重点的异常节点，为什么排在后面。
+ * 温度往哪走。**只看最近两条** —— 前面跌得再狠，最近一次是涨的就是「上升」。
  *
- * 尾巴同样要如实说**输在哪一步**：挨个字比过去、该第几步倒下就写第几步。
- * 一律写「但只持续 X 分钟」是错的 —— 时长打平、靠次数赢的那一轮，
- * 那个节点根本没有「只持续」这回事，这么写会让看的人以为排序是乱的。
+ * 比的是**精确值**，不设容差：设一个「小于 0.5℃ 算没变」的阈值要先定下来
+ * 多少算没变，那是另一套规则，这一步不定。
  *
- * @param {{nodeId: string, status: string, count: number, duration: number}} other
- * @param {{duration: number, count: number}} top
- * @returns {string} 例如 '虽然偏湿，但只持续 5 分钟'
- */
-function lostTo(other, top) {
-  if (other.duration < top.duration) {
-    return '虽然' + other.status + '，但只持续 ' + fmtDuration(other.duration);
-  }
-  if (other.count < top.count) {
-    return '也' + other.status + '，持续时间和它一样长，但只有 ' + other.count + ' 条异常数据';
-  }
-  /* 严重度比的是**已经算好的 severity**，不是拿 status 现查一遍 ——
-     权重表只有一份，现查等于给「判谁优先」和「说为什么」各留了一个出处。 */
-  if (other.severity < top.severity) {
-    return '也' + other.status + '，时长和次数都跟它一样，'
-      + '但' + other.status + '没有' + top.status + '要紧';
-  }
-  return '也' + other.status + '，时长和次数都跟它一样，按节点名顺序排在后面';
-}
-
-/**
- * B2：说清为什么是它，别人为什么不是。
+ * 只有一条记录时返回空串而**不是「持平」**：一条数据说不出「在往哪走」，
+ * 说成持平就是把「不知道」说成了「没变」。这和「一条数据都没有 ≠ 正常」
+ * 是同一条原则。
  *
- *   「优先关注 dorm-b：已连续偏热 20 分钟（4 次），持续时间最长；
- *     dorm-c 虽然偏湿，但只持续 5 分钟；dorm-a 当前正常。」
+ * 这是这个文件里**唯一**一处「算」，理由见文件开头那段。
  *
- * 开头那半句直接复用 basisFor —— 和顶上那条栏里显示的是同一份文字，
- * 连「赢在哪一步」的说法都逐字相同。两处对不上的话，看的人第一反应
- * 是「到底哪个算数」。
- *
- * 其余节点分两拨：**还在异常的**用对比的说法（它们是输给了重点的那些，
- * 排在重点后面），**正常和没收到数据的**直说各自现在什么样、不比较 ——
- * 拿一个正常的节点去跟重点比「谁更久」是没有意义的。
- *
- * @param {Object} nodes
- * @returns {string}
- */
-export function buildReasons(nodes) {
-  const s = survey(nodes);
-
-  if (s.withData.length === 0) return '还没有收到任何节点的数据，说不出依据。';
-
-  const list = ranked(nodes);
-
-  if (list.length === 0) {
-    /* abnormal 非空却挑不出人，只可能是 abnormalCount 和 status 打架了
-       （那个不变量由 dashboard 那边的测试钉住）。这时候照实说，不装作没事。 */
-    if (s.abnormal.length > 0) return '当前有异常节点，但还算不出优先关注的是谁。';
-
-    return s.noData.length === 0
-      ? '当前 ' + s.ids.length + ' 个宿舍都正常，没有要优先处理的宿舍。'
-      : '当前 ' + s.normal.length + ' 个宿舍正常，另有 ' + s.noData.length
-        + ' 个还没有收到数据，没有要优先处理的宿舍。';
-  }
-
-  const top = list[0];
-  const parts = ['优先关注 ' + top.nodeId + '：' + basisFor(top, list)
-    + handlingNote(nodes[top.nodeId])];
-
-  /* 重点自己不再重复一遍 */
-  const shown = {};
-  shown[top.nodeId] = true;
-
-  list.slice(1).forEach(function (o) {
-    shown[o.nodeId] = true;
-    parts.push(o.nodeId + ' ' + lostTo(o, top) + handlingNote(nodes[o.nodeId]));
-  });
-
-  /* 剩下的（正常 / 没收到数据）按 nodes 的键顺序说。到这一步还没被说过的，
-     只可能是这两类 —— 异常的那些在上面那一拨里已经全说完了。 */
-  s.ids.forEach(function (nodeId) {
-    if (shown[nodeId]) return;
-    const node = nodes[nodeId] || {};
-    parts.push(nodeId + (node.latest ? ' 当前' + node.latest.status : ' 还没有收到数据'));
-  });
-
-  return parts.join('；') + '。';
-}
-
-/* ---------- Step 8-3：B4 当前重点一行 ---------- */
-
-/* 这一步是**信息分工**，不是又加一块内容：页面上原来有三处在说「谁是重点」
-   （7-1 那条栏、B1 总览、B2 依据），它们说的是同一件事，只是详略不同。
-   8-3 把它们并成看板顶部的一行，剩下的细节分给另外三个出口：
-
-     看板顶部 这一行        —— 谁、在不在处理、往哪走（扫一眼就够）
-     3D 场景               —— 哪个空间、风扇转没转、窗开没开（不堆文字）
-     语音提醒              —— 把同一件事念成一句人话
-     report.html           —— 开始 / 处理 / 恢复 / 持续了多久，完整的账
-
-   分工的判据是「这个出口**擅长**什么」：一行字只适合扫，不适合交代来龙去脉；
-   3D 天生适合表达空间和动作，不适合放文字；声音只能一句一句听，不能回头翻；
-   报告可以慢，所以该它承担完整记录。
-
-   下面两个函数都从 pickPriority 出发 —— 「谁是重点」仍然只有一份实现。
-   这一点必须守住：这一行和语音念的是同一件事，两处对不上的话，
-   看的人第一反应是「到底哪个算数」。 */
-
-/**
- * 「温度在往哪走」—— 拿这个节点最近两条记录比一比。
- *
- * 只比温度、只看最近两条，是这一步定下的口径。不做滑动平均、不看更早的趋势：
- * 这里要回答的是「刚发生的变化」，而不是「这一段的走势」—— 后者是趋势图的事。
- *
- * 三种结果：'上升' / '下降' / '持平'。
- *
- * 只有一条记录时返回**空串**，不是 '持平'。这两件事不一样：一条数据说不出
- * 「在往哪走」，说成「持平」就是把「不知道」说成了「没变」—— 和 B1 那边
- * 「还没有收到数据 ≠ 正常」是同一条原则。
- *
- * 比的是**精确值**，不设容差。设一个「小于 0.5 ℃ 算没变」的阈值需要先定下来
- * 多少算没变，那是另一套规则，这一步不定；而且真实数据里 24.9 → 25.0
- * 确实就是在上升。
- *
- * @param {{history: Array<{temperature: number}>}} node
+ * @param {Array<{temperature: number}>} history 快照里带的那段历史
  * @returns {'上升'|'下降'|'持平'|''}
  */
-export function tempTrend(node) {
-  const history = node && node.history;
+export function trendOf(history) {
   if (!Array.isArray(history) || history.length < 2) return '';
 
   const now = history[history.length - 1];
   const before = history[history.length - 2];
   if (!now || !before) return '';
 
-  /* Number.isFinite 顺手把 NaN / Infinity / 字符串 / undefined 一起挡掉。
-     报文在 handleMessage 里已经校验过一次，这里是纯函数的自保。 */
+  /* Number.isFinite 顺手把 NaN / Infinity / 字符串 / undefined 一起挡掉 */
   const a = before.temperature;
   const b = now.temperature;
   if (!Number.isFinite(a) || !Number.isFinite(b)) return '';
@@ -726,111 +319,233 @@ export function tempTrend(node) {
 }
 
 /**
- * 趋势那一段的说法。
+ * 趋势那半句话。「温度正在持平」不成话，所以持平单独一句。
  *
- * 「温度正在持平」不成话，所以持平单独一句。**不写成「温度不变」** ——
- * 同一个意思在两个出口（这一行和语音）里各写各的，迟早会不一样。
+ * **不写成「温度不变」**：同一个意思在两个出口（顶部那一行和语音）里各写
+ * 各的，迟早会不一样。
  */
-function trendText(trend) {
+export function trendText(trend) {
   if (!trend) return '';
   if (trend === '持平') return '温度持平';
   return '温度正在' + trend;
 }
 
-/**
- * 平静时候那一行（没有重点可言）。
- *
- * 「还没有收到数据」和「都正常」必须分开说 —— 页面刚打开那几秒，
- * 那三个宿舍是**不知道**，不是正常。这一条和 B1 总览是同一个口径。
- *
- * 有节点还没收到数据时不说「都正常」，而是把两个数都报出来 ——
- * 「当前 3 个宿舍都正常」在只收到 2 条消息时是句假话。
- */
-function calmLine(nodes) {
-  const s = survey(nodes);
-  if (s.withData.length === 0) return '还没有收到任何节点的数据';
-  if (s.noData.length === 0) return '当前 ' + s.ids.length + ' 个宿舍都正常';
-  return '当前 ' + s.normal.length + ' 个宿舍正常，另有 ' + s.noData.length
-    + ' 个还没有收到数据';
+/** 数一数现在有几个宿舍正常、几个还没收到数据。 */
+function survey(snapshot) {
+  const nodes = nodeList(snapshot);
+  const withData = [];
+  const noData = [];
+  const normal = [];
+
+  nodes.forEach(function (n) {
+    if (!n || n.status == null) {
+      noData.push(n);
+      return;
+    }
+    withData.push(n);
+    if (n.status === '正常') normal.push(n);
+  });
+
+  return { nodes: nodes, withData: withData, noData: noData, normal: normal };
 }
 
 /**
- * B4 那一行：谁、在不在处理、温度往哪走。
+ * 平静时候那一句（core 没点名、也没有重点可言）。
  *
- *   「dorm-b｜处理中｜温度正在下降」
+ * 「还没有收到数据」和「都正常」必须分开说 —— 快照刚到、core 还没收到任何
+ * 报文的那几秒，那三个宿舍是**不知道**，不是正常。
  *
- * 三段用 ｜ 分开，**没有内容的那段整个不出现**（不写空串、不留两个连着的 ｜）：
- *   - 没按过按钮 -> 没有「处理中」这段
- *   - 只收到一条数据 -> 没有趋势这段（说不出「往哪走」，见 tempTrend）
- * 全都拼不出来时只剩宿舍名，那也是实话 —— 数据里没有的东西不编。
- *
- * 【这一行里没有状态（偏热/偏湿）】这是有意的，也是分工的结果：
- * 状态由**卡片上那个徽章**（颜色 + 图标 + 文字三重编码）、3D 场景（地板颜色、
- * 窗户开合）、语音那句一起承担。一行字里塞四样东西，就又变回 8-1 那种
- * 「两句话交代所有事」，那正是这一步要拆掉的。
- * 想加回来的话，就在 parts 里插一个 top.status —— 改动只有一行。
- *
- * 【「处理中」只写这三个字，不写「风扇已开启」】开了什么是**空间动作**，
- * 3D 里风扇转着比一行字直观得多 —— 那正是 3D 该承担的部分。
- *
- * @param {Object} nodes
- * @returns {string} 一个宿舍名；平静时是一句没有重点的话
+ * 只有「每个收到的宿舍都是正常、而且一个都没落下」时才说「都正常」。
+ * 有宿舍是异常却没人被点名（那些节点离线了，core 的优先排序不排离线的），
+ * 这里如实把个数报出来 —— 说成「都正常」是句假话，而看的人看不出来。
  */
-export function buildFocus(nodes) {
-  const pick = pickPriority(nodes);
-  if (!pick) return calmLine(nodes);
+export function calmLine(snapshot) {
+  const s = survey(snapshot);
+  if (s.nodes.length === 0) return '还没有收到 core 的快照';
+  if (s.withData.length === 0) return '还没有收到任何节点的数据';
+  if (s.noData.length === 0 && s.normal.length === s.withData.length) {
+    return '当前 ' + s.nodes.length + ' 个宿舍都正常';
+  }
 
-  const node = nodes[pick.nodeId] || {};
-  const parts = [pick.nodeId];
+  const parts = ['当前 ' + s.normal.length + ' 个宿舍正常'];
+  const abnormal = s.withData.length - s.normal.length;
+  if (abnormal > 0) parts.push('另有 ' + abnormal + ' 个异常（离线的节点不参与优先排序）');
+  if (s.noData.length > 0) parts.push('另有 ' + s.noData.length + ' 个还没有收到数据');
+  return parts.join('，');
+}
 
-  if (node.handling && node.handling !== '无') parts.push(String(node.handling));
+/**
+ * 顶部那条横幅要显示的东西。整块由快照决定，页面一个字都不拼。
+ *
+ *   {mode, nodeId, status, tag, line, reason, cross}
+ *
+ *   mode    'focus' | 'priority' | 'calm'
+ *   nodeId  横幅说的那个宿舍（calm 时是 null）
+ *   status  它此刻的状态（可能为 null：还没收到数据）
+ *   tag     左上角那四个字
+ *   line    那一行字（三段用 ｜ 分开；calm 时是一句平静话）
+ *   reason  **理由**，永远来自快照里 core 写的字
+ *   cross   跨端补充说明（只有被点名时才有内容）
+ *
+ * 【为什么有两个来源】core 的快照里有两个「谁该被看」的字段：
+ *   priority —— core 按数据排出来的重点（时长 > 条数 > 严重度 > 名字）
+ *   focus    —— 有人从移动端点名看这个宿舍（E3 的跨端联动）
+ * 被点名时横幅说的是**点名那个**（那是人的意图，就近），同时**把 core 的理由
+ * 一并写出来**（不然「数据说该看 dorm-b」这件事就没人说了）。
+ * 两个都没有就是一句平静话 —— 这里的每一串字都指向快照里的某一个字段，
+ * 没有任何一个宿舍名是写死的。
+ *
+ * @param {Object|null} snapshot
+ * @returns {{mode: string, nodeId: string|null, status: string|null,
+ *            tag: string, line: string, reason: string, cross: string}}
+ */
+export function focusBanner(snapshot) {
+  const focus = snapshot && isObject(snapshot.focus) ? snapshot.focus : null;
+  const top = snapshot && isObject(snapshot.priority) ? snapshot.priority : null;
 
-  const trend = trendText(tempTrend(node));
+  const focusedId = focus && typeof focus.nodeId === 'string' ? focus.nodeId : '';
+  const topId = top && typeof top.nodeId === 'string' ? top.nodeId : '';
+  const subject = focusedId || topId;
+
+  if (!subject) {
+    return {
+      mode: 'calm', nodeId: null, status: null, tag: '',
+      line: calmLine(snapshot), reason: '', cross: '',
+    };
+  }
+
+  const node = nodeOf(snapshot, subject);
+  const parts = [subject];
+
+  const handling = handlingOf(snapshot, subject);
+  if (handling.label && handling.label !== '无') parts.push(handling.label);
+
+  const trend = trendText(trendOf(node && node.history));
   if (trend) parts.push(trend);
 
-  return parts.join('｜');
+  const topReason = top && typeof top.reason === 'string' ? top.reason.trim() : '';
+
+  /* 理由：说的是重点那个宿舍时，理由就是 core 自己写的那句；
+     被点名而它又不是重点时，理由是「谁点的名」。两处都不会是空的
+     （core 那边排出来的第一名一定带 reason）。 */
+  let reason = topReason;
+  if (focusedId && focusedId !== topId) {
+    const by = typeof focus.by === 'string' && focus.by ? focus.by : '别的端';
+    reason = '跨端焦点：' + by + ' 发来的 focus 指令';
+  }
+
+  /* 跨端补充。被点名时才有 —— 没点名的话，「数据选出的重点是 X」这件事
+     已经写在 reason 里了，再写一遍就是同一句话说两遍。 */
+  let cross = '';
+  if (focusedId) {
+    if (!topId) {
+      cross = '此刻没有需要关注的异常节点';
+    } else if (topId === focusedId) {
+      cross = '数据选出的重点也是它';
+    } else {
+      cross = '数据选出的重点是 ' + topId + '：' + topReason;
+    }
+  }
+
+  return {
+    mode: focusedId ? 'focus' : 'priority',
+    nodeId: subject,
+    status: node && node.status != null ? node.status : null,
+    tag: focusedId ? '跨端焦点' : '当前重点',
+    line: parts.join('｜'),
+    reason: reason,
+    cross: cross,
+  };
 }
 
 /**
  * 语音念的那一句。**只有一句** —— 这是这个出口的约束，不是偷懒：
- * 声音是线性的，说过就过去了，没人能回头翻。念三段话，听的人只记得住最后一句。
+ * 声音是线性的，说过就过去了，念三段话听的人只记得住最后一句。
  *
- *   「dorm-b 偏热已持续 20 分钟（风扇已开启，处理中），温度正在下降。」
+ *   「dorm-b 偏热已持续 20 分钟（已按下开始处理，处理中），温度正在下降。」
  *
- * 和 buildFocus 说的是同一个人（都走 pickPriority），但**不是同一串字**：
- * ｜ 是给人扫的，念出来是「竖线」，所以这一句得自成一句人话。
- * 两处各拼一份的风险是「重点换人了这边还念旧的」—— 那个风险由
- * 「两个函数都必须从 pickPriority 出发」这条测试挡住。
+ * 和 focusBanner 说的是**同一个宿舍**（都按「被点名 > 是重点」这一条挑），
+ * 但**不是同一串字**：｜ 是给人扫的，念出来是「竖线」，所以这一句得自成
+ * 一句人话。两处各拼一份的风险是「横幅换人了这边还念旧的」—— 那个风险由
+ * 「两个出口必须指向同一个人」那条测试挡住。
  *
- * 处理状态复用 handlingNote()，和 7-1 那条栏、B2 依据是同一份说法 ——
- * 「风扇已开启，处理中」这几个字全项目只有那一处拼得出来。
+ * 时长直接用 core 算好的 `durationText`，这边不碰秒数（格式化只留一份）。
  *
- * @param {Object} nodes
+ * @param {Object|null} snapshot
  * @returns {string} 以句号收尾的一句话
  */
-export function buildAlert(nodes) {
-  const pick = pickPriority(nodes);
-  if (!pick) return calmLine(nodes) + '。';
+export function alertLine(snapshot) {
+  const focus = snapshot && isObject(snapshot.focus) ? snapshot.focus : null;
+  const top = snapshot && isObject(snapshot.priority) ? snapshot.priority : null;
+  const focusedId = focus && typeof focus.nodeId === 'string' ? focus.nodeId : '';
+  const topId = top && typeof top.nodeId === 'string' ? top.nodeId : '';
+  const subject = focusedId || topId;
 
-  const list = ranked(nodes);
-  /* **到不了**：pickPriority 的实现就是「ranked() 空了才返回 null」，
-     所以上面 pick 非空时这里必非空。留着是道保险 —— 万一以后 pickPriority
-     改成别的口径（比如自己过滤一遍），这里是 `list[0].status` 会直接炸掉
-     的地方，一句平静话比一个 TypeError 好收拾。
-     换句话说：这是一句**走不到的代码**，变异测试杀不掉它，因为删掉它
-     行为一个字都不变。这一点写在 README 的变异测试表里。 */
-  if (list.length === 0) return calmLine(nodes) + '。';
+  if (!subject) return calmLine(snapshot) + '。';
 
-  const top = list[0];
-  const node = nodes[pick.nodeId] || {};
+  const node = nodeOf(snapshot, subject);
+  const status = node && node.status != null ? node.status : '还没有收到数据';
 
-  let text = pick.nodeId + ' ' + top.status + '已持续 ' + fmtDuration(top.duration)
-    + handlingNote(node);
+  let text = subject + ' ' + status;
 
-  const trend = trendText(tempTrend(node));
+  /* 只有真的在异常里才有「持续了多久」这回事。正常节点的 durationText 是
+     null（core 那侧解释过：说成「不到 1 分钟」是在说一件没发生过的事）。 */
+  if (node && typeof node.durationText === 'string' && node.durationText) {
+    text += '已持续 ' + node.durationText;
+  }
+
+  const handling = handlingOf(snapshot, subject);
+  if (handling.label === '处理中') text += '（已按下开始处理，处理中）';
+  else if (handling.label === '待处理') text += '（已开案，还没人处理）';
+
+  const trend = trendText(trendOf(node && node.history));
   if (trend) text += '，' + trend;
 
   return text + '。';
+}
+
+/**
+ * 消息日志里那一行摘要。看板每隔一会儿就会收到一条快照，把整份报文打到
+ * 日志里刷屏没有意义 —— 这一行说的是「这一帧里有什么」。
+ *
+ * 数出来的数字全部来自快照自己带的 `summary` / `total` / `counters`，
+ * 没有一个是这边数出来的：「一共发生过多少条事件」和「面板上摆了几条」
+ * 是两个数，前者只能问 core。
+ *
+ * @param {Object|null} snapshot
+ * @returns {string}
+ */
+export function snapshotSummary(snapshot) {
+  if (!snapshot) return '还没有收到快照';
+
+  const nodes = nodeList(snapshot);
+  const abnormal = nodes.filter(function (n) {
+    return n && n.status != null && n.status !== '正常';
+  }).length;
+
+  const block = eventBlock(snapshot);
+  const total = Number.isFinite(block.summary.total) ? block.summary.total : 0;
+  const open = (Number.isFinite(block.summary.OPEN) ? block.summary.OPEN : 0)
+    + (Number.isFinite(block.summary.HANDLING) ? block.summary.HANDLING : 0);
+  const top = isObject(snapshot.priority) && typeof snapshot.priority.nodeId === 'string'
+    ? snapshot.priority.nodeId : '';
+  const focus = isObject(snapshot.focus) && typeof snapshot.focus.nodeId === 'string'
+    ? snapshot.focus.nodeId : '';
+  const rejects = isObject(snapshot.rejects) && Number.isFinite(snapshot.rejects.total)
+    ? snapshot.rejects.total : 0;
+  const commands = isObject(snapshot.counters) && Number.isFinite(snapshot.counters.commands)
+    ? snapshot.counters.commands : 0;
+
+  const parts = [
+    '快照 v' + snapshot.v,
+    '宿舍 ' + nodes.length + '（异常 ' + abnormal + '）',
+    '重点 ' + (top || '无'),
+    '事件 ' + total + '（未结案 ' + open + '）',
+    '拒绝 ' + rejects,
+    '指令 ' + commands,
+  ];
+  if (focus) parts.push('焦点 ' + focus);
+  return parts.join(' · ');
 }
 
 /* ---------- Step 9-3 的进阶项：看板读 report/ml_result.json ---------- */
@@ -869,7 +584,7 @@ function rowCount(value) {
 }
 
 /**
- * 「ML 辅助判断」这一段要显示的三样东西：标题旁的条数、结论那句、来源说明。
+ * 「Rule-ML」那一段要显示的三样东西：标题旁的条数、结论那句、来源说明。
  *
  *   { count: '规则说正常、ML 说不同：2 条',
  *     text:  '……',                       // 结论那一句
@@ -934,16 +649,16 @@ export function mlFetchFailed(reason) {
 }
 
 /**
- * 按下「开启风扇 / 通风」之后，按钮旁边那行说明该说什么。
+ * 按下「开始处理」之后，按钮旁边那行说明该说什么。
  *
- * Step D3 收尾起，这个按钮不只是改页面上的状态了 —— 它还会往
- * `dormmate/v1/cmd` 发一条 handle 给 core。这一行回答的就是「发出去了没有」，
- * 因为**发不出去的时候页面上看不出任何区别**：本地那几个字段照旧改、卡片上
- * 照样写「处理中｜风扇已开启」，而 core 那边的事件一步都没动。不写这一行，
- * 「按了没反应」这件事只有去 core 的终端里才看得出来。
+ * 【E3-2 起这一行只回答一件事：指令发出去了没有】以前它还要说「这次处理
+ * 只记在页面上」—— 因为那时候页面自己也在记账。现在页面**什么都不记**：
+ * 按下去只是往 `dormmate/v1/cmd` 发一条 handle，卡片上那行「处理中」要等
+ * core 把新快照发回来才出现。所以发不出去时页面上**一个字都不会变**，
+ * 这一行是唯一说得出话的地方。
  *
- * 发出去的那一句特意点明「好没好由后面收到的报文判」：按一下就把事件判成
- * 已恢复是红线，这句话写在最显眼的地方，看的人不必去翻代码。
+ * 发出去的那一句特意点明「好没好由 core 后续收到的报文判」：按一下就把事件
+ * 判成已恢复是红线，这句话写在最显眼的地方，看的人不必去翻代码。
  *
  * @param {boolean} ok
  * @param {string} [detail] 没发出去时的原因，原样贴出来，不翻译也不加工
@@ -951,11 +666,11 @@ export function mlFetchFailed(reason) {
  */
 export function cmdNote(ok, detail) {
   if (ok) {
-    return '已通知 core 开始处理这条事件 —— 好没好由后面收到的报文判，'
-      + '这一步不结案。';
+    return '已把 handle 指令发给 core —— 好没好由 core 后续收到的报文判，'
+      + '这一步不结案。页面上那行「处理中」要等 core 发回新快照才会出现。';
   }
   const why = typeof detail === 'string' && detail.trim()
     ? detail.trim() : '不知道什么原因';
-  return '这条指令没发出去（' + why + '）—— 这次处理只记在页面上，'
-    + 'core 那边的事件不会变。';
+  return '这条指令没发出去（' + why + '）—— 页面不会替 core 记这笔处理，'
+    + '所以这一次点击没有任何效果。';
 }
