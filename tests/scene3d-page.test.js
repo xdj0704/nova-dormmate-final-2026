@@ -72,7 +72,8 @@ check('★ 而且排在模块脚本之前（模块里才调得到 judgeStatus）
 check('★ mqtt.js 也是普通 script，同样排在模块脚本之前',
   /<script src="\.\.\/dashboard\/lib\/mqtt\.min\.js"><\/script>/.test(bare)
   && bare.indexOf('../dashboard/lib/mqtt.min.js') < bare.indexOf(MODULE_TAG), true);
-check('订阅的是 dormmate/+/env', /['"]dormmate\/\+\/env['"]/.test(pageSrc), true);
+check('订阅的是 dormmate/v1/nodes/+/telemetry',
+      /['"]dormmate\/v1\/nodes\/\+\/telemetry['"]/.test(pageSrc), true);
 check('Broker 地址带 9001 端口', /:9001/.test(pageSrc), true);
 
 /* 按钮从 HTML 里读出来，测的就是页面上真正有的那几个 ——
@@ -205,7 +206,8 @@ check('★ 连的地址由页面 hostname 拼出来（本机就是 ws://localhos
 check('还没握手成功时不订阅', client.subscribed, []);
 
 client.handlers.connect.forEach((fn) => fn());
-check('★ 连上后订阅 dormmate/+/env', client.subscribed, ['dormmate/+/env']);
+check('★ 连上后订阅 dormmate/v1/nodes/+/telemetry', client.subscribed,
+      ['dormmate/v1/nodes/+/telemetry']);
 check('连接状态文字里有地址（连错机器时一眼看得出来）',
   els['conn-text'].textContent.includes('9001'), true);
 check('连接状态切到「已连接」那档', els.conn.className, 'conn is-on');
@@ -234,20 +236,20 @@ console.log('\n=== C. 只画当前选中的那个节点 ===');
 /* 当前是 dorm-a。喂一条 dorm-b 的：数据要收下，画面一个字都不能动。 */
 const nS = scene.statuses.length;
 const nL = scene.labels.length;
-deliver('dormmate/dorm-b/env', mk('dorm-b', 31, 60));
+deliver('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60));
 check('★ 不是当前节点的消息：3D 一次都没被调', scene.statuses.length, nS);
 check('★ 覆盖层也一个字没动', scene.labels.length, nL);
 check('覆盖层上还是 dorm-a', lastLabel().includes('dorm-a'), true);
 
 /* 现在喂当前节点的 */
-deliver('dormmate/dorm-a/env', mk('dorm-a', 25, 80));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 80));
 check('★ 当前节点的消息：画面跟着变', lastStatus(), '偏湿');
 check('★ 覆盖层写的是当前宿舍名 + 状态',
   lastLabel().includes('dorm-a') && lastLabel().includes('偏湿'), true);
 
 /* 反方向再确认一遍，排除「第一次刚好对了」 */
 const nS2 = scene.statuses.length;
-deliver('dormmate/dorm-c/env', mk('dorm-c', 16, 60));
+deliver('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 16, 60));
 check('★ dorm-c 的消息同样不改画面', scene.statuses.length, nS2);
 check('画面还是 dorm-a 的偏湿', lastStatus(), '偏湿');
 
@@ -264,16 +266,16 @@ check('dorm-a 的按钮不再高亮', nodeButtons[0].classList.contains('is-acti
 
 /* 切过去之后，dorm-c 的消息才开始改画面 */
 const nS3 = scene.statuses.length;
-deliver('dormmate/dorm-a/env', mk('dorm-a', 31, 60));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60));
 check('★ 切到 dorm-c 之后，dorm-a 的消息就不该再改画面了',
   scene.statuses.length, nS3);
-deliver('dormmate/dorm-c/env', mk('dorm-c', 31, 60));
+deliver('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 31, 60));
 check('★ 而 dorm-c 的消息现在能改', lastStatus(), '偏热');
 
 /* dorm-b 在 C 段收到过一条 31/60（偏热），D 段这里再喂一条 16/60（偏冷），
    当前是 dorm-c，所以这两条都不该动画面。 */
 const nS3b = scene.statuses.length;
-deliver('dormmate/dorm-b/env', mk('dorm-b', 16, 60));
+deliver('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 16, 60));
 check('★ 还没切过去的时候，dorm-b 的新消息仍然不动画面',
   scene.statuses.length, nS3b);
 clickNode('dorm-b');
@@ -289,20 +291,20 @@ check('★ 切回 dorm-a，状态又回来了（不是只有第一次切才画�
 console.log('\n=== E. status 复核 ===');
 
 warns.length = 0;
-deliver('dormmate/dorm-a/env', mk('dorm-a', 31, 80, '偏湿'));   // 约定里点名的坑
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 80, '偏湿'));   // 约定里点名的坑
 check('★ 报文里写「偏湿」，规则算出「偏热」—— 交给 3D 的是「偏热」',
   lastStatus(), '偏热');
 check('★ 覆盖层上写的也是「偏热」', lastLabel().includes('偏热'), true);
 check('不一致时控制台警告了', warns.some((w) => w.includes('status 不一致')), true);
 
 warns.length = 0;
-deliver('dormmate/dorm-a/env', mk('dorm-a', 16, 60, '正常'));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, '正常'));
 check('说正常、规则算偏冷 -> 交给 3D 的是偏冷', lastStatus(), '偏冷');
 check('警告里两个值都写了',
   warns.some((w) => w.includes('正常') && w.includes('偏冷')), true);
 
 warns.length = 0;
-deliver('dormmate/dorm-a/env', mk('dorm-a', 25, 60));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60));
 check('status 一致时不警告', warns.length, 0);
 check('正常就是正常', lastStatus(), '正常');
 
@@ -320,15 +322,15 @@ console.log('\n=== F. 脏数据 ===');
 
 const nS4 = scene.statuses.length;
 warns.length = 0;
-deliver('dormmate/dorm-a/env', '这不是 JSON');
-deliver('dormmate/dorm-a/env', JSON.stringify({ nodeId: 'dorm-a', humidity: 60 }));
-deliver('dormmate/dorm-a/env', mk('dorm-a', '31', 60));
-deliver('dormmate/dorm-z/env', mk('dorm-z', 31, 60));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', '这不是 JSON');
+deliver('dormmate/v1/nodes/dorm-a/telemetry', JSON.stringify({ nodeId: 'dorm-a', humidity: 60 }));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', '31', 60));
+deliver('dormmate/v1/nodes/dorm-z/telemetry', mk('dorm-z', 31, 60));
 check('★ 四条脏数据一条都没改到画面', scene.statuses.length, nS4);
 check('画面还是那条干净数据的样子', lastStatus(), '偏湿');
 check('每条脏数据都报了原因', warns.length, 4);
 
-deliver('dormmate/dorm-a/env', mk('dorm-a', 31, 60));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60));
 check('★ 脏数据之后，正常报文照样能进（没被卡死）', lastStatus(), '偏热');
 
 /* ---------- G. 手动预览按钮没被 MQTT 挤掉 ---------- */
@@ -343,7 +345,7 @@ check('★ 覆盖层写明这是手动预览，不冒充真实数据',
 check('状态按钮的高亮跟着手动点的那个走',
   statusButtons[1].classList.contains('is-active'), true);
 
-deliver('dormmate/dorm-a/env', mk('dorm-a', 25, 80));
+deliver('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 80));
 check('★ 来一条真数据就把手动预览顶掉', lastStatus(), '偏湿');
 check('★ 「手动预览」这几个字也跟着没了', lastLabel().includes('手动预览'), false);
 check('高亮回到偏湿那个按钮上',

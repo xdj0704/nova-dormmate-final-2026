@@ -433,7 +433,7 @@ check('重复点同一个节点不出错', current(), 'dorm-b');
 console.log('\n=== D. 往 dorm-a 再喂一条，b/c 不受影响 ===');
 const beforeB = JSON.stringify(nodes['dorm-b'].history);
 const beforeC = JSON.stringify(nodes['dorm-c'].history);
-const okD = handleMessage('dormmate/dorm-a/env', mk('dorm-a', 17, 50));
+const okD = handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 17, 50));
 check('收下了', okD, true);
 check('dorm-a 变 4 条', nodes['dorm-a'].history.length, 4);
 check('dorm-a 最新一条是 17℃', nodes['dorm-a'].latest.temperature, 17);
@@ -444,20 +444,20 @@ check('dorm-c 一条没动', JSON.stringify(nodes['dorm-c'].history) === beforeC
 /* ============ E. 脏数据必须被拦下 ============ */
 console.log('\n=== E. 校验：脏数据 ===');
 const badCases = [
-  ['不是 JSON', 'dormmate/dorm-a/env', '{不是 json', 'error'],
-  ['空字符串', 'dormmate/dorm-a/env', '', 'error'],
-  ['顶层是 null', 'dormmate/dorm-a/env', 'null', 'error'],
-  ['顶层是数字', 'dormmate/dorm-a/env', '123', 'error'],
-  ['顶层是数组', 'dormmate/dorm-a/env', '[1,2,3]', 'error'],
-  ['缺 nodeId', 'dormmate/dorm-a/env', '{"temperature":25,"humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['缺 temperature', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['缺 humidity', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","temperature":25,"status":"正常","time":"t"}', 'error'],
-  ['缺 status', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","temperature":25,"humidity":60,"time":"t"}', 'error'],
-  ['缺 time', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","temperature":25,"humidity":60,"status":"正常"}', 'error'],
-  ['temperature 是字符串', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","temperature":"25","humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['humidity 是 null', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","temperature":25,"humidity":null,"status":"正常","time":"t"}', 'error'],
-  ['temperature 是 NaN', 'dormmate/dorm-a/env', '{"nodeId":"dorm-a","temperature":null,"humidity":60,"status":"正常","time":"t"}', 'error'],
-  ['未知节点', 'dormmate/dorm-x/env', mk('dorm-x', 25, 60), 'error'],
+  ['不是 JSON', 'dormmate/v1/nodes/dorm-a/telemetry', '{不是 json', 'error'],
+  ['空字符串', 'dormmate/v1/nodes/dorm-a/telemetry', '', 'error'],
+  ['顶层是 null', 'dormmate/v1/nodes/dorm-a/telemetry', 'null', 'error'],
+  ['顶层是数字', 'dormmate/v1/nodes/dorm-a/telemetry', '123', 'error'],
+  ['顶层是数组', 'dormmate/v1/nodes/dorm-a/telemetry', '[1,2,3]', 'error'],
+  ['缺 nodeId', 'dormmate/v1/nodes/dorm-a/telemetry', '{"temperature":25,"humidity":60,"status":"正常","time":"t"}', 'error'],
+  ['缺 temperature', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","humidity":60,"status":"正常","time":"t"}', 'error'],
+  ['缺 humidity', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"status":"正常","time":"t"}', 'error'],
+  ['缺 status', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"humidity":60,"time":"t"}', 'error'],
+  ['缺 time', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"humidity":60,"status":"正常"}', 'error'],
+  ['temperature 是字符串', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":"25","humidity":60,"status":"正常","time":"t"}', 'error'],
+  ['humidity 是 null', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":25,"humidity":null,"status":"正常","time":"t"}', 'error'],
+  ['temperature 是 NaN', 'dormmate/v1/nodes/dorm-a/telemetry', '{"nodeId":"dorm-a","temperature":null,"humidity":60,"status":"正常","time":"t"}', 'error'],
+  ['未知节点', 'dormmate/v1/nodes/dorm-x/telemetry', mk('dorm-x', 25, 60), 'error'],
 ];
 const beforeAll = JSON.stringify([nodes['dorm-a'].history, nodes['dorm-b'].history, nodes['dorm-c'].history]);
 badCases.forEach(([label, topic, body, wantLevel]) => {
@@ -472,24 +472,24 @@ check('一堆脏数据进来，三个节点的历史一条没变',
 /* ============ F. status 复核 ============ */
 console.log('\n=== F. status 复核（以规则为准）===');
 const nF = messages.length;
-const okF = handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 80, '偏湿'));   // 约定里点名的坑
+const okF = handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 80, '偏湿'));   // 约定里点名的坑
 check('说偏湿、规则算偏热 -> 仍然收下', okF, true);
 check('一条报文只记一行日志', messages.length - nF, 1);
 check('日志级别是 warn', top().level, 'warn');
 check('日志点明了两个值', /收到「偏湿」.*规则算出「偏热」/.test(top().text), true);
 check('存下来的是规则结果「偏热」', nodes['dorm-a'].latest.status, '偏热');
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 16, 60, '正常'));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 16, 60, '正常'));
 check('说正常、规则算偏冷 -> warn', top().level, 'warn');
 check('存下来的是偏冷', nodes['dorm-b'].latest.status, '偏冷');
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, '正常'));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, '正常'));
 check('status 一致时不报警', top().level, 'ok');
 
 /* ============ G. topic 与 nodeId 不一致 ============ */
 console.log('\n=== G. topic 和报文里的节点对不上 ===');
 const nG = messages.length;
-const okG = handleMessage('dormmate/dorm-a/env', mk('dorm-c', 25, 80));
+const okG = handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-c', 25, 80));
 check('仍然收下（节点以报文为准）', okG, true);
 check('仍然只记一行日志', messages.length - nG, 1);
 check('日志级别是 warn', top().level, 'warn');
@@ -498,16 +498,20 @@ check('写进了报文说的 dorm-c', nodes['dorm-c'].latest.temperature, 25);
 check('没写进 topic 说的 dorm-a', nodes['dorm-a'].latest.temperature, 31);
 
 console.log('\n=== H. topic 形状不对时不误报 ===');
-check('topicNode 正常', topicNode('dormmate/dorm-a/env'), 'dorm-a');
+check('topicNode 正常', topicNode('dormmate/v1/nodes/dorm-a/telemetry'), 'dorm-a');
 check('topicNode 形状不对返回空串', topicNode('随便什么'), '');
 check('topicNode 对 null 不炸', topicNode(null), '');
+// 迁移到 v1 之前的旧形状必须不再认（认了就等于两个 topic 都能进门）
+check('旧的三段式 topic 不再认', topicNode('dormmate/dorm-a/env'), '');
+check('少了 v1 段不认', topicNode('dormmate/nodes/dorm-a/telemetry'), '');
+check('尾段不是 telemetry 不认', topicNode('dormmate/v1/nodes/dorm-a/env'), '');
 handleMessage('随便什么', mk('dorm-a', 25, 60));
 check('形状不对的 topic 不产生额外 warn', top().level, 'ok');
 
 /* ============ I. 历史上限 ============ */
 console.log('\n=== I. 历史上限 ===');
 clearAll();
-for (let i = 0; i < 60; i += 1) handleMessage('dormmate/dorm-a/env', mk('dorm-a', 20 + (i % 5), 50));
+for (let i = 0; i < 60; i += 1) handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 20 + (i % 5), 50));
 check('dorm-a 历史上限 50 条', nodes['dorm-a'].history.length, 50);
 check('留下的是最新的那批（最后一条 20+59%5=24）', nodes['dorm-a'].latest.temperature, 20 + (59 % 5));
 check('dorm-b 依旧为空', nodes['dorm-b'].history.length, 0);
@@ -530,13 +534,14 @@ check('刚打开时状态是「连接中…」', els['conn-text'].textContent, '
 
 /* 模拟 Broker 握手成功 */
 mc.handlers.connect.forEach((fn) => fn());
-check('连上后订阅 dormmate/+/env', mc.subscribed, ['dormmate/+/env']);
+check('连上后订阅 dormmate/v1/nodes/+/telemetry', mc.subscribed,
+  ['dormmate/v1/nodes/+/telemetry']);
 check('状态变成「已连接」', els['conn-text'].textContent, '已连接');
 check('指示灯切到绿色那档', els.conn.className, 'conn conn--on');
 
 /* 真投一条 MQTT 消息进来 —— 这一步的核心：消息要一路走到 handleMessage */
 clearAll();
-mc.handlers.message.forEach((fn) => fn('dormmate/dorm-b/env', JSON.stringify({
+mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-b/telemetry', JSON.stringify({
   nodeId: 'dorm-b', temperature: 31, humidity: 60, status: '偏热', time: '2026-09-22 20:30:00',
 })));
 check('MQTT 消息落到了 dorm-b', nodes['dorm-b'].history.length, 1);
@@ -546,7 +551,7 @@ check('dorm-c 没被牵连', nodes['dorm-c'].history.length, 0);
 check('日志级别 ok', top().level, 'ok');
 
 /* 走 MQTT 进来的脏数据，被同一条链路拦下 */
-mc.handlers.message.forEach((fn) => fn('dormmate/dorm-b/env', '{坏掉的 json'));
+mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-b/telemetry', '{坏掉的 json'));
 check('MQTT 来的脏 JSON 被拦下', top().level, 'error');
 check('拦下后没写进历史', nodes['dorm-b'].history.length, 1);
 
@@ -556,19 +561,19 @@ check('拦下后没写进历史', nodes['dorm-b'].history.length, 1);
 const realLog = console.log;
 const logged = [];
 console.log = (...args) => { logged.push(args); };
-mc.handlers.message.forEach((fn) => fn('dormmate/dorm-c/env', JSON.stringify({
+mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-c/telemetry', JSON.stringify({
   nodeId: 'dorm-c', temperature: 25, humidity: 80, status: '偏湿', time: '2026-09-22 20:30:00',
 })));
 console.log = realLog;
 
 check('每条原始报文打一行 Console', logged.length, 1);
-check('打印的是 topic', logged[0][1], 'dormmate/dorm-c/env');
+check('打印的是 topic', logged[0][1], 'dormmate/v1/nodes/dorm-c/telemetry');
 check('打印的是原始报文原文，不是解析后的对象',
   logged[0][2], '{"nodeId":"dorm-c","temperature":25,"humidity":80,"status":"偏湿","time":"2026-09-22 20:30:00"}');
 
 /* 被拦下的报文更要打印 —— 排错时最需要的就是这一条 */
 console.log = (...args) => { logged.push(args); };
-mc.handlers.message.forEach((fn) => fn('dormmate/dorm-c/env', '{又一条坏 json'));
+mc.handlers.message.forEach((fn) => fn('dormmate/v1/nodes/dorm-c/telemetry', '{又一条坏 json'));
 console.log = realLog;
 check('被拦下的报文同样打印了', logged.length, 2);
 check('打印内容就是那段坏文本', logged[1][2], '{又一条坏 json');
@@ -594,7 +599,7 @@ check('重连后状态是「连接中…」', els['conn-text'].textContent, '连
 connect();
 check('已经连着时再点「连接」不会叠第二根', mqttStub.clients.length, 2);
 mc2.handlers.connect.forEach((fn) => fn());
-check('第二根也订阅同样的 topic', mc2.subscribed, ['dormmate/+/env']);
+check('第二根也订阅同样的 topic', mc2.subscribed, ['dormmate/v1/nodes/+/telemetry']);
 check('第二根连上后状态是「已连接」', els['conn-text'].textContent, '已连接');
 
 mc2.handlers.reconnect.forEach((fn) => fn());
@@ -676,7 +681,7 @@ check('清空后场景退回「正常」', lastStatus(), '正常');
    数据要收下，画面一个字都不能动。 */
 const nStatus = scene.statuses.length;
 const nLabel = scene.labels.length;
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60));
 check('dorm-a 的数据收下了', nodes['dorm-a'].latest.status, '偏热');
 check('★ 不是当前节点的消息：3D 一次都没被调', scene.statuses.length, nStatus);
 check('★ 覆盖层也一个字没动（还写着 dorm-b）', scene.labels.length, nLabel);
@@ -697,20 +702,20 @@ check('★ 温湿度也不再抄进标签（那是卡片的信息）',
 
 /* 反方向再来一遍，确认不是「第一次刚好对了」 */
 const n2 = scene.statuses.length;
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80));
 check('★ 当前是 dorm-a，dorm-b 的消息同样不改画面',
   scene.statuses.length, n2);
 selectNode('dorm-b');
 check('★ 切到 dorm-b，画的是它自己的偏湿', lastStatus(), '偏湿');
 
 const n3 = scene.statuses.length;
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 16, 60));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 16, 60));
 check('★ 当前节点收到新消息，画面跟着变', lastStatus(), '偏冷');
 check('确实重画了（不是恰好在上一行就画好了）', scene.statuses.length > n3, true);
 
 /* --- status 复核的结果才交给 3D --- */
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, '正常'));   // 报文里故意写错
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, '正常'));   // 报文里故意写错
 check('报文里写「正常」，3D 上画的仍然是规则算出来的「偏热」', lastStatus(), '偏热');
 check('日志里警告了不一致', top().level, 'warn');
 
@@ -725,7 +730,7 @@ check('★ renderScene 是幂等的（重复调用画出同样的状态，不会
 /* --- 切到还没收到数据的节点 --- */
 
 clearAll();
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60));
 selectNode('dorm-c');
 check('★ 切到没收到数据的节点：退回「正常」的外观', lastStatus(), '正常');
 check('★ 覆盖层如实写「还没有收到数据」，不沿用上一个节点的偏冷',
@@ -737,12 +742,12 @@ check('★ 切回有数据的节点，状态又回来了（不是只有第一次
 /* --- 脏数据不污染画面 --- */
 
 clearAll();
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60));
 const n5 = scene.statuses.length;
 console.error = () => {};
-handleMessage('dormmate/dorm-a/env', '这不是 JSON');
-handleMessage('dormmate/dorm-a/env', JSON.stringify({ nodeId: 'dorm-a', humidity: 60 }));
-handleMessage('dormmate/dorm-a/env', mk('dorm-z', 31, 60));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', '这不是 JSON');
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', JSON.stringify({ nodeId: 'dorm-a', humidity: 60 }));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-z', 31, 60));
 console.error = realError;
 check('★ 三条脏数据一条都没改到画面', scene.statuses.length, n5);
 check('画面还是那条干净数据的「正常」', lastStatus(), '正常');
@@ -802,36 +807,36 @@ check('清空后三个节点的连续异常段都是空的',
   ids.map((id) => nodes[id].abnormalStart + ' / ' + nodes[id].abnormalCount),
   ['null / 0', 'null / 0', 'null / 0']);
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
 check('★ 第一条异常：起点是它自己，记 1 次',
   [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount],
   [T('20:00:00'), 1]);
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60, undefined, T('20:03:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, undefined, T('20:03:00')));
 check('★ 段接着走：起点不动，次数加一',
   [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [T('20:00:00'), 2]);
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:04:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:04:00')));
 check('别的节点各算各的段，互不影响',
   ids.map((id) => nodes[id].abnormalCount), [2, 1, 0]);
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:05:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:05:00')));
 check('★ 来一条正常数据：起点和次数一起清零',
   [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [null, 0]);
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:09:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:09:00')));
 check('★ 清零之后再异常：新的一段从这条开始（不沿用 20:00:00）',
   [nodes['dorm-a'].abnormalStart, nodes['dorm-a'].abnormalCount], [T('20:09:00'), 1]);
 
 /* 段里状态从偏热变成偏湿：算同一段。这里统计的是「连续异常了多久」，
    不是「连续偏热了多久」—— 所以起点不动、次数继续加。 */
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:06:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:06:00')));
 check('★ 段里从偏热变偏湿，仍是同一段：起点不动、次数继续加',
   [nodes['dorm-b'].abnormalStart, nodes['dorm-b'].abnormalCount], [T('20:04:00'), 2]);
 
 /* 报文谎称「正常」、规则算出「偏热」时，段不能被打断 ——
    用的是复核之后的状态，不是报文里那个字符串。 */
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, '正常', T('20:07:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, '正常', T('20:07:00')));
 check('★ 报文谎称「正常」但规则算出偏热：段没被打断（用的是复核后的状态）',
   [nodes['dorm-b'].abnormalStart, nodes['dorm-b'].abnormalCount], [T('20:04:00'), 3]);
 
@@ -913,7 +918,7 @@ check('★ 切到重点那个宿舍（dorm-b）之后环亮起来 —— 它正�
    两件事捆在一个函数里写的话，这一种情况就只能靠「碰巧也在看那个节点」才更新得过来。 */
 const ringBefore = ringCount();
 const stBefore = scene.statuses.length;
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
 check('（这时 dorm-a 的段是 11 分钟、dorm-b 是 3 分钟，重点换成了 dorm-a）',
   pickPriority(nodes).nodeId, 'dorm-a');
 check('★ 重点被别的节点抢走：正在看的这间当场摘掉标记', ringAt(), false);
@@ -923,7 +928,7 @@ check('★ 与此同时画面一步都没动（收到的不是当前这个节点
   scene.statuses.length, stBefore);
 
 /* 再看一个方向：重点抢回来，环还得亮回去 */
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
 check('★ 正在看的这间重新成为重点：环当场亮回来',
   [pickPriority(nodes).nodeId, ringAt()], ['dorm-b', true]);
 
@@ -946,7 +951,7 @@ check('当前还看在 dorm-b 上（切节点只由真实的点击改）', curre
 
 /* --- 按风扇那一刻，那一行当场补出「处理中」--- */
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
 check('按之前那一行里没有「处理中」', focusHTML().includes('处理中'), false);
 check('这时按钮是能点的（不然下面按的是一个灰按钮，模拟的不是真行为）',
   els['action-fan'].disabled, false);
@@ -1057,7 +1062,7 @@ check('没处理过的卡片上不出现处理状态那一行', actionsOnCards()
 
 /* --- 状态正常：照样按不动（规格书：节点状态正常时禁用）--- */
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
 check('状态正常时按钮还是灰的', fanBtn.disabled, true);
 check('那行字说明为什么按不动', fanState.textContent, '当前状态正常，不需要处理');
 
@@ -1067,7 +1072,7 @@ check('那行字说明为什么按不动', fanState.textContent, '当前状态�
    偏热在 scene.js 的 LOOK 表里本来就是 fan: true，updateScene 自己就会把风扇
    打开 —— 那种情况下「先 updateScene 再 setFanOn」的顺序写反了也照样绿。
    偏湿的 fan 是 false，只有「动作叠在状态之上」这一种写法才转得起来。 */
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 80, undefined, T('20:05:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 80, undefined, T('20:05:00')));
 check('节点偏湿了，按钮可点（不是正常状态）', fanBtn.disabled, false);
 check('确认这一段的场景确实是偏湿，否则上面那条测的不是这件事',
   nodes['dorm-a'].latest.status, '偏湿');
@@ -1109,7 +1114,7 @@ check('★ 顺序是「先 updateScene、再 setFanOn」，最后才收尾重算
 /* 重发旧数据 / 乱序到达。它比 actionTime 还早，就不该参与判断 ——
    这一条偏偏是「正常」，少了 t > at 那道闸就会立刻把状态改成「已恢复」，
    而实际上动作之后一条数据都还没来。 */
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
 check('★ 比动作还早的消息不改处理状态（还留在「处理中」）',
   nodes['dorm-a'].handling, '处理中');
 check('★ 也不记成「动作之后的数据」', nodes['dorm-a'].dataAfterAction, null);
@@ -1118,7 +1123,7 @@ check('卡片上还是「处理中」，没被那条旧数据改写',
 
 /* --- 动作之后来了正常的：已恢复 --- */
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:09:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:09:00')));
 check('★ 动作之后的这条是正常 -> 转「已恢复」', nodes['dorm-a'].handling, '已恢复');
 check('★ dataAfterAction 记的是这一条（不是随便哪一条）',
   [nodes['dorm-a'].dataAfterAction.time, nodes['dorm-a'].dataAfterAction.status],
@@ -1134,7 +1139,7 @@ check('★ 恢复之后风扇照样转（动作开了就一直开着，只有「
 
 /* --- 环境又变坏：自动退回「处理中」--- */
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:12:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:12:00')));
 check('★ 又异常了 -> 退回「处理中」（同一条规则，没有另写一条判断）',
   nodes['dorm-a'].handling, '处理中');
 check('★ dataAfterAction 跟着换成新的这条',
@@ -1148,8 +1153,8 @@ check('actionTime 没被顶掉（动作还是那一次，记在 20:05 上）',
 
 clearAll();
 selectNode('dorm-a');
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:00:00')));
 clickFan();
 check('★ 按的是当前正在看的 dorm-a', nodes['dorm-a'].handling, '处理中');
 check('★ dorm-b 一点没被牵连', [nodes['dorm-b'].handling, nodes['dorm-b'].actionTime], ['无', null]);
@@ -1168,7 +1173,7 @@ check('★ 去看一个没处理过的节点，风扇不会被 dorm-a 的处理�
 check('★ 卡片上那一行只属于 dorm-a（切节点不会把它搬过来）', actionsOnCards(), 1);
 
 /* dorm-b 自己也按一下：两个节点各记各的，互不覆盖 */
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:04:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:04:00')));
 clickFan();
 check('★ dorm-b 记在自己的 actionTime 上（20:04，不是 dorm-a 的 20:00）',
   [nodes['dorm-b'].handling, nodes['dorm-b'].actionTime], ['处理中', T('20:04:00')]);
@@ -1194,7 +1199,7 @@ check('★ 切回 dorm-a，风扇转起来（它自己是处理中的那个）',
 clearAll();
 selectNode('dorm-a');
 const fansIdle = scene.fans.length;
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
 check('当前节点转成偏热（scene.js 里这一档本来就要转）',
   nodes['dorm-a'].latest.status, '偏热');
 check('★ 没按过按钮的节点，dashboard 一次都没碰风扇（交给 updateScene 那一档）',
@@ -1206,7 +1211,7 @@ check('交出去的确实是「偏热」，风扇转不转由 scene.js 自己按
 
 clearAll();
 selectNode('dorm-c');
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 31, 60, undefined, T('20:00:00')));
 check('dorm-c 偏热（scene.js 的 LOOK 表里这一档本来就转）', nodes['dorm-c'].latest.status, '偏热');
 clickFan();
 check('★ 偏热的节点按一下照样记上处理动作', nodes['dorm-c'].handling, '处理中');
@@ -1378,7 +1383,7 @@ check('清空之后一条事件都没有', events.length, 0);
 check('清空之后按钮又变灰', exportBtn.disabled, true);
 check('清空之后表里写的是「还没有事件」', evBody().includes('还没有事件'), true);
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
 check('★ 节点从正常变成异常：开出一条事件', events.length, 1);
 const ev0 = events[0];
 check('★ 起点就是这条消息的 time', ev0.startTime, T('20:30:00'));
@@ -1413,7 +1418,7 @@ check('而且这句原因不会出现在顶部那一行里（分工：那一行�
 
 /* --- 段内继续异常：不另开一条 --- */
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 33, 55, undefined, T('20:33:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 33, 55, undefined, T('20:33:00')));
 check('★ 段内又来一条异常：不另开一条', events.length, 1);
 check('★ 起点不动（每次刷新起点的话，时长永远停在「不到 1 分钟」）',
   events[0].startTime, T('20:30:00'));
@@ -1423,7 +1428,7 @@ check('★ 之后又被选中也不覆盖（复盘要的是第一次被注意到
 
 /* 段里状态变了仍然是同一段、同一条 —— 和 7-1「统计的是连续异常、
    不是连续偏热」是同一个口径 */
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 80, undefined, T('20:36:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 80, undefined, T('20:36:00')));
 check('★ 段里从偏热变成偏湿：还是同一条事件', events.length, 1);
 check('★ problem 保持开案时的「连续偏热」（它是这条事件的名字，不跟着改）',
   events[0].problem, '连续偏热');
@@ -1438,13 +1443,13 @@ check('★ problem 保持开案时的「连续偏热」（它是这条事件的�
    dorm-b 是这一刻才第一次被选中的，记的必须是它**自己**最新那条的 20:05。
    写成 record.time 的话，这里会看到 20:30 —— 那是别人的时间。 */
 clearAll();
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:05:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:20:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:05:00')));
 check('这时胜出的还是 dorm-a（20 分钟 > 0 分钟）', pickPriority(nodes).nodeId, 'dorm-a');
 check('★ dorm-b 还没被选中过，所以还没记时刻', evOf('dorm-b').priorityTime, null);
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:30:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:30:00')));
 check('★ dorm-a 恢复之后轮到 dorm-b 上位', pickPriority(nodes).nodeId, 'dorm-b');
 check('★ 记的是 dorm-b **自己**最新那条的 20:05，不是这条触发报文的 20:30',
   evOf('dorm-b').priorityTime, T('20:05:00'));
@@ -1458,14 +1463,14 @@ clickFan();
 check('★ 按一下风扇：动作写进了那条事件', evOf('dorm-b').action, '风扇已开启');
 check('★ 动作时间取的是该节点最新那条的 time', evOf('dorm-b').actionTime, T('20:05:00'));
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 32, 60, undefined, T('20:10:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 32, 60, undefined, T('20:10:00')));
 clickFan();
 check('★ 再按一次不覆盖（复盘看的是第一次动手是什么时候、做了什么）',
   evOf('dorm-b').actionTime, T('20:05:00'));
 
 /* --- 结案：来了正常数据 --- */
 
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
 check('★ 恢复正常之后没有要优先的了', pickPriority(nodes), null);
 check('★ 写上了恢复时刻', evOf('dorm-b').recoverTime, T('20:55:00'));
 check('★ result 变成「已恢复」', evOf('dorm-b').result, '已恢复');
@@ -1479,7 +1484,7 @@ check('★ 行数没变（结案不加行也不减行）', evRowCount(), 2);
    先把旧那条抓在手里：下面 unshift 进来一条新的之后，evOf('dorm-b')
    拿到的就是新的那条了，旧的就再也点不到。 */
 const oldB = evOf('dorm-b');
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('21:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('21:00:00')));
 check('★ 恢复之后又异常：开的是新的一条', events.length, 3);
 check('★ 新那条的起点是 21:00，不是被改回去的 20:05',
   [events[0].nodeId, events[0].startTime, events[0].result],
@@ -1496,7 +1501,7 @@ check('★ 新那条是干净的：没恢复、没动作、没被优先关注过
 
 /* --- 每个节点各记各的 --- */
 
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 80, undefined, T('21:05:00')));
+handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 25, 80, undefined, T('21:05:00')));
 check('★ 三个节点各有一条，互不串线',
   ids.map((id) => {
     const e = evOf(id);
@@ -1528,11 +1533,11 @@ check('★ 清空是就地清空：拿到的还是同一个数组对象',
 /* --- CSV 字节 --- */
 
 clearAll();
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:30:00')));
 selectNode('dorm-b');
 clickFan();
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 80, undefined, T('21:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, undefined, T('20:55:00')));
+handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 25, 80, undefined, T('21:00:00')));
 
 const csv = buildEventsCSV();
 const csvLines = csv.split('\r\n');
@@ -1646,9 +1651,9 @@ check('★ 它是 textContent 贴上去的（那句话里夹着节点名，不�
 /* --- 念的是「当前最重要的那一句」 --- */
 
 clearAll();
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
 check('（此刻重点是 dorm-b：段从 20:00 起，10 分钟）',
   pickPriority(nodes).nodeId, 'dorm-b');
 
@@ -1689,8 +1694,8 @@ check('而且念的是 dorm-b（重点没换人）',
 /* --- ★ 每次都现算，一个字都不缓存 --- */
 
 /* 念一句旧的比不念更糟：听的人以为现在还是那样。 */
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 15, 60, undefined, T('20:30:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 16, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 15, 60, undefined, T('20:30:00')));
 check('这时重点已经换人了（dorm-a 的段 30 分钟，比 dorm-b 的 10 分钟长）',
   pickPriority(nodes).nodeId, 'dorm-a');
 check('上一句确实说的是别人（不然下面那条可能只是恰好相等）',
@@ -1714,9 +1719,9 @@ clickSpeak();
 check('平静时照样每次都真的念（不是「没重点就什么都不做」）',
   [spoken.length > 0, speechStub.cancelled - cancelledIdle], [true, 1]);
 
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 25, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-c/env', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 25, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-c/telemetry', mk('dorm-c', 25, 60, undefined, T('20:00:00')));
 clickSpeak();
 check('★ 三个都正常：念的是「都正常」，句号收尾',
   lastSpoken().text, '当前 3 个宿舍都正常。');
@@ -1779,9 +1784,9 @@ check('清空之后顶部那一行也回到了起点',
    语音念的是 dorm-c。逻辑上防它的办法是「两边都从 pickPriority 出发」，
    这里从页面上再验一次。 */
 clearAll();
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
-handleMessage('dormmate/dorm-b/env', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
-handleMessage('dormmate/dorm-a/env', mk('dorm-a', 31, 60, undefined, T('20:05:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:00:00')));
+handleMessage('dormmate/v1/nodes/dorm-b/telemetry', mk('dorm-b', 31, 60, undefined, T('20:10:00')));
+handleMessage('dormmate/v1/nodes/dorm-a/telemetry', mk('dorm-a', 31, 60, undefined, T('20:05:00')));
 
 const pickNow = pickPriority(nodes);
 clickSpeak();

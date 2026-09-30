@@ -85,9 +85,10 @@ class TestPayloadShape(unittest.TestCase):
         self.payload = build_payload("dorm-a", 31, 78)
 
     def test_keys_exact(self):
+        # 统一 JSON 的前五个字段原样、顺序不动；Phase1 在后面追加 seq / source
         self.assertEqual(
             list(self.payload.keys()),
-            ["nodeId", "temperature", "humidity", "status", "time"],
+            ["nodeId", "temperature", "humidity", "status", "time", "seq", "source"],
         )
 
     def test_types(self):
@@ -96,6 +97,13 @@ class TestPayloadShape(unittest.TestCase):
         self.assertIsInstance(self.payload["humidity"], float)
         self.assertIsInstance(self.payload["status"], str)
         self.assertIsInstance(self.payload["time"], str)
+        self.assertIsInstance(self.payload["seq"], int)
+        self.assertIsInstance(self.payload["source"], str)
+
+    def test_seq_and_source_defaults(self):
+        # 不给就用默认值：seq=0（不参与序列）、source=sim
+        self.assertEqual(self.payload["seq"], 0)
+        self.assertEqual(self.payload["source"], "sim")
 
     def test_status_matches_rule(self):
         self.assertEqual(self.payload["status"], "偏热")
@@ -124,10 +132,11 @@ class TestTopicConvention(unittest.TestCase):
     def test_topic_pattern(self):
         from config import TOPIC_PATTERN, topic_for
 
-        self.assertEqual(topic_for("dorm-a"), "dormmate/dorm-a/env")
-        # 约定的 <nodeId> 位置与订阅通配符对得上
-        self.assertEqual(TOPIC_PATTERN, "dormmate/+/env")
-        self.assertEqual(topic_for("dorm-a").split("/")[1], "dorm-a")
+        self.assertEqual(topic_for("dorm-a"), "dormmate/v1/nodes/dorm-a/telemetry")
+        # 约定的 <nodeId> 位置与订阅通配符对得上：都在第 4 段（下标 3）
+        self.assertEqual(TOPIC_PATTERN, "dormmate/v1/nodes/+/telemetry")
+        self.assertEqual(topic_for("dorm-a").split("/")[3], "dorm-a")
+        self.assertEqual(topic_for("dorm-a").split("/")[4], "telemetry")
 
 
 if __name__ == "__main__":

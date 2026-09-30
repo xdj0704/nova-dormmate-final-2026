@@ -15,17 +15,18 @@ MQTT_PASSWORD = os.environ.get("DORMMATE_MQTT_PASS") or None
 DEFAULT_NODE_ID = "dorm-a"                 # M1–M4 只围绕一个宿舍
 NODE_IDS = ["dorm-a", "dorm-b", "dorm-c"]  # M5 起启用
 
-TOPIC_PATTERN = "dormmate/+/env"           # 前端订阅用
+TOPIC_PATTERN = "dormmate/v1/nodes/+/telemetry"  # 前端订阅用
 
 
 def topic_for(node_id: str) -> str:
-    """dorm-a -> dormmate/dorm-a/env"""
-    return f"dormmate/{node_id}/env"
+    """dorm-a -> dormmate/v1/nodes/dorm-a/telemetry"""
+    return f"dormmate/v1/nodes/{node_id}/telemetry"
 
 
 # ---- 数据 ----
 PUBLISH_INTERVAL = 5.0                     # 发布间隔（秒）
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"          # 固定格式，勿改
-PAYLOAD_KEYS = ("nodeId", "temperature", "humidity", "status", "time")
+# 统一 JSON 的前五个字段，顺序不要动（Phase1 起在后面追加 seq / source）
+PAYLOAD_KEYS = ("nodeId", "temperature", "humidity", "status", "time", "seq", "source")
 QOS = 1
 RETAIN = True                              # 保留最后一条，后开的看板能立刻看到数值

@@ -156,7 +156,7 @@ function formatTime(date) {
 }
 
 /**
- * 从 topic 里取出节点名。约定是 dormmate/<nodeId>/env。
+ * 从 topic 里取出节点名。约定是 dormmate/v1/nodes/<nodeId>/telemetry。
  * 形状不对就返回空串 —— 调用方据此跳过 topic 与 nodeId 的一致性检查，
  * 而不是拿一个猜出来的节点名去报警。
  *
@@ -165,7 +165,8 @@ function formatTime(date) {
  */
 function topicNode(topic) {
   const parts = String(topic == null ? '' : topic).split('/');
-  if (parts.length === 3 && parts[0] === 'dormmate' && parts[2] === 'env') return parts[1];
+  if (parts.length === 5 && parts[0] === 'dormmate' && parts[1] === 'v1'
+      && parts[2] === 'nodes' && parts[4] === 'telemetry') return parts[3];
   return '';
 }
 
@@ -1123,7 +1124,7 @@ function brokerUrl(hostname) {
 }
 
 const BROKER_URL = brokerUrl(location.hostname);
-const TOPIC = 'dormmate/+/env';
+const TOPIC = 'dormmate/v1/nodes/+/telemetry';
 
 /* 当前那根连接。null 表示没连上，或已被主动断开。 */
 let client = null;

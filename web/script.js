@@ -16,7 +16,7 @@ function brokerUrl(hostname) {
 }
 
 const BROKER_URL = brokerUrl(location.hostname);
-const TOPIC = 'dormmate/+/env';
+const TOPIC = 'dormmate/v1/nodes/+/telemetry';
 
 const MAX_ROWS = 20;        // 「最近消息」表最多显示多少行
 const MAX_MESSAGES = 2000;  // 内存里最多留多少条 MQTT 消息（防止挂机把内存吃光）
@@ -816,8 +816,11 @@ function normalize(raw, topicNodeId) {
 }
 
 function onMessage(topic, payload) {
-  const parts = topic.split('/');           // dormmate/<nodeId>/env
-  const topicNodeId = parts.length >= 3 ? parts[1] : 'unknown';
+  // dormmate/v1/nodes/<nodeId>/telemetry —— 节点名是第 4 段（下标 3）。
+  // 形状不对就交 'unknown'，让下游的一致性检查去报警，不拿猜出来的名字当数。
+  const parts = topic.split('/');
+  const topicNodeId = parts.length === 5 && parts[0] === 'dormmate'
+    && parts[1] === 'v1' && parts[2] === 'nodes' ? parts[3] : 'unknown';
 
   let data;
   try {

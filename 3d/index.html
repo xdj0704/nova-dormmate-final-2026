@@ -157,7 +157,7 @@
   <header>
     <h1>DormMate 3D</h1>
     <p class="sub">
-      Step 6-3：订阅 <code>dormmate/+/env</code>，选中的那个宿舍收到数据就换样子
+      Step 6-3：订阅 <code>dormmate/v1/nodes/+/telemetry</code>，选中的那个宿舍收到数据就换样子
     </p>
     <p class="conn" id="conn">
       <span class="conn-dot"></span><span id="conn-text">准备连接…</span>
@@ -245,7 +245,7 @@
     /* M5 起是多节点。和 dashboard 一样只认这三个 ——
        不在这三个里面的 nodeId 一律丢弃，不给一份脏数据建新格子。 */
     const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
-    const TOPIC = 'dormmate/+/env';
+    const TOPIC = 'dormmate/v1/nodes/+/telemetry';
 
     /* Broker 地址跟着页面的访问地址走：本机打开就是 ws://localhost:9001，
        手机用 http://10.102.196.160:8000/3d/ 打开就是
@@ -261,12 +261,12 @@
     const BROKER_URL = brokerUrl(location.hostname);
 
     /**
-     * 从 topic 里取出节点名。约定是 dormmate/<nodeId>/env。
+     * 从 topic 里取出节点名。约定是 dormmate/v1/nodes/<nodeId>/telemetry。
      * 形状不对就返回空串 —— 调用方据此跳过 topic 与报文的一致性检查，
      * 而不是拿一个猜出来的节点名去报警。
      */
     function topicNode(topic) {
-      const m = /^dormmate\/([^/]+)\/env$/.exec(topic);
+      const m = /^dormmate\/v1\/nodes\/([^/]+)\/telemetry$/.exec(topic);
       return m ? m[1] : '';
     }
 
