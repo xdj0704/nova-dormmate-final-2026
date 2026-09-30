@@ -176,7 +176,7 @@ const mqttStub = {
   },
 };
 
-/* ---------- 3d/scene.js 打桩 ---------- */
+/* ---------- three/scene.js 打桩 ---------- */
 /* 不记录的话就测不出「切节点 / 收到新快照时到底有没有把状态交给 3D」。
    打桩挂的是 createDorm3D（模块里 import 的那个名字），不是 3D 场景本身。 */
 const sceneCalls = [];
@@ -299,7 +299,7 @@ if (importCount !== 2) {
   throw new Error('dashboard.js 里应该是两条 import，实际 ' + importCount + ' 条 —— '
     + '下面那两个正则摘不干净，vm 会抛语法错。');
 }
-const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/3d\/scene\.js';\s*$/m;
+const SCENE_IMPORT = /^import\s*\{\s*createDorm3D\s*\}\s*from\s*'\.\.\/three\/scene\.js';\s*$/m;
 /* 这条 import 折成了两行，所以分隔符一律写 \s —— 它能匹配换行。
    写成字面空格的话摘不掉，下一句 vm 会抛「Cannot use import statement outside a module」。
 
@@ -1148,7 +1148,7 @@ check('★ 原因原样贴出来（HTTP 404 和「回来不是 JSON」指向不�
 console.log('\n=== O. 源码里的硬约定 ===');
 
 check('★ dashboard.js 正好两条 import', importCount, 2);
-check('★★ 它 import 的是 ../3d/scene.js 和 ./logic.js（没有第三条）',
+check('★★ 它 import 的是 ../three/scene.js 和 ./logic.js（没有第三条）',
   [SCENE_IMPORT.test(dashText), LOGIC_IMPORT.test(dashText)], [true, true]);
 
 /* import 进来的名字必须真的在 logic.js 里导出 —— 少一个的话页面整块

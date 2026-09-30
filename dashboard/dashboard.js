@@ -28,7 +28,7 @@
 // handleMessage(topic, payloadText) 是唯一的消息入口。
 //
 // 这个文件是 **ES 模块**（index.html 里写的是 type="module"），因为它 import 了
-// ../3d/scene.js 和 ./logic.js。三件事跟着变了，改的时候别漏：
+// ../three/scene.js 和 ./logic.js。三件事跟着变了，改的时候别漏：
 //   1) 页面必须走 http 服务器打开，file:// 下模块会被 CORS 拒掉
 //   2) index.html 里要有 importmap，且排在模块脚本之前（scene.js 用的是裸名字 'three'）
 //   3) mqtt / Chart 仍走全局变量，DormMateConfig 也是（shared/config.js 是普通
@@ -36,7 +36,7 @@
 
 /* 3D 场景。拿的是 createDorm3D 这个工厂，不是场景本身 ——
    这个页面只建一个，但工厂的返回值里带着 updateScene / setLabel / dispose。 */
-import { createDorm3D } from '../3d/scene.js';
+import { createDorm3D } from '../three/scene.js';
 
 /* 看板剩下来的那一半：读快照字段 + 把它们摆成人话。
    全是纯函数，不碰 DOM，所以 tests/logic.test.js 不用打任何桩就能整个测一遍。 */

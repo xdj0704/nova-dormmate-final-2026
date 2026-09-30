@@ -2,7 +2,7 @@
 #
 # 这几个文件的字节数和 sha256 都写进了 README（3d 那节和 5-3/5-4 那节各一张表）。
 # 本仓库 core.autocrlf=true，如果不在这里拦一下，clone 出来会被换成 CRLF：
-# 实测 3d/lib/three.module.js 会从 1272972 变成 1326016 字节，哈希随之全变，
+# 实测 three/lib/three.module.js 会从 1272972 变成 1326016 字节，哈希随之全变，
 # 照着 README 核对的人只会以为自己下错了文件。
 #
 # 用 text eol=lf 而不是 -text：
@@ -13,7 +13,7 @@
 #
 # 注：这几个文件上游本来就是纯 LF（实测 CRLF 计数为 0），
 # 所以「归一化成 LF」对内容是个空操作 —— 哈希不变。
-3d/lib/**        text eol=lf
+three/lib/**        text eol=lf
 dashboard/lib/** text eol=lf
 web/vendor/**    text eol=lf
 

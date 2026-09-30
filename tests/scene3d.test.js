@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * 3d/scene.js 的测试。纯 Node，零依赖。
+ * three/scene.js 的测试。纯 Node，零依赖。
  *
  * 做法和 tests/dashboard.test.js 一样：把**真实的**源文件跑起来，而不是另写一份
  * 等价逻辑 —— 否则测的是抄来的那份，不是线上那份。
@@ -38,9 +38,9 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
 const ROOT = path.join(__dirname, '..');
-const SCENE_FILE = path.join(ROOT, '3d', 'scene.js');
-const HTML_FILE = path.join(ROOT, '3d', 'index.html');
-const LIB_FILE = path.join(ROOT, '3d', 'lib', 'three.module.js');
+const SCENE_FILE = path.join(ROOT, 'three', 'scene.js');
+const HTML_FILE = path.join(ROOT, 'three', 'index.html');
+const LIB_FILE = path.join(ROOT, 'three', 'lib', 'three.module.js');
 
 let pass = 0;
 let fail = 0;
@@ -354,7 +354,7 @@ let fanMountRef = null;
 let focusRingRef = null;
 
 (async function main() {
-  console.log('== 3d/scene.js ==\n');
+  console.log('== three/scene.js ==\n');
 
   /* ===== A. 源文件约束 ===== */
 
@@ -1288,7 +1288,7 @@ let focusRingRef = null;
   console.log('\nO. 随包的文件');
 
   {
-    check('本地 three.module.js 在 3d/lib/ 里（断网时的退路）', fs.existsSync(LIB_FILE));
+    check('本地 three.module.js 在 three/lib/ 里（断网时的退路）', fs.existsSync(LIB_FILE));
     // 大小按「归一化成 LF 之后」算。这份文件在库里存的是 LF，但 core.autocrlf=true
     // 的机器上 clone 出来会被换成 CRLF（1272972 -> 1326016 字节）。不归一化的话
     // 这条断言只在自己机器上绿 —— 仓库带着一个「clone 下来就红」的测试，比不测还糟。

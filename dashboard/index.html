@@ -294,24 +294,24 @@
      现在页面不算了，规则那一份就没用了。换成了配置这一份。 -->
 <script src="../shared/config.js"></script>
 
-<!-- three.js 0.160.0 的 importmap，和 3d/index.html 里那张是同一张。
+<!-- three.js 0.160.0 的 importmap，和 three/index.html 里那张是同一张。
 
      为什么 dashboard 也要有一份：importmap 是**文档级**的，认的是「哪个页面」，
-     不是「哪个模块」。dashboard.js import 了 ../3d/scene.js，而 scene.js 里写着
+     不是「哪个模块」。dashboard.js import 了 ../three/scene.js，而 scene.js 里写着
      import ... from 'three' —— 那个裸名字最终是在**这个页面**的映射表里查的。
      少了这张表，报错是「Failed to resolve module specifier "three"」，
-     而且是在 scene.js 里报，看着像是 3d/ 那边坏了。
+     而且是在 scene.js 里报，看着像是 three/ 那边坏了。
 
-     映射的是裸名字，所以和页面所在目录没关系：dashboard/ 和 3d/ 共用同一张表，
+     映射的是裸名字，所以和页面所在目录没关系：dashboard/ 和 three/ 共用同一张表，
      一个字都不用改。
 
      importmap 的内容必须是合法 JSON，所以里面一行注释都写不了。
 
      ── 改成完全本地（现场没网时）──
-     把下面那行换成 "three": "../3d/lib/three.module.js"，
-     文件已经在 3d/lib/ 里放好了，其余不用动。
-     这里必须写 '../3d/lib/…'，不能写 './lib/…' —— 相对路径是相对
-     **这个页面所在的 dashboard/** 算的，而本地那份 three 放在 3d/ 里。 -->
+     把下面那行换成 "three": "../three/lib/three.module.js"，
+     文件已经在 three/lib/ 里放好了，其余不用动。
+     这里必须写 '../three/lib/…'，不能写 './lib/…' —— 相对路径是相对
+     **这个页面所在的 dashboard/** 算的，而本地那份 three 放在 three/ 里。 -->
 <script type="importmap">
 {
   "imports": {
@@ -323,7 +323,7 @@
 <!-- dashboard.js 是 type="module"（Step 6-3 起），而且是上面这张表之后的第一条
      模块脚本 —— importmap 必须排在它前面，排在后面浏览器不认。
 
-     换成模块的代价和 3d/ 那个页面一样：模块走 CORS，file:// 直接打开会被拒，
+     换成模块的代价和 three/ 那个页面一样：模块走 CORS，file:// 直接打开会被拒，
      必须走 http 服务器：
          http://localhost:8000/dashboard/
      好处是模块默认 defer，脚本执行时 DOM 一定已经就绪，不必再依赖

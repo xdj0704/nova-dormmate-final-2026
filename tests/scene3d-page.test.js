@@ -1,5 +1,5 @@
 // tests/scene3d-page.test.js
-// 校验 3d/index.html 里那段 <script type="module">：MQTT 驱动 3D 的那一半（Step 6-3）。
+// 校验 three/index.html 里那段 <script type="module">：MQTT 驱动 3D 的那一半（Step 6-3）。
 //
 // 跑的不是另写一份的等价代码，是**直接从 HTML 里抠出来那段脚本**，
 // 所以「页面上真正跑的东西」和「测的东西」不可能对不上。
@@ -18,7 +18,7 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const HTML_FILE = path.join(ROOT, '3d', 'index.html');
+const HTML_FILE = path.join(ROOT, 'three', 'index.html');
 const RULES_FILE = path.join(ROOT, 'shared', 'rules.js');
 
 let pass = 0;
@@ -87,7 +87,7 @@ check('6-2 留下的 4 个手动预览按钮还在',
 
 /* ---------- 打桩 ---------- */
 
-/* 3d/scene.js 的桩：把交给 3D 的状态和写进覆盖层的文字按顺序记下来。
+/* three/scene.js 的桩：把交给 3D 的状态和写进覆盖层的文字按顺序记下来。
    不记的话，「到底有没有把消息交给 updateScene」根本测不出来。 */
 const scene = { hostId: null, statuses: [], labels: [] };
 function createDorm3DStub(hostId) {

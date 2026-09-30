@@ -4,10 +4,10 @@
  *
  * 普通 <script> 引入，挂一个全局对象 DormMateConfig，不用 export —— 和
  * shared/rules.js 同一个做法，因为看板 / 移动端 / 3D 里有两个是经典 script
- * （只有 3d/ 走 ES Module + importmap），`export` 在那两个里直接是语法错误。
+ * （只有 three/ 走 ES Module + importmap），`export` 在那两个里直接是语法错误。
  *
  * 【为什么会有这个文件】E3 之前，broker 地址那三行在每个页面里各抄了一份
- * （`web/script.js`、`dashboard/dashboard.js`、`3d/index.html`），当时还专门
+ * （`web/script.js`、`dashboard/dashboard.js`、`three/index.html`），当时还专门
  * 写了注释说「故意各留一份，为三行代码共用 shared/ 反而多发一次请求」。
  * E3 要加移动端，同一段就要出现第四次，而且它在手机上**必须**跟着访问地址走
  * （写死 localhost 的话，手机浏览器里的 localhost 指的是手机自己，连不回来）——
