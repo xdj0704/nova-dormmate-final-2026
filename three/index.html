@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DormMate 3D · Step 6-3 MQTT 驱动</title>
+<title>DormMate 3D · Step E1 三间房并排</title>
 <style>
   html, body { height: 100%; }
 
@@ -22,6 +22,7 @@
   .sub {
     margin: 5px 0 0;
     font-size: 13px;
+    line-height: 1.6;
     color: #898781;
   }
 
@@ -54,45 +55,92 @@
 
   .conn.is-on .conn-dot { background: #0ca30c; }
 
-  /* 3D 容器。三条不能省的：
-     - 必须有确定的高度。高度是 0 的话 clientHeight 就是 0，相机算不出宽高比。
-       这里给的是 60vh（视口高度的六成），加 min-height 兜住矮窗口。
+  /* 3D 容器。四条不能省的：
+     - 必须有确定的高度。高度是 0 的话 clientWidth/Height 就是 0，
+       相机算不出宽高比（world.js 那边兜了一下，但别指望它兜）。
      - overflow: hidden。three 的 setSize 设的是 canvas 的 CSS 尺寸，
        和容器差一个像素时就会顶出滚动条，整个页面跟着抖。
-     - position: relative。setLabel 那层覆盖层是绝对定位的，得有个定位祖先；
-       少了它，覆盖层会跑到 <body> 上去，飘到页面左上角。 */
+     - position: relative。CSS2D 的标签层和画布都是绝对定位的，
+       得有个定位祖先；少了它，标签层会跑到 <body> 上去。
+     - cursor: pointer。三间房是**可点的**（点一下把焦点切过去），
+       不提示的话没人知道能点。 */
   #scene {
     position: relative;
     overflow: hidden;
     margin: 0 24px 12px;
-    height: 60vh;
-    min-height: 320px;
+    height: 68vh;
+    min-height: 360px;
     border: 1px solid #e1e0d9;
     border-radius: 14px;
     background: #ececea;   /* 画布还没铺满时先兜个底，避免闪一下白 */
+    cursor: pointer;
   }
 
-  /* setLabel 写字的覆盖层。由 scene.js 建出来挂进 #scene，这里只负责样式：
-     - absolute + 左上角：盖在画布上面
-     - pointer-events: none：**关键**。不写的话这层会吃鼠标事件，
-       将来想给 3D 加拖拽/点击就点不穿，而且现在它盖住的那块也没法选中。
-     - 底色半透明：字压在深色模型上也要看得清 */
-  .scene-label {
-    position: absolute;
-    top: 14px;
-    left: 14px;
-    pointer-events: none;
-    padding: 7px 12px;
-    font-size: 13px;
-    line-height: 1.5;
+  /* ---- 房间头顶的悬浮标签（CSS2DRenderer 造出来的那一层） ----
+
+     这一层里的元素是 world.js 用 document.createElement 建出来的，
+     结构固定是 .scene-tag > .tag-node / .tag-read / .tag-status / .tag-handling。
+     页面的职责只有一条：**给它们上色**。
+
+     配色靠 [data-status] 属性挑，和移动端 style.css 一个做法。状态词出现在
+     CSS 里是**表示**、不是判断 —— 判定在 core 里（这份文件里没有 18 / 30 / 75
+     这三个数）。这么做还有个好处：core 哪天发来一个没见过的状态，颜色挑不到，
+     但字照样写得出来，不会变成一片空白。 */
+  .scene-tag {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 11px;
+    font-size: 12px;
+    line-height: 1.3;
+    white-space: nowrap;
     color: #0b0b0b;
-    background: rgba(252, 252, 251, 0.86);
+    background: rgba(252, 252, 251, 0.9);
     border: 1px solid #e1e0d9;
-    border-radius: 8px;
-    backdrop-filter: blur(3px);
+    border-radius: 999px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
   }
 
-  /* WebGL 起不来时由 scene.js 写进来（见那边的 try/catch） */
+  /* 还没收到数据、或者这个节点掉线了 —— 淡一点，别和三间都有数据的看起来一样 */
+  .scene-tag:not(.tag-online) { opacity: 0.68; }
+
+  .tag-node {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-weight: 650;
+  }
+
+  .tag-read { color: #52514e; }
+
+  .tag-status { font-weight: 650; }
+
+  .scene-tag[data-status="正常"] .tag-status { color: #3f7d3f; }
+  .scene-tag[data-status="偏冷"] .tag-status { color: #2a6ba8; }
+  .scene-tag[data-status="偏热"] .tag-status { color: #c0392b; }
+  .scene-tag[data-status="偏湿"] .tag-status { color: #1f7ac0; }
+
+  /* 「处理中」那一格。归 CSS 管**看不看得见**，但 world.js 还会直接把
+     hidden 打开/关掉 —— 少写下面这条 line 的话（比如以后有人删了它），
+     还有 hidden 那道保险，不至于三间房齐刷刷挂着「处理中」。 */
+  .tag-handling {
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 650;
+    color: #8a4b00;
+    background: #fbeed5;
+    border-radius: 999px;
+  }
+
+  .tag-handling[hidden] { display: none; }
+
+  /* 焦点那间：加一圈蓝。焦点是「镜头在看哪间」，和地上那圈脉冲
+     （「哪间最该管」）不是一回事，所以**两种记号长得不一样**。 */
+  .tag-focus {
+    border-color: #2a78d6;
+    box-shadow: 0 0 0 2px rgba(42, 120, 214, 0.28);
+  }
+
+  /* WebGL 起不来时由 world.js 写进来（见那边的 try/catch） */
   .scene-error {
     margin: 0;
     padding: 24px;
@@ -101,54 +149,72 @@
     color: #d03b3b;
   }
 
-  /* ---- 按钮 ---- */
+  /* ---- 读数条：谁被点名了、谁该管 ---- */
 
-  .controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    margin: 0 24px 12px;
-  }
-
-  /* 第二行（状态预览）离上一行远一点，两组按钮别糊成一片 */
-  .controls + .controls { margin-top: 16px; }
-
-  .controls .hint {
-    font-size: 13px;
-    color: #898781;
-    margin-right: 4px;
-  }
-
-  .controls button {
-    font: inherit;
-    font-size: 14px;
-    padding: 7px 16px;
-    color: #0b0b0b;
+  .readout {
+    margin: 0 24px 10px;
+    padding: 12px 14px;
     background: #fcfcfb;
     border: 1px solid #e1e0d9;
-    border-radius: 8px;
-    cursor: pointer;
+    border-radius: 10px;
   }
 
-  .controls button:hover { background: #f2f1ec; }
-
-  .controls button:focus-visible {
-    outline: 2px solid #2a78d6;
-    outline-offset: 2px;
-  }
-
-  /* 当前选中的那个：加粗 + 蓝边。不靠颜色单独表意，按钮上本来就有文字。 */
-  .controls button.is-active {
+  .readout-main {
+    margin: 0;
+    font-size: 15px;
     font-weight: 650;
-    border-color: #2a78d6;
-    box-shadow: inset 0 0 0 1px #2a78d6;
   }
 
-  /* 宿舍那三个按钮用等宽字体，dorm-a 这种标识符等宽才好认 */
-  .controls button[data-node] {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  .readout-sub {
+    margin: 5px 0 0;
     font-size: 13px;
+    line-height: 1.6;
+    color: #52514e;
+  }
+
+  /* 指令那一行。发出去了 / 没发出去都写在这儿 —— 点了没反应最难查。 */
+  .readout-cmd {
+    margin: 5px 0 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #8a4b00;
+  }
+
+  .readout-cmd:empty { display: none; }
+
+  /* ---- 图例 ---- */
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin: 0 24px 10px;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    color: #52514e;
+  }
+
+  /* 色块的形状和真地板一样是**方的**，不是圆点 —— 圆点读起来像「一盏灯」，
+     而它指的是房间的地面。 */
+  .legend-swatch {
+    width: 14px;
+    height: 14px;
+    border: 1px solid rgba(0, 0, 0, 0.16);
+    border-radius: 3px;
+  }
+
+  .legend-name { font-weight: 650; color: #0b0b0b; }
+
+  .hint {
+    margin: 0 24px 20px;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #898781;
   }
 </style>
 </head>
@@ -157,39 +223,35 @@
   <header>
     <h1>DormMate 3D</h1>
     <p class="sub">
-      Step 6-3：订阅 <code>dormmate/v1/nodes/+/telemetry</code>，选中的那个宿舍收到数据就换样子
+      Step E1：三个宿舍并排摆在一个世界里。整个页面只订阅
+      <code>dormmate/v1/state</code> 一条 topic —— 谁是重点、谁在处理中、
+      现在在看哪间，全在那一帧快照里，这里一个判断都不做。
     </p>
     <p class="conn" id="conn">
       <span class="conn-dot"></span><span id="conn-text">准备连接…</span>
     </p>
   </header>
 
-  <!-- index.html 只管四件事：把容器摆好、调 createDorm3D、把按钮接上、
-       把 MQTT 收到的数据筛一遍再交给它。
-       宿舍长什么样、每种状态改什么，全在 scene.js 里，这个文件一概不管。 -->
+  <!-- index.html 只管四件事：把容器摆好、调 createDormWorld、把快照交给它、
+       把「点房间」变成一条 focus 指令。
+       三间房长什么样、每种状态改什么，全在 world.js / room.js 里。 -->
   <div id="scene"></div>
 
-  <div class="controls">
-    <span class="hint">宿舍：</span>
-    <!-- data-node 里写的必须是统一约定的三个节点名。写错了 pick() 直接
-         忽略（它认不出这个名字），点了没反应 —— 不会画出别人的数据。 -->
-    <button type="button" data-node="dorm-a">dorm-a</button>
-    <button type="button" data-node="dorm-b">dorm-b</button>
-    <button type="button" data-node="dorm-c">dorm-c</button>
+  <div class="readout">
+    <p class="readout-main" id="readout">还没有收到快照…</p>
+    <p class="readout-sub" id="readout-reason"></p>
+    <p class="readout-cmd" id="cmd-note"></p>
   </div>
 
-  <div class="controls">
-    <span class="hint">手动预览：</span>
-    <!-- 这四个按钮是不经过 Broker 的：现场没网、或 Broker 没起来时，
-         照样能把四种状态看一遍。手动点出来的状态会在覆盖层上写明
-         「手动预览」，收到新数据就自动撤掉，不会冒充真实数据。 -->
-    <!-- data-status 里写的必须是统一规则那四个字，一个字都不能差 ——
-         差一个字 updateScene 就认不出来，只能退回「正常」并在控制台警告。 -->
-    <button type="button" data-status="正常">正常</button>
-    <button type="button" data-status="偏冷">偏冷</button>
-    <button type="button" data-status="偏热">偏热</button>
-    <button type="button" data-status="偏湿">偏湿</button>
-  </div>
+  <div class="legend" id="legend"></div>
+
+  <p class="hint">
+    地板颜色跟着环境状态走，窗扇打开 = 偏湿，扇叶在转 = 偏热**或**这件事正在处理中；
+    地上那一圈在呼吸的光 = core 排出来的当前重点。
+    <br>
+    点房间里任意一处 = 把焦点切到它（发一条 <code>focus</code> 指令出去）；再点同一间 = 取消。
+    点完画面上什么都不动 —— 镜头什么时候飞过去，由 core 发回来的那一帧快照说了算。
+  </p>
 
   <!-- mqtt.js 5.10.1：直接借 dashboard/lib/ 里那份，不再拷一份到 three/。
        两个页面本来就都在同一个 http 服务器上，同一个文件引两次浏览器只下一次，
@@ -197,12 +259,17 @@
        它挂了就一条数据都收不到，所以不走 CDN。 -->
   <script src="../dashboard/lib/mqtt.min.js"></script>
 
-  <!-- 统一规则。**必须是普通 script**：shared/rules.js 是个 IIFE，
-       把 judgeStatus 挂在 globalThis 上，不用 export。
-       放在 module 之前，模块里才调得到 judgeStatus。
-       顺带一句：模块里不能写 import { judgeStatus } from '../shared/rules.js' ——
-       那个文件没有 export，import 进来是 undefined。 -->
-  <script src="../shared/rules.js"></script>
+  <!-- 统一配置：topic 表、QoS、动作名、broker 地址拼法都只在这一处。
+       **必须是普通 script** —— shared/config.js 是个 IIFE，把配置挂在
+       globalThis.DormMateConfig 上，没有 export。
+       顺带一句：模块里不能写 import { ... } from '../shared/config.js' ——
+       那个文件没有 export，import 进来是 undefined。
+
+       注意这里**没有** shared/rules.js：这个页面不再自己复核 status 了。
+       Step 6-3 那版是自己拿 judgeStatus 算一遍再和报文对账的，那是
+       「前端也算一遍」时代的做法；E1 起快照里的 status 就是 core 算好的，
+       前端再算一遍等于把同一件事写两份，两边迟早说两套话。 -->
+  <script src="../shared/config.js"></script>
 
   <!-- three.js 0.160.0：先用 CDN。
 
@@ -224,7 +291,11 @@
        importmap 里只有以 './' 或 '../' 开头的写法会被当成相对 URL 解析；
        'three' 这种裸名字浏览器不知道去哪儿找，必须靠这张表映射 ——
        这正是 importmap 存在的意义：让源码里能写 import ... from 'three'，
-       而不必把 CDN 的长 URL 抄进每个模块。 -->
+       而不必把 CDN 的长 URL 抄进每个模块。
+
+       three/lib/CSS2DRenderer.js 是同一份 0.160.0 里的 addon（核心构建里
+       没有），由 world.js 用相对路径 import —— 相对路径不经过 importmap，
+       所以下面这张表还是只有一条。 -->
   <script type="importmap">
   {
     "imports": {
@@ -234,135 +305,110 @@
   </script>
 
   <!-- 必须是 type="module"，否则 import 语句直接报语法错。
-       也正因为是模块，这段脚本和 scene.js 都走 CORS —— 所以页面不能再用
+       也正因为是模块，这段脚本和 world.js 都走 CORS —— 所以页面不能再用
        file:// 直接打开（file:// 下模块会被当成跨域拒绝），必须走 http 服务器：
 
            http://localhost:8000/three/
   -->
   <script type="module">
-    import { createDorm3D } from './scene.js';
+    import { createDormWorld } from './world.js';
+    import { LOOK, STATUS } from './room.js';
+    import { readSnapshot, openEvent, focusBanner } from '../dashboard/logic.js';
 
-    /* M5 起是多节点。和 dashboard 一样只认这三个 ——
-       不在这三个里面的 nodeId 一律丢弃，不给一份脏数据建新格子。 */
-    const NODE_IDS = ['dorm-a', 'dorm-b', 'dorm-c'];
-    const TOPIC = 'dormmate/v1/nodes/+/telemetry';
+    /* shared/config.js 是普通 script，配置挂在 globalThis 上。
+       这个页面里**没有** 'dormmate/v1/...' 这样的字符串 —— topic 只在那一处写。
+       读 window 而不是直接读 globalThis：和 dashboard.js / mobile.js 一个写法。 */
+    const CFG = typeof window !== 'undefined' ? window.DormMateConfig : null;
 
-    /* Broker 地址跟着页面的访问地址走：本机打开就是 ws://localhost:9001，
-       手机用 http://10.102.196.160:8000/three/ 打开就是
-       ws://10.102.196.160:9001。写死 localhost 的话，手机浏览器里的 localhost
-       指的是手机自己，连不回来。
-       （和 dashboard/dashboard.js、web/script.js 里那份是同一套写法，
-       三处各留一份：三个页面互不依赖，为三行代码共用一个 shared/ 文件
-       反而要多发一次请求。改的时候三处一起改。） */
-    function brokerUrl(hostname) {
-      return 'ws://' + (hostname || 'localhost') + ':9001';
-    }
+    /* 这条指令的 source。core 会把它原样记进快照的 focus.by，
+       看板顶栏于是写着「跨端焦点：3d 发来的 focus 指令」——
+       排错的时候一眼看得出是谁点的。 */
+    const SOURCE_3D = '3d';
 
-    const BROKER_URL = brokerUrl(location.hostname);
+    /* ---------- 世界 ---------- */
+
+    /* 容器 id 就是 #scene。找不到容器、或这台设备没有 WebGL 时 world.js 会抛，
+       并且已经往容器里写了一段说明（见那边的 try/catch）。
+       这里不接住：接住也做不了什么，而那段说明已经把原因摆在页面上了。 */
+    const world = createDormWorld('scene');
+
+    /* ---------- 图例 ---------- */
+
+    const legendEl = document.getElementById('legend');
 
     /**
-     * 从 topic 里取出节点名。约定是 dormmate/v1/nodes/<nodeId>/telemetry。
-     * 形状不对就返回空串 —— 调用方据此跳过 topic 与报文的一致性检查，
-     * 而不是拿一个猜出来的节点名去报警。
+     * 图例上「这间房和平时有什么不一样」。**全部从 LOOK 表推出来**，
+     * 不是另抄一份说明：改了 room.js 那张表，图例跟着变。
      */
-    function topicNode(topic) {
-      const m = /^dormmate\/v1\/nodes\/([^/]+)\/telemetry$/.exec(topic);
-      return m ? m[1] : '';
+    function differenceOf(status) {
+      const look = LOOK[status];
+      const base = LOOK[STATUS.NORMAL];
+      const bits = [];
+      if (look.floor !== base.floor) bits.push('地板换色');
+      if (look.open !== base.open) bits.push('窗扇打开');
+      if (look.fan !== base.fan) bits.push('风扇转');
+      return bits;
     }
 
-    const dorm = createDorm3D('scene');
+    /**
+     * 图例上的色块挑哪一个。
+     *
+     * 「哪儿和平时不一样就展示哪儿」：偏冷 / 偏热换的是地板，偏湿换的是窗户。
+     * 四个都拿地板色的话，「正常」和「偏湿」会并排摆出两块一模一样的灰 ——
+     * 图例反而比没有更让人糊涂。
+     */
+    function swatchOf(status) {
+      const look = LOOK[status];
+      const base = LOOK[STATUS.NORMAL];
+      if (look.floor !== base.floor) return look.floor;
+      if (look.open !== base.open) return look.window;
+      return look.floor;
+    }
 
-    const statusButtons = Array.prototype.slice.call(
-      document.querySelectorAll('.controls button[data-status]')
-    );
-    const nodeButtons = Array.prototype.slice.call(
-      document.querySelectorAll('.controls button[data-node]')
-    );
+    function hex(n) { return '#' + n.toString(16).padStart(6, '0'); }
+
+    /**
+     * 把四种状态摆成一行图例。
+     *
+     * 【那四个名字从哪儿来】从 room.js 导出的 STATUS 拿，**不是**在这里写死的 ——
+     * 这个页面里没有「偏冷」这样的字面量（除了 CSS 里那几条配色规则，那是表示、
+     * 不是判断）。判定在 core，这里只是把 core 可能会说的四个词摆出来给人对照。
+     */
+    function buildLegend() {
+      if (!legendEl) return;
+      [STATUS.NORMAL, STATUS.COLD, STATUS.HOT, STATUS.WET].forEach(function (status) {
+        const bits = differenceOf(status);
+        const item = document.createElement('span');
+        item.className = 'legend-item';
+        item.dataset.status = status;
+
+        const swatch = document.createElement('i');
+        swatch.className = 'legend-swatch';
+        swatch.style.background = hex(swatchOf(status));
+
+        const name = document.createElement('span');
+        name.className = 'legend-name';
+        name.textContent = status;
+
+        const hint = document.createElement('span');
+        hint.textContent = bits.length ? bits.join(' + ') : '和平时一样';
+
+        item.appendChild(swatch);
+        item.appendChild(name);
+        item.appendChild(hint);
+        legendEl.appendChild(item);
+      });
+    }
+
+    buildLegend();
+
+    /* ---------- 页面上的几个元素 ---------- */
+
     const connEl = document.getElementById('conn');
     const connText = document.getElementById('conn-text');
-
-    /* 每个节点最新收到的那一条。null = 还没收到过。
-       只留最新一条，不留 history：看趋势是 dashboard 的事，
-       这个页面回答的是「现在长什么样」。
-
-       为什么要按节点分开存：从 dorm-a 切到 dorm-b 时，得马上知道
-       dorm-b 现在是什么状态。只留一份「当前状态」的话，切过去的瞬间
-       画的还是 dorm-a 的样子，得等 dorm-b 下一条数据来了才对 ——
-       在那之前屏幕上是错的。 */
-    const latest = {};
-    NODE_IDS.forEach(function (id) { latest[id] = null; });
-
-    let currentNodeId = NODE_IDS[0];
-
-    /* 手动点状态按钮只是「先看看长什么样」，不代表这个宿舍真的这样。
-       置 true 之后覆盖层会写明「手动预览」，一收到新数据就自动撤销。 */
-    let preview = false;
-
-    /** 覆盖层末尾那句补充说明。没数据、或正在手动预览时才不是空串。 */
-    function note() {
-      if (!latest[currentNodeId]) return '（还没有收到数据）';
-      return preview ? '（手动预览）' : '';
-    }
-
-    /**
-     * 把「哪个宿舍 + 什么状态」摆到画面上。
-     *
-     * 三件事一起改：3D 场景、覆盖层文字、两组按钮的高亮。
-     * 分成三个函数迟早会出现「场景已经变了、按钮还停在旧的高亮」——
-     * 它们本来就是同一件事的三个面。
-     *
-     * @param {string} status 交给 updateScene 的状态
-     */
-    function apply(status) {
-      const applied = dorm.updateScene(status);
-      dorm.setLabel('当前宿舍：' + currentNodeId + '｜状态：' + applied + note());
-
-      statusButtons.forEach(function (btn) {
-        btn.classList.toggle('is-active', btn.dataset.status === applied);
-      });
-      nodeButtons.forEach(function (btn) {
-        btn.classList.toggle('is-active', btn.dataset.node === currentNodeId);
-      });
-    }
-
-    /**
-     * 画当前选中的那个宿舍。有数据就画它的状态。
-     *
-     * 没有数据时退回「正常」的外观：空白或者半成品的样子，
-     * 看的人分不清是「还没收到」还是「页面坏了」。兜个正常态，
-     * 再在覆盖层上写明还没收到，两件事就都说得清了。
-     */
-    function render() {
-      preview = false;
-      const rec = latest[currentNodeId];
-      if (rec) { apply(rec.status); return; }
-      apply('正常');
-    }
-
-    /**
-     * 切宿舍。已经有数据的节点，切过去会立刻画出它那条的状态。
-     * 和 dashboard 的 selectNode 不一样，这里**不**在「点的是当前这个」时提前返回：
-     * 页面打开时第一次调用就是 currentNodeId 自己，提前返回的话
-     * 初始那一次就什么都画不出来了。
-     */
-    function pick(nodeId) {
-      if (!Object.prototype.hasOwnProperty.call(latest, nodeId)) return;
-      currentNodeId = nodeId;
-      render();
-    }
-
-    statusButtons.forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        preview = true;
-        apply(btn.dataset.status);
-      });
-    });
-
-    nodeButtons.forEach(function (btn) {
-      btn.addEventListener('click', function () { pick(btn.dataset.node); });
-    });
-
-    /* ---------- MQTT ---------- */
+    const readoutEl = document.getElementById('readout');
+    const readoutSubEl = document.getElementById('readout-reason');
+    const cmdNoteEl = document.getElementById('cmd-note');
 
     function setConn(on, text) {
       connEl.className = on ? 'conn is-on' : 'conn';
@@ -372,76 +418,189 @@
     /* 当前那根连接。null 表示还没连上。 */
     let client = null;
 
+    /* 最新那一帧快照。**整份替换**，不是逐字段合并 —— 一帧快照就是此刻的全部，
+       残留上一帧的字段会做出一个不存在的状态。 */
+    let snapshot = null;
+
+    /* ---------- 指令：点房间 = 切焦点 ---------- */
+
     /**
-     * 收一条环境报文。
+     * 把「大家看这间」发给 core。返回 `{ok, reason}`，不抛异常。
      *
-     * 只做两件事：复核 status、把这条记到它自己的节点名下。
-     * **动画面这一步是最后一行**，而且只在「这条正好是当前选中的宿舍」时才走。
+     * 【只发事实，不发结论】这条消息里没有 status、没有 state、没有任何
+     * 「已恢复」—— core 收到它只改 self.focus，一行都不碰事件簿。
      *
-     * 三个宿舍的数据是混在同一个通配符 topic 里进来的。不筛的话，
-     * dorm-b 的数据会直接把画面改成 dorm-b 的样子，而左上角还写着 dorm-a ——
-     * 这是这一步最容易出的错，而且屏幕上看着挺正常，只有盯着标签才发现对不上。
+     * 【不带 time】focus 不是一条事件，它不挂在读数的时间线上。core 收到它
+     * 盖的是自己那一刻的章（快照里 focus.at 就是它），两边不会有两个说法。
      *
-     * @param {string} topic       消息来自哪个 topic
-     * @param {object} payload     mqtt.js 给的二进制载荷
+     * 【retain = false】指令是一次性的。留在 broker 上的话，下一次起 core 会
+     * 凭空把焦点切到某一间 —— 那条指令是上一次演示发的，人早忘了。
+     *
+     * 【同一个房间再点一次 = 取消】这条规矩判在 **core** 里，不在这儿：
+     * 页面自己判的话就又多了一份「当前焦点是谁」的本地说法，而它迟早会和
+     * core 的不一样。这边只管把「我要看 dorm-b」说出去。
+     *
+     * @param {string} nodeId
+     * @returns {{ok: boolean, reason: string}}
      */
-    function onMessage(topic, payload) {
-      const fromTopic = topicNode(topic);
+    function sendFocus(nodeId) {
+      if (!CFG) return { ok: false, reason: '未加载 shared/config.js' };
+      if (!client || !client.connected) return { ok: false, reason: '还没连上 broker' };
 
-      let data = null;
-      try {
-        data = JSON.parse(payload.toString());
-      } catch (err) {
-        console.warn('[3d] 报文不是合法 JSON，丢弃：' + topic, err);
-        return;
-      }
-
-      if (!data || typeof data !== 'object'
-          || typeof data.temperature !== 'number'
-          || typeof data.humidity !== 'number') {
-        console.warn('[3d] 报文缺少 temperature / humidity（且必须是数字），丢弃：'
-          + topic);
-        return;
-      }
-
-      /* 先把节点名认下来。不认识的直接丢，不给它建格子 ——
-         否则任意一个脏 nodeId 都能往 latest 里塞一条。 */
-      if (!Object.prototype.hasOwnProperty.call(latest, data.nodeId)) {
-        console.warn('[3d] 不认识的 nodeId：「' + data.nodeId + '」，丢弃：' + topic);
-        return;
-      }
-
-      if (fromTopic && fromTopic !== data.nodeId) {
-        console.warn('[3d] topic 里的节点（' + fromTopic + '）和报文里的（'
-          + data.nodeId + '）对不上，以下面报文里的为准');
-      }
-
-      if (typeof judgeStatus !== 'function') {
-        console.warn('[3d] 未加载 shared/rules.js，无法复核 status，丢弃：' + topic);
-        return;
-      }
-
-      /* status 一律用规则复核，报文里写什么都不算数 ——
-         和 dashboard 的 handleMessage 是同一个口径。 */
-      const expected = judgeStatus(data.temperature, data.humidity);
-      if (data.status !== expected) {
-        console.warn('[3d] status 不一致：收到「' + data.status + '」，规则算出「'
-          + expected + '」，以规则为准');
-      }
-
-      latest[data.nodeId] = {
-        nodeId: data.nodeId,
-        temperature: data.temperature,
-        humidity: data.humidity,
-        status: expected,
-        time: data.time,
-      };
-
-      /* 关键的一行：不是当前选中的宿舍就到此为止，画面一个字都不动。 */
-      if (data.nodeId === currentNodeId) render();
+      const text = JSON.stringify({
+        nodeId: nodeId, action: CFG.CMD_ACTION_FOCUS, source: SOURCE_3D,
+      });
+      client.publish(CFG.CMD_TOPIC, text, { qos: CFG.QOS, retain: CFG.CMD_RETAIN });
+      console.log('[3d] 发出指令', CFG.CMD_TOPIC, text);
+      return { ok: true, reason: '' };
     }
 
+    /**
+     * 点中一间房之后那一行说明。**这句必须写**：点完屏幕上什么都不变
+     * （镜头要等 core 发回新快照才飞），不说的话就是「点了没反应」。
+     */
+    function noteCmd(res, nodeId) {
+      if (!cmdNoteEl) return;
+      cmdNoteEl.textContent = res.ok
+        ? '已把焦点切到 ' + nodeId + '，等 core 发回新快照（再点同一间就是取消）'
+        : '没能把焦点切到 ' + nodeId + '：' + res.reason;
+    }
+
+    /* 世界只报告「点了哪一间」，发指令是页面的事。 */
+    world.onPick(function (nodeId) {
+      noteCmd(sendFocus(nodeId), nodeId);
+    });
+
+    /* ---------- 渲染：快照 → 世界 ---------- */
+
+    /**
+     * 这个节点的事件是不是**正在处理中**（core 事件机里的 HANDLING）。
+     *
+     * 只看没结案的那条事件（openEvent 已经筛掉了已恢复 / 未恢复），所以
+     * 事情结了扇叶就停 —— 这是三个出口里唯一一处和看板那台风扇不一样的地方：
+     *
+     *   看板 3D   风扇 = 「有没有人按过开始处理」（按过就一直转，
+     *             那是**那一按**的即时回执，属于单个宿舍的操作反馈）
+     *   这里      风扇 = 「这件事是不是正在被处理」（结案就停，
+     *             那是三个空间并排时「哪间还悬着」的持续信号）
+     *
+     * 两句话问的不是同一件事，落在两个页面上也就不该长一样。
+     * （偏热那间的风扇由 world.js 自己按 LOOK 表管，和这里无关 ——
+     * 两个原因在那边合成，用的是 or。）
+     *
+     * 'HANDLING' 是 **core 事件状态机**里的原值（events.py 的 HANDLING），
+     * 不是那四个环境状态 —— 环境状态一个字都不在这份文件里写死。
+     */
+    function isHandling(nodeId) {
+      const open = openEvent(snapshot, nodeId);
+      return Boolean(open && open.state === 'HANDLING');
+    }
+
+    /**
+     * 把最新那一帧快照摆到画面上。
+     *
+     * **只有这一个出口**，而且只做「转发」：节点名单从快照的 nodes[] 里来
+     * （不是自己写死三个名字），状态是快照里那个字符串（原样转发，连认不认识
+     * 都不判），谁是重点 / 焦点也是快照里那两格。一句话都不算。
+     */
+    function render() {
+      if (!snapshot) return;
+
+      const nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+      nodes.forEach(function (node) {
+        world.setReading(node.nodeId, {
+          nodeId: node.nodeId,
+          status: node.status,
+          temperature: node.temperature,
+          humidity: node.humidity,
+          online: node.online,
+        });
+        // 顺序无所谓：两个 setter 各自重算一次风扇（syncFan 是唯一那个开关），
+        // 谁后到都是同一个结果 —— 这正是不写成「后调用的说了算」的原因。
+        world.setHandling(node.nodeId, isHandling(node.nodeId));
+      });
+
+      world.setPriority(snapshot.priority && typeof snapshot.priority.nodeId === 'string'
+        ? snapshot.priority.nodeId : null);
+      world.setFocus(snapshot.focus && typeof snapshot.focus.nodeId === 'string'
+        ? snapshot.focus.nodeId : null);
+
+      /* 读数条那几个字用的是 logic.js 的 focusBanner —— 和看板顶部、手机大卡片
+         是**同一个函数**。同一帧快照在几块屏幕上永远是同一句话，分叉的时候
+         不报错才是最难查的。 */
+      const banner = focusBanner(snapshot);
+      if (readoutEl) {
+        readoutEl.textContent = banner.tag ? banner.tag + '：' + banner.line : banner.line;
+      }
+      if (readoutSubEl) readoutSubEl.textContent = banner.reason || '';
+
+      /* 快照里已经有焦点了 = 刚发出去那条指令落地了，把「等新快照」那句撤掉。
+         不看「是不是我点的那一间」：core 的规矩是同一个再点一次就取消，
+         而页面不该自己维护一份「我刚才点了谁」。 */
+      if (banner.mode === 'focus' && cmdNoteEl) cmdNoteEl.textContent = '';
+    }
+
+    /**
+     * 唯一的消息入口。整个页面只订阅一条 topic，所以这里是唯一的入口校验：
+     * 过了这一关，后面每一处渲染都可以直接取字段。
+     *
+     * 顺序是刻意的，前面一步没过就 return：
+     *   1) topic 必须就是那一条
+     *   2) JSON.parse 包 try/catch
+     *   3) readSnapshot 校验形状与版本（在 logic.js 里，和看板共用同一份）
+     *   4) 换掉内存里那一帧，然后重画
+     *
+     * **没有第 5 步**：页面不加工、不合并、不记账。
+     *
+     * @param {string} topic
+     * @param {string} payloadText 报文原文
+     * @returns {boolean} true = 收下了
+     */
+    function handleMessage(topic, payloadText) {
+      if (!CFG) {
+        console.error('[3d] 未加载 shared/config.js，请检查 <script> 的引入顺序');
+        return false;
+      }
+
+      /* 1) 只认那一条 —— 只订了它，别的都当没看见。
+            不挡的话「别的 topic 上的一条消息把三间房刷成空的」这种事迟早发生。 */
+      if (topic !== CFG.STATE_TOPIC) {
+        console.warn('[3d] 不是快照 topic（' + CFG.STATE_TOPIC + '），已忽略：' + topic);
+        return false;
+      }
+
+      /* 2) 解析 */
+      let payload;
+      try {
+        payload = JSON.parse(payloadText);
+      } catch (err) {
+        console.warn('[3d] 快照不是合法 JSON，丢弃：' + topic, err);
+        return false;
+      }
+
+      /* 3) 形状与版本 */
+      const result = readSnapshot(payload);
+      if (!result.ok) {
+        console.warn('[3d] 快照校验不通过：' + result.reason);
+        return false;
+      }
+
+      /* 4) 换帧 + 重画 */
+      snapshot = result.snapshot;
+      render();
+      return true;
+    }
+
+    /* ---------- MQTT ---------- */
+
+    /* Broker 地址从配置里拼，不自己写一遍 —— 本机打开就是 ws://localhost:9001，
+       手机用 http://10.102.196.160:8000/three/ 打开就是 ws://10.102.196.160:9001。
+       写死 localhost 的话，手机浏览器里的 localhost 指的是手机自己，连不回来。 */
+    const BROKER_URL = CFG ? CFG.brokerUrlFor(location) : '';
+
     function connect() {
+      if (!CFG) { setConn(false, '未加载 shared/config.js'); return; }
+
       if (typeof mqtt === 'undefined') {
         setConn(false, '未加载 mqtt.js');
         console.error('[3d] 缺少 dashboard/lib/mqtt.min.js，请重新下载后刷新');
@@ -466,7 +625,7 @@
       c.on('connect', function () {
         if (!current()) return;
         setConn(true, '已连接 · ' + BROKER_URL);
-        c.subscribe(TOPIC, { qos: 1 }, function (err) {
+        c.subscribe(CFG.STATE_TOPIC, { qos: CFG.QOS }, function (err) {
           if (err) console.error('[3d] 订阅失败：', err);
         });
       });
@@ -485,18 +644,14 @@
         setConn(false, '连不上 ' + BROKER_URL);
       });
 
-      /* 唯一的接入口。mqtt.js 给的是二进制，转成字符串这一步在 onMessage 里做。 */
+      /* 唯一的接入口。mqtt.js 给的是二进制，转成字符串这一步在这儿做。 */
       c.on('message', function (topic, payload) {
-        onMessage(topic, payload);
+        handleMessage(topic, payload.toString());
       });
     }
 
-    /* 打开就先摆成 dorm-a。这时还没有任何数据，
-       覆盖层会写明「（还没有收到数据）」，不会假装有数据。 */
-    pick(NODE_IDS[0]);
-
-    /* 打开就连。连不上也不影响手动预览按钮 —— 那是不经过 Broker 的，
-       现场没网的时候正好用来演示。 */
+    /* 打开就连。快照是 retained 的，core 活着的话连上就能立刻拿到一帧，
+       用不着等模拟器发下一条。 */
     connect();
   </script>
 

@@ -495,8 +495,10 @@ function sendHandle(nodeId, actionTime) {
  * 时刻反而会被当成「这条指令产生的时刻」。core 收到它盖的是自己那一刻的章
  * （快照里 focus.at 就是它），两边不会有两个说法。
  *
- * 【只有移动端发】看板看不到这个函数 —— 两边都能改焦点的话，
- * 两个人一起看就会互相抢。见 shared/config.js 的 CMD_ACTION_FOCUS。
+ * 【谁在发】移动端和 3D 页面各有一份这个函数 —— 两边都是「点一下，把镜头
+ * 切到那一间」，只是点的是卡片还是房间。看板不发：它那块 3D 面板本来就只看
+ * 一间，没有「切到哪一间」这回事。规则和 source 的名字见 shared/config.js
+ * 的 CMD_ACTION_FOCUS。
  *
  * @param {string} nodeId
  * @returns {{ok: boolean, reason: string}}
@@ -521,8 +523,9 @@ function publish(payload) {
  *
  * 和看板上的 cmdNote 分开写，是因为那句是**照着 handle 那件事**写的
  * （「好没好由 core 后续收到的报文判」是事件结案的说法，焦点没有这回事）。
- * 措辞放在这里而不是 logic.js：logic.js 是三个出口共用的一套词，
- * 而 focus 只有移动端会发，塞进去反而让人以为别处也在用。
+ * 措辞放在这里而不是 logic.js：logic.js 是三个出口共用的一套词，而 focus
+ * 这句话只有移动端这一处这么说 —— 3D 页面点房间也发 focus，但它那句写在自己
+ * 页面里（说的是「镜头什么时候飞过去由 core 说了算」）。凑成一句反而四不像。
  *
  * 那半句「要等 core 发回新快照」必须留着：手机上点一下**屏幕上什么都不变**，
  * 不说的话就是「点了没反应」；说了才知道该等什么。

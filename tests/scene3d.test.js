@@ -40,7 +40,6 @@ const { pathToFileURL } = require('node:url');
 const ROOT = path.join(__dirname, '..');
 const SCENE_FILE = path.join(ROOT, 'three', 'scene.js');
 const ROOM_FILE = path.join(ROOT, 'three', 'room.js');
-const HTML_FILE = path.join(ROOT, 'three', 'index.html');
 const LIB_FILE = path.join(ROOT, 'three', 'lib', 'three.module.js');
 
 let pass = 0;
@@ -1251,84 +1250,24 @@ let focusRingRef = null;
     check('dispose 之后再 resize 不会再有动作', rendererRef.sizes.length === sizeBefore);
   }
 
-  /* ===== N. index.html ===== */
-
-  console.log('\nN. index.html');
-
-  {
-    const html = fs.readFileSync(HTML_FILE, 'utf8');
-    // 查源码前先剥注释，否则会匹配到注释里写的示例 ——
-    // 这次真踩到了：#scene 的注释里就写着「position: relative」，
-    // 不剥的话下面那条「是不是真写了」永远为真。
-    const bare = html
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/\/\*[\s\S]*?\*\//g, '');
-
-    const map = html.match(/<script\s+type=["']importmap["']\s*>([\s\S]*?)<\/script>/);
-    check('有 importmap', !!map);
-
-    let parsed = null;
-    try { parsed = JSON.parse(map[1]); } catch (e) { /* 下面报 */ }
-    check('importmap 是合法 JSON（所以里面一行注释都写不了）', parsed !== null);
-    check('映射了 three', parsed && parsed.imports && !!parsed.imports.three,
-      parsed && JSON.stringify(parsed.imports));
-
-    const url = (parsed && parsed.imports.three) || '';
-    check('three 固定 0.160.0（版本要和 lib/ 里那份一致）', url.includes('0.160.0'), url);
-    check('指向 build/three.module.js（ESM 那份，不是 three.core.js）',
-      url.includes('three.module.js'), url);
-
-    // 比的是**标签**的位置，不是 'importmap' 这个词 —— 注释里也出现过这个词，
-    // 拿 indexOf 找词的话，两条注释谁前谁后就决定了断言真假。
-    const mapAt = html.indexOf('<script type="importmap">');
-    const modAt = html.indexOf('<script type="module">');
-    check('importmap 标签出现在 module script 标签之前（顺序反了浏览器不认）',
-      mapAt >= 0 && modAt > mapAt, mapAt + ' / ' + modAt);
-
-    check('用 type="module" 引了 scene.js',
-      /import\s*\{[^}]*createDorm3D[^}]*\}\s*from\s*['"]\.\/scene\.js['"]/.test(html));
-    check('HTML 里没有自己写 three 的代码（只负责建容器和调用）',
-      !/new\s+THREE\./.test(bare));
-    check('容器元素的 id 和调用时传的一致',
-      /id="scene"/.test(html) && /createDorm3D\(\s*['"]scene['"]\s*\)/.test(html));
-
-    /* ---- 四个测试按钮 ---- */
-
-    const statuses = [...html.matchAll(/data-status=["']([^"']+)["']/g)].map((m) => m[1]);
-    check('有 4 个测试按钮', statuses.length === 4, statuses.length + ' 个');
-    check('★ 四个按钮正好是统一规则那四个状态（差一个字 updateScene 就认不出来）',
-      statuses.join(',') === '正常,偏冷,偏热,偏湿', statuses.join(','));
-    check('按钮上的文字就是状态本身（看的人不用猜）',
-      ['正常', '偏冷', '偏热', '偏湿'].every(
-        (s) => html.indexOf('>' + s + '</button>') >= 0));
-
-    check('按钮点击调了 updateScene',
-      /addEventListener\(\s*['"]click['"]/.test(bare) && /\.updateScene\(/.test(bare));
-    check('★ 把 data-status 原样交给了 apply（页面这边不二次加工状态值，'
-      + '认不出来的值要让 scene.js 去警告）',
-      /apply\(\s*btn\.dataset\.status\s*\)/.test(bare));
-    check('点了按钮会更新覆盖层文字',
-      /\.setLabel\(/.test(bare) && /状态：/.test(bare));
-    check('页面打开就先摆成「正常」（否则初始状态和按钮高亮对不上）',
-      /apply\(\s*['"]正常['"]\s*\)/.test(bare));
-    check('当前状态的那个按钮被标出来（加了 is-active）',
-      /is-active/.test(bare) && /classList\.toggle\(\s*['"]is-active['"]/.test(bare));
-
-    /* ---- 覆盖层的定位与穿透 ---- */
-
-    check('★ .scene-label 有 pointer-events: none（否则这层会吃掉鼠标事件，'
-      + '将来想给 3D 加拖拽就点不穿）',
-      /\.scene-label\s*\{[^}]*pointer-events:\s*none/.test(bare));
-    check('★ .scene-label 是绝对定位的（absolute）',
-      /\.scene-label\s*\{[^}]*position:\s*absolute/.test(bare));
-    check('★ #scene 是 position: relative（覆盖层靠它定位，'
-      + '少了它覆盖层会飘到 <body> 上去，跑到页面左上角）',
-      /#scene\s*\{[^}]*position:\s*relative/.test(bare));
-    check('#scene 设了 overflow: hidden（setSize 和容器差一像素就会顶出滚动条）',
-      /#scene\s*\{[^}]*overflow:\s*hidden/.test(bare));
-    check('#scene 有确定的高度（高度是 0 的话 clientHeight 就是 0，算不出宽高比）',
-      /#scene\s*\{[^}]*height:/.test(bare));
-  }
+  /* ===== N. index.html —— 搬走了 =====
+   *
+   * 这一段原本查的是 Step 6-2 / 6-3 那版 index.html：它用 type="module" 引
+   * scene.js（单间房），页面上有四个手动预览按钮，CSS 里还有 .scene-label。
+   *
+   * Step E1-4 把那个页面整个重写了：只订 dormmate/v1/state 一条 topic、点房间
+   * 发 focus 指令、节点名单来自快照 —— 那四个手动预览按钮连同 scene.js 一起
+   * 不再出现在这个页面上（scene.js 本身还在，看板那块单间房面板还用着它）。
+   *
+   * 所以原来那 22 条断言连同那个读 index.html 的常量一起搬去了
+   * **tests/scene3d-page.test.js**。
+   * 那边跑的是真的 world.js / room.js / dashboard/logic.js（只把 three 换成假的），
+   * 比在这儿对 HTML 做字符串匹配严实得多 —— importmap 那几条和 #scene 的那几条
+   * CSS 也一并搬了过去。
+   *
+   * 这里留一段说明而不是整段删干净，是因为下面紧接着还有 O 段：
+   * 字母跳号会让人以为中间漏了一段没跑。
+   */
 
   /* ===== O. 随包的文件 ===== */
 
