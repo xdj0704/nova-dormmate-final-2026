@@ -1037,7 +1037,17 @@ let focusRingRef = null;
     check('偏冷：平行光偏蓝（蓝通道高于红）', sun.b > sun.r + 20, JSON.stringify(sun));
     check('★ 偏冷：环境光也一起偏蓝（只改一盏的话，另一盏会把冷色调中和掉）',
       amb.b > amb.r + 20, JSON.stringify(amb));
-    check('偏冷：地板没被改成红色', rgb(floorMat.color).r === baseFloor.r);
+    // E1-3 起偏冷也改地板了（原来只改灯）。原因是三间房那边灯是**全场景共用**的，
+    // 一盏灯没法同时是三间的颜色 —— 只改灯的话，偏冷那间房在三间房里会和正常
+    // 那间一模一样，「房间颜色跟随 status」就少了一格。地板带上冷色两边都成立。
+    // 断言的本意没变：偏冷绝不能是偏热那块红。
+    const coldFloor = rgb(floorMat.color);
+    check('★ 偏冷：地板偏冷色（蓝通道明显高于红，不是偏热那块红）',
+      coldFloor.b > coldFloor.r + 20 && coldFloor.b > coldFloor.g,
+      JSON.stringify(coldFloor));
+    check('★ 偏冷：地板和正常那块灰也不是一个色（否则三间房并排时它看不出状态）',
+      coldFloor.r !== baseFloor.r || coldFloor.b !== baseFloor.b,
+      coldFloor.r + ' vs ' + baseFloor.r);
     check('偏冷：窗户关着、颜色回到默认',
       pivotRef.rotation.y === 0 && rgb(paneMat.color).r === baseWindow.r,
       pivotRef.rotation.y + ' / ' + JSON.stringify(rgb(paneMat.color)));
