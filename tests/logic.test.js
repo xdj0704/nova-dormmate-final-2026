@@ -45,11 +45,11 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十八个（一个 const + 十七个函数，多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这十九个（一个 const + 十八个函数，多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'SNAPSHOT_VERSION,readSnapshot,nodeOf,openEvent,latestEvent,eventStateText,'
   + 'handlingOf,actionState,fanOn,trendOf,trendText,calmLine,focusBanner,'
-  + 'alertLine,snapshotSummary,buildMlNote,mlFetchFailed,cmdNote');
+  + 'alertLine,speakLine,snapshotSummary,buildMlNote,mlFetchFailed,cmdNote');
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
@@ -59,7 +59,7 @@ check('没有 default export（用默认导出的话，dashboard.js 那条具名
      trendText 的反面：它是「上升/下降/持平 -> 一句话」的唯一一份说法，两边都用它
      fileName / rowCount —— ML 那一段的收拾字段 */
 ['nodeList', 'eventBlock', 'survey', 'isObject', 'bad', 'fileName', 'rowCount',
-  'ML_BAD_SHAPE', 'STATUS_TEXT']
+  'cameraCountOf', 'ML_BAD_SHAPE', 'STATUS_TEXT']
   .forEach(function (name) {
     check('★ ' + name + ' 不导出（内部件：同一件事只留一份说法）',
       EXPORTS.includes(name), false);
@@ -109,15 +109,16 @@ vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { readSnapshot, nodeOf, openEvent, latestEvent, eventStateText,
   handlingOf, actionState, fanOn, trendOf, trendText, calmLine, focusBanner,
-  alertLine, snapshotSummary, buildMlNote, mlFetchFailed, cmdNote } = context;
+  alertLine, speakLine, snapshotSummary, buildMlNote, mlFetchFailed, cmdNote } = context;
 
-check('★ 十七个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
+check('★ 十八个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
   eventStateText, handlingOf, actionState, fanOn, trendOf, trendText, calmLine,
-  focusBanner, alertLine, snapshotSummary, buildMlNote, mlFetchFailed, cmdNote]
+  focusBanner, alertLine, speakLine, snapshotSummary, buildMlNote, mlFetchFailed,
+  cmdNote]
   .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function', 'function', 'function']);
+  'function', 'function', 'function', 'function', 'function', 'function']);
 
 /* 版本号是 const（不是函数），要从上下文的词法作用域里读 ——
    它和 core.py 的 SNAPSHOT_VERSION 必须同时改，读出来对一次是值得的。 */
@@ -151,7 +152,7 @@ function nodeRow(nodeId, over) {
   return row;
 }
 
-/** 一条事件。字段就是 core 的 Event.view() 那十三样（顺序也照着）。 */
+/** 一条事件。字段就是 core 的 Event.view() 那十四样（顺序也照着）。 */
 function eventRow(over) {
   const e = {
     event_id: 'dorm-a-20260922-202800',
@@ -169,6 +170,9 @@ function eventRow(over) {
     result: null,
     abnormalAfter: 0,
     verifyCount: 0,
+    /* Phase6 E2：这条事件上登了几张现场快照。core 只报个数，那条记录本身
+       （水印、文件名、宽高）留在 data/events.json 里，不进每个周期的快照。 */
+    cameraCount: 0,
   };
   Object.keys(over || {}).forEach(function (k) { e[k] = over[k]; });
   return e;
@@ -727,9 +731,130 @@ check('★ 念出来的是 core 给的 durationText（不是这边用 durationSe
       durationSec: 1200, durationText: '不到 1 分钟' }), nodeRow('dorm-c')] }))
     .indexOf('不到 1 分钟') > 0, true);
 
-/* ---------- K. snapshotSummary（日志里那一行） ---------- */
+/* ---------- K. speakLine（Phase6 E2：「朗读状态」念的那两句） ---------- */
 
-console.log('\n=== K. snapshotSummary ===');
+console.log('\n=== K. speakLine ===');
+
+check('★ 平静时和 alertLine 一样：calmLine 加个句号',
+  speakLine(snapshotOf()), '当前 3 个宿舍都正常。');
+check('没收到快照时也成一句话', speakLine(null), '还没有收到 core 的快照。');
+
+/* 【主体那一条】温湿度必须**念出来**，而且是快照里那两个数。
+   E2 的要求是「朗读内容从 state 全局快照实时获取选中节点的温湿度、状态、事件」
+   —— 只念「偏热」的话，31℃ 和 39℃ 听起来一模一样。 */
+check('★ 异常 + 处理中：温湿度 / 状态 / 时长 / 事件四样都在',
+  speakLine(busySnapshot()),
+  'dorm-b 温度 31 摄氏度，湿度 60%，偏热，已持续 20 分钟。'
+  + '事件处理中，之后又收到 2 条异常。');
+
+/* 「实时」两个字靠这条守着：换一份快照，念出来的数字就得跟着变。
+   写死一份文本的话（不管是写死在页面里还是写死在这个函数里），这里立刻红。 */
+check('★ 换一份快照，念的就是新的读数（不是写死的那句）',
+  speakLine(busySnapshot({
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热',
+      temperature: 36.5, humidity: 41, durationText: '3 分钟' }), nodeRow('dorm-c')],
+  })),
+  'dorm-b 温度 36.5 摄氏度，湿度 41%，偏热，已持续 3 分钟。事件处理中，'
+  + '之后又收到 2 条异常。');
+
+/* 点了名就念那一个 —— 「查看 dorm-b」之后紧跟着一句「朗读状态」，
+   听的人要的是 dorm-b，不是 core 排出来的那个重点。 */
+check('★ 传了 nodeId 就念它，不管焦点和重点是谁',
+  speakLine(busySnapshot({ priority: { nodeId: 'dorm-c', status: '正常', reason: 'x' } }),
+    'dorm-c'),
+  'dorm-c 温度 25 摄氏度，湿度 60%，正常。没有未结案的事件。');
+check('★ 传的 nodeId 前后有空格也认（页面上那个值是从 DOM 里读出来的）',
+  speakLine(busySnapshot(), ' dorm-b ').indexOf('dorm-b 温度') === 0, true);
+check('★ 传了个空串 / 空白 -> 当没传，回到「被点名 > 是重点」',
+  speakLine(busySnapshot(), '   ').indexOf('dorm-b 温度') === 0, true);
+check('★ 传的 nodeId 和焦点都在时，传进来的那个优先',
+  speakLine(busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } }), 'dorm-b')
+    .indexOf('dorm-b 温度') === 0, true);
+
+/* 【不能拿别人的读数冒充】点了一个 core 还没收到数据的宿舍，要如实说，
+   不能退回去念重点那个 —— 那等于把「dorm-b 什么情况」答成了「dorm-a 什么情况」，
+   而听的人分不出这个区别。 */
+check('★ 点名那个还没收到数据 -> 如实说，不去念别人的读数',
+  speakLine(snapshotOf({ nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'),
+    nodeRow('dorm-c', { status: null })] }), 'dorm-c'),
+  'dorm-c 还没有收到数据，core 那边还没有它的读数。');
+check('★ 点名那个压根不在名单里（core 改了配置）也这么说，不是崩掉',
+  speakLine(snapshotOf(), 'dorm-x'),
+  'dorm-x 还没有收到数据，core 那边还没有它的读数。');
+check('★ 「还没有收到数据」不等于「正常」',
+  speakLine(snapshotOf({ priority: { nodeId: 'dorm-c', status: null, reason: 'x' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b'),
+      nodeRow('dorm-c', { status: null, history: [] })] })).indexOf('正常'), -1);
+
+/* 事件那一段的三种情形。 */
+check('★ 开了案没人动 -> 「事件待处理，还没有人按开始处理」',
+  speakLine(snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热', temperature: 33,
+      humidity: 55, history: [] }), nodeRow('dorm-c')],
+    events: { summary: {}, events: [eventRow({ nodeId: 'dorm-b', state: 'OPEN' })] } })),
+  'dorm-b 温度 33 摄氏度，湿度 55%，偏热。事件待处理，还没有人按开始处理。');
+check('★ 没有未结案的事件 -> 如实说，不编一句「正常」',
+  speakLine(snapshotOf({ priority: { nodeId: 'dorm-b', status: '正常', reason: 'x' } })),
+  'dorm-b 温度 25 摄氏度，湿度 60%，正常。没有未结案的事件。');
+/* 事件那一段读的是**事件表**，不是节点的 status：处理之后连着几条正常、
+   还没到恢复条数时，status 已经是「正常」而案卷还开着 —— 那时候念「正常」
+   是对，念「没有未结案的事件」就错了。 */
+check('★ status 是「正常」但案卷还开着的时候，事件那一段说的是案卷',
+  speakLine(snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '正常', reason: 'x' },
+    events: { summary: {}, events: [eventRow({ nodeId: 'dorm-b', state: 'HANDLING',
+      action: '开启风扇 / 通风', abnormalAfter: 1 })] } })),
+  'dorm-b 温度 25 摄氏度，湿度 60%，正常。事件处理中，之后又收到 1 条异常。');
+
+/* 【E2 新加的那半句】现场快照张数，用的是 core 报的 cameraCount。 */
+check('★ 拍了照之后念得出张数',
+  speakLine(snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' },
+    nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热', temperature: 34,
+      humidity: 70, history: [] }), nodeRow('dorm-c')],
+    events: { summary: {}, events: [eventRow({ nodeId: 'dorm-b', state: 'OPEN',
+      cameraCount: 2 })] } })),
+  'dorm-b 温度 34 摄氏度，湿度 70%，偏热。事件待处理，还没有人按开始处理，'
+  + '已登记 2 张现场快照。');
+check('★ 一张都没拍就不提这半句（不然每次都先念一句「0 张」）',
+  speakLine(busySnapshot()).indexOf('现场快照'), -1);
+/* 旧版 core 的快照里没有 cameraCount。缺了它得当成「这一帧没带这个数」，
+   而不是让 JS 把 undefined 念成「已登记 undefined 张现场快照」。 */
+check('★ 事件里没有 cameraCount 字段（旧版 core）也不会念出 undefined',
+  speakLine(snapshotOf({
+    priority: { nodeId: 'dorm-b', status: '偏热', reason: 'x' },
+    events: { summary: {}, events: [{ nodeId: 'dorm-b', state: 'OPEN' }] } }))
+    .indexOf('undefined'), -1);
+
+/* 长什么样：两个句子，句号收尾，没有 ｜。
+   【两句不是一个长句】念的时候中间不留缝，听的人抓不住哪儿是数字、哪儿是状态。 */
+check('★ 每一句都以句号收尾（语音那边靠这个断句）',
+  speakLine(busySnapshot()).slice(-1), '。');
+check('★ 两个句子（温湿度一句、事件一句）',
+  speakLine(busySnapshot()).split('。').length - 1, 2);
+check('★ 念的是人话，没有 ｜ 那种只给眼睛看的符号',
+  speakLine(busySnapshot()).indexOf('｜'), -1);
+
+/* 【和 focusBanner 说的是同一个宿舍】三处（横幅 / alertLine / speakLine）各挑一遍
+   「被点名 > 是重点」，挑法走岔了就会出现「横幅写着 dorm-c、念出来的却是 dorm-b」——
+   两条出口说的话不一样，而两边看着都对。不传 nodeId 时才谈得上挑。 */
+[
+  ['只有重点', busySnapshot()],
+  ['只有焦点', snapshotOf({ focus: { nodeId: 'dorm-c', by: 'mobile' } })],
+  ['焦点和重点不同', busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } })],
+  ['焦点和重点相同', busySnapshot({ focus: { nodeId: 'dorm-b', by: 'mobile' } })],
+  ['都没有', snapshotOf()],
+].forEach(function (pair) {
+  const banner = focusBanner(pair[1]);
+  const line = speakLine(pair[1]);
+  check('★ ' + pair[0] + '：横幅和朗读念的是同一个宿舍',
+    banner.nodeId === null ? line.indexOf('宿舍') > 0 : line.indexOf(banner.nodeId) === 0, true);
+});
+
+/* ---------- L. snapshotSummary（日志里那一行） ---------- */
+
+console.log('\n=== L. snapshotSummary ===');
 
 check('没收到快照', snapshotSummary(null), '还没有收到快照');
 check('★ 整行', snapshotSummary(busySnapshot()),
@@ -755,9 +880,9 @@ check('★ 「未结案」是 OPEN + HANDLING 两个加起来（不是只看 OPE
 check('★ 版本号读的是快照里的 v（不是这边写死的 2）',
   snapshotSummary(snapshotOf({ v: 2 })).indexOf('快照 v2') === 0, true);
 
-/* ---------- L. buildMlNote / mlFetchFailed（Rule-ML 那一段） ---------- */
+/* ---------- M. buildMlNote / mlFetchFailed（Rule-ML 那一段） ---------- */
 
-console.log('\n=== L. buildMlNote / mlFetchFailed ===');
+console.log('\n=== M. buildMlNote / mlFetchFailed ===');
 
 const ML_OK = {
   text: '规则和 ML 在这份数据上大体一致，只有少数几条对不上。',
@@ -830,9 +955,9 @@ check('★ 降级时说明里告诉人怎么补（跑一次 analysis.py），并
   mlFetchFailed('x').note.indexOf('analysis/analysis.py') > 0
     && mlFetchFailed('x').note.indexOf('看板其余部分不受影响') > 0, true);
 
-/* ---------- M. cmdNote ---------- */
+/* ---------- N. cmdNote ---------- */
 
-console.log('\n=== M. cmdNote（按下「开始处理」之后那行字）===');
+console.log('\n=== N. cmdNote（按下「开始处理」之后那行字）===');
 
 const sent = cmdNote(true);
 check('★ 发出去时点明「好没好由 core 判，这一步不结案」',
@@ -854,9 +979,9 @@ check('失败时不说「已记下这一笔」之类的话（页面不记账）'
 check('原因缺失时兜一句', cmdNote(false, '').indexOf('不知道什么原因') > 0, true);
 check('原因不是字符串时也兜住', cmdNote(false, null).indexOf('不知道什么原因') > 0, true);
 
-/* ---------- N. 纯函数：不改输入 ---------- */
+/* ---------- O. 纯函数：不改输入 ---------- */
 
-console.log('\n=== N. 纯函数 ===');
+console.log('\n=== O. 纯函数 ===');
 
 /* 【为什么用「跑完再比一遍 JSON」而不是 Object.freeze】
    freeze 只在严格模式下才抛，而 logic.js 不是严格模式（它是个普通模块，
@@ -866,6 +991,8 @@ const before = JSON.stringify(busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mob
 const frozen = busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } });
 focusBanner(frozen);
 alertLine(frozen);
+speakLine(frozen);
+speakLine(frozen, 'dorm-b');
 snapshotSummary(frozen);
 calmLine(frozen);
 actionState(frozen, 'dorm-b');
@@ -884,12 +1011,13 @@ const twice = busySnapshot();
 check('★ focusBanner 两次调用一模一样',
   JSON.stringify(focusBanner(twice)) === JSON.stringify(focusBanner(twice)), true);
 check('★ alertLine 两次调用一模一样', alertLine(twice), alertLine(twice));
+check('★ speakLine 两次调用一模一样', speakLine(twice), speakLine(twice));
 check('★ snapshotSummary 两次调用一模一样',
   snapshotSummary(twice), snapshotSummary(twice));
 
-/* ---------- O. 变异：改坏一处，看抓不抓得住 ---------- */
+/* ---------- P. 变异：改坏一处，看抓不抓得住 ---------- */
 
-console.log('\n=== O. 变异（真跑一遍，不是看代码猜）===');
+console.log('\n=== P. 变异（真跑一遍，不是看代码猜）===');
 
 /* 「横幅的理由必须是 core 给的那串字」——理由要是这边拼的，改一下快照里的
    reason，横幅就该跟着变。不变就说明那句话是写死在代码里的。 */
@@ -921,6 +1049,21 @@ check('★ 快照说「台风」，页面就显示「台风」（一个字的判
   focusBanner(typhoon).status, '台风');
 check('★ 快照说「台风」，语音也念「台风」',
   alertLine(typhoon), 'dorm-a 台风。');
+
+/* 「温湿度是快照里那两个数，不是这边写的」——把读数换掉，念出来的跟着换。
+   这条和上面那条是一对：上面守状态词，这条守数字。数字比状态词更容易被写死
+   （演示时好看的那个数），所以它单独钉一条。 */
+const readA = speakLine(busySnapshot({
+  nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热', temperature: 31,
+    humidity: 60, history: [] }), nodeRow('dorm-c')] }));
+const readB = speakLine(busySnapshot({
+  nodes: [nodeRow('dorm-a'), nodeRow('dorm-b', { status: '偏热', temperature: 39,
+    humidity: 88, history: [] }), nodeRow('dorm-c')] }));
+check('★ 把快照里的温湿度换掉，念出来的数字跟着变（不是写死的）',
+  [readA.indexOf('温度 31 摄氏度，湿度 60%') > 0,
+    readB.indexOf('温度 39 摄氏度，湿度 88%') > 0], [true, true]);
+check('★ 而且换掉之后原来那两个数就不在了',
+  [readA.indexOf('39'), readA.indexOf('88')], [-1, -1]);
 /* 颜色那一档认不出来就退回中性色（dashboard.js 的 viewFor），
    所以「台风」这个状态下页面依然画得出来，只是没有状态色 ——
    这正是「前端不认识规则」该有的样子：多一个状态名不会让页面崩，

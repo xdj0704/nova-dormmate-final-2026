@@ -505,6 +505,106 @@ export function alertLine(snapshot) {
 }
 
 /**
+ * core 报的「这条事件上登了几张现场快照」（Phase6 E2）。
+ *
+ * 没有这个字段不是「一张都没拍」，是**这一帧没带这个数**（旧版 core 的快照里
+ * 没有它）。两种都按「不提」处理 —— 念一句「0 张」会把这件事的重要性抬到和
+ * 温湿度一样，而它显然不是。
+ *
+ * 数出来的**不是**这边数 `snapshots` 数组的长度：那个数组每个周期都要重发，
+ * 所以 core 只报个数（`cameraCount`）。前端要看得细去读 data/events.json。
+ *
+ * @param {Object|null} event
+ * @returns {number}
+ */
+function cameraCountOf(event) {
+  return event && Number.isFinite(event.cameraCount) ? event.cameraCount : 0;
+}
+
+/**
+ * 语音「朗读状态」念的那两句。
+ *
+ *   dorm-b 温度 31 摄氏度，湿度 78%，偏热，已持续 20 分钟。事件待处理，已登记 1 张现场快照。
+ *
+ * 【和 alertLine 的分工】alertLine 是**页面自己**到点念的那一句，说给「没在看
+ * 屏幕的人」听，所以它只挑最要紧的那件事说、一个数字都不念。这一句是**有人点名
+ * 要听**的时候念的（web 页面那句「朗读状态」），点名的人想听的就是读数本身 ——
+ * 所以温湿度这两个数必须念出来，而且是从快照里**原样搬**的，不是这边量的。
+ *
+ * 【为什么温湿度也要念】「偏热」是 core 那套阈值算出来的结论，只听结论的话，
+ * 31℃ 和 39℃ 听起来一模一样。这是唯一一个会念出这两个数字的出口，因为它是
+ * 唯一一个**问的人明确想听**的出口。
+ *
+ * 【和 focusBanner 说的是同一个宿舍】挑谁这一条和 alertLine 完全相同
+ * （被点名 > 是重点），三处只能有一份挑法：横幅说 A 而念出来的是 B 的话，
+ * 站在旁边听的人看不出哪里不对。
+ *
+ * 【两句，不是一个长句】温湿度一句、事件一句，中间断开 —— 一口气念完的话，
+ * 听的人抓不住哪儿是数字、哪儿是状态。结尾照旧是句号。
+ *
+ * 【念谁】给了 `nodeId` 就念那一个（web 页面「查看 dorm-b」之后就该念 dorm-b），
+ * 不给就按上面那条规矩自己挑。点了名的那个宿舍如果 core 还没收到过数据，
+ * 就如实说「还没收到数据」，**不去念别人的读数** —— 那等于把「dorm-b 现在什么
+ * 情况」答成了「dorm-a 现在什么情况」，而听的人分不出这个区别。
+ *
+ * @param {Object|null} snapshot
+ * @param {string} [nodeId] 指定念哪一个；不给就自己挑
+ * @returns {string} 以句号收尾
+ */
+export function speakLine(snapshot, nodeId) {
+  const focus = snapshot && isObject(snapshot.focus) ? snapshot.focus : null;
+  const top = snapshot && isObject(snapshot.priority) ? snapshot.priority : null;
+  const focusedId = focus && typeof focus.nodeId === 'string' ? focus.nodeId : '';
+  const topId = top && typeof top.nodeId === 'string' ? top.nodeId : '';
+  /* 空串 / 全是空白当没传 —— 页面上那个值是从快照里读出来的，读到 undefined
+     拼出来就是空串，那不该被当成一个宿舍名。 */
+  const asked = typeof nodeId === 'string' ? nodeId.trim() : '';
+  const subject = asked || focusedId || topId;
+
+  if (!subject) return calmLine(snapshot) + '。';
+
+  const node = nodeOf(snapshot, subject);
+  const status = node && node.status != null ? node.status : '';
+  if (!status) {
+    return subject + ' 还没有收到数据，core 那边还没有它的读数。';
+  }
+
+  const readings = [];
+  if (Number.isFinite(node.temperature)) {
+    readings.push('温度 ' + node.temperature + ' 摄氏度');
+  }
+  if (Number.isFinite(node.humidity)) {
+    readings.push('湿度 ' + node.humidity + '%');
+  }
+
+  let first = subject + ' ' + readings.concat([status]).join('，');
+  /* 只有真的在异常里才有「持续了多久」这回事 —— 正常节点的 durationText 是
+     null（core 那侧解释过：说成「不到 1 分钟」是在说一件没发生过的事）。 */
+  if (typeof node.durationText === 'string' && node.durationText) {
+    first += '，已持续 ' + node.durationText;
+  }
+
+  const handling = handlingOf(snapshot, subject);
+  const second = [];
+  if (handling.label === '处理中') {
+    second.push('事件处理中');
+    if (handling.after > 0) second.push('之后又收到 ' + handling.after + ' 条异常');
+  } else if (handling.label === '待处理') {
+    second.push('事件待处理，还没有人按开始处理');
+  } else {
+    /* 没有未结案的事件 —— 这句话是**从快照读出来的**（core 的事件表里这一间
+       没有 OPEN / HANDLING 的了），不是这边看 status 猜的。两者可以不一样：
+       处理之后连着几条正常、还没到恢复的条数时，状态是「正常」而事件还开着。 */
+    second.push('没有未结案的事件');
+  }
+
+  const shots = cameraCountOf(handling.event);
+  if (shots > 0) second.push('已登记 ' + shots + ' 张现场快照');
+
+  return first + '。' + second.join('，') + '。';
+}
+
+/**
  * 消息日志里那一行摘要。看板每隔一会儿就会收到一条快照，把整份报文打到
  * 日志里刷屏没有意义 —— 这一行说的是「这一帧里有什么」。
  *
