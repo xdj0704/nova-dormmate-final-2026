@@ -1,0 +1,20 @@
+{
+  "description": "Phase1 演示剧本：三个宿舍各来一条，再把 dorm-b 的风扇降温和 dorm-c 的偏湿跑出来。一轮消费一帧。",
+  "interval": 2,
+  "frames": [
+    {"comment": "第一轮：三个宿舍同时有数，看板三张卡都亮起来"},
+    {"node": "dorm-a", "temperature": 25, "humidity": 60},
+    {"node": "dorm-b", "temperature": 31, "humidity": 78},
+    {"node": "dorm-c", "temperature": 16, "humidity": 60},
+
+    {"comment": "dorm-b 风扇降温：31(偏热) → 29(正常) → 27(正常)。状态是这条新数据自己算出来的，不是按钮点出来的"},
+    {"node": "dorm-b", "temperature": 29, "humidity": 78},
+    {"node": "dorm-b", "temperature": 27, "humidity": 78},
+
+    {"comment": "dorm-c 加湿：25/80 是偏湿而不是偏热 —— 顺序是先看温度再看湿度"},
+    {"node": "dorm-c", "temperature": 25, "humidity": 80},
+
+    {"comment": "repeat 的用法：同一条连发两次，验证看板是「刷新」而不是「多出一张卡」"},
+    {"node": "dorm-a", "temperature": 22, "humidity": 55, "repeat": 2}
+  ]
+}
