@@ -23,6 +23,7 @@ __all__ = [
     "DEMO_SEQUENCE",
     "SOURCE_MANUAL",
     "SOURCE_SIM",
+    "Frame",
     "NodeState",
     "ScriptError",
     "build_payload",

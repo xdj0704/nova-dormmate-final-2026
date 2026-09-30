@@ -15,6 +15,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +25,7 @@ from simulator.simulator import (  # noqa: E402
     COOLING_TARGET,
     DEMO_SEQUENCE,
     SOURCE_MANUAL,
+    Frame,
     NodeState,
     ScriptError,
     build_payload,
@@ -32,6 +34,7 @@ from simulator.simulator import (  # noqa: E402
     load_script,
     main,
     parse_args,
+    parse_frame_time,
     resolve_nodes,
 )
 from status_rules import compute_status  # noqa: E402
@@ -134,9 +137,9 @@ class TestScript(unittest.TestCase):
         finally:
             path.unlink()
         self.assertEqual(frames, [
-            ("dorm-a", 25.0, 60.0),
-            ("dorm-b", 31.0, 78.0),
-            ("dorm-b", 31.0, 78.0),
+            Frame("dorm-a", 25.0, 60.0),
+            Frame("dorm-b", 31.0, 78.0),
+            Frame("dorm-b", 31.0, 78.0),
         ])
         self.assertIsNone(interval)
 
@@ -148,7 +151,7 @@ class TestScript(unittest.TestCase):
             frames, _ = load_script(path)
         finally:
             path.unlink()
-        self.assertEqual(frames, [("dorm-a", 25.0, 60.0)])   # 没写 node 就用 dorm-a
+        self.assertEqual(frames, [Frame("dorm-a", 25.0, 60.0)])   # 没写 node 就用 dorm-a
 
     def test_剧本能带自己的间隔(self):
         path = write_tmp(json.dumps({"interval": 2, "frames": [
@@ -166,7 +169,74 @@ class TestScript(unittest.TestCase):
             frames, _ = load_script(path)
         finally:
             path.unlink()
-        self.assertEqual(frames, [("dorm-c", 16.5, 60.0)])   # 字符串数字也认
+        self.assertEqual(frames, [Frame("dorm-c", 16.5, 60.0)])   # 字符串数字也认
+
+    def test_帧里能写死时间(self):
+        path = write_tmp(json.dumps({"frames": [
+            {"node": "dorm-a", "temperature": 31, "humidity": 78,
+             "time": "2026-09-22 20:00:00"}]}))
+        try:
+            frames, _ = load_script(path)
+        finally:
+            path.unlink()
+        self.assertEqual(frames, [Frame("dorm-a", 31.0, 78.0, datetime(2026, 9, 22, 20, 0, 0))])
+
+    def test_没写时间就是None(self):
+        path = write_tmp('{"frames": [{"temperature": 25, "humidity": 60}]}')
+        try:
+            frames, _ = load_script(path)
+        finally:
+            path.unlink()
+        self.assertIsNone(frames[0].time)
+
+    def test_repeat会把时间一起复制(self):
+        path = write_tmp(json.dumps({"frames": [
+            {"temperature": 31, "humidity": 78, "repeat": 3,
+             "time": "2026-09-22 20:00:00"}]}))
+        try:
+            frames, _ = load_script(path)
+        finally:
+            path.unlink()
+        self.assertEqual([f.time for f in frames], [datetime(2026, 9, 22, 20, 0, 0)] * 3)
+
+    def test_时间写坏了就说哪一帧错了(self):
+        path = write_tmp(json.dumps({"frames": [
+            {"temperature": 25, "humidity": 60, "time": "2026/09/22 20:00"}]}))
+        try:
+            with self.assertRaises(ScriptError) as ctx:
+                load_script(path)
+        finally:
+            path.unlink()
+        self.assertIn("第 1 帧的 time", str(ctx.exception))
+
+    def test_形状对但日期不存在也拦下(self):
+        with self.assertRaises(ScriptError) as ctx:
+            parse_frame_time("t.json", 2, "2026-02-30 20:00:00")
+        self.assertIn("不是一个真实的时间", str(ctx.exception))
+
+    def test_时间不是字符串也拦下(self):
+        with self.assertRaises(ScriptError):
+            parse_frame_time("t.json", 1, 20260922)
+
+    def test_剧本里写的时间真的进了报文(self):
+        # 这一条是这整套的意义所在：core 用报文里的 time 算「持续了多久」，
+        # 所以剧本写 20:05 就得发 20:05，不能悄悄换成现在。
+        payload = build_payload("dorm-b", 31, 78,
+                                now=datetime(2026, 9, 22, 20, 5, 0), seq=7)
+        self.assertEqual(payload["time"], "2026-09-22 20:05:00")
+        self.assertEqual(payload["status"], "偏热")
+
+    def test_剧本跑起来时时间字段照搬(self):
+        path = write_tmp(json.dumps({"frames": [
+            {"node": "dorm-c", "temperature": 31, "humidity": 78,
+             "time": "2026-09-22 20:00:00"}]}))
+        try:
+            with redirect_stdout(io.StringIO()) as out:
+                code = main(["--script", str(path), "--dry-run", "--interval", "0.01"])
+        finally:
+            path.unlink()
+        self.assertEqual(code, 0)
+        self.assertIn('"time": "2026-09-22 20:00:00"', out.getvalue())
 
     def test_文件不在时说人话(self):
         with self.assertRaises(ScriptError) as ctx:
@@ -254,11 +324,11 @@ class TestScript(unittest.TestCase):
         # 剧本文件本身也要有测试兜着，不然它坏了没人知道
         frames, interval = load_script(DEMO_SCRIPT)
         self.assertEqual(interval, 2.0)
-        self.assertEqual([f[0] for f in frames],
+        self.assertEqual([f.node for f in frames],
                          ["dorm-a", "dorm-b", "dorm-c", "dorm-b", "dorm-b",
                           "dorm-c", "dorm-a", "dorm-a"])
         # 三个节点各出现至少一次，且状态覆盖三种
-        statuses = {compute_status(t, h) for _, t, h in frames}
+        statuses = {compute_status(f.temperature, f.humidity) for f in frames}
         self.assertEqual(statuses, {"偏冷", "正常", "偏热", "偏湿"})
 
 
@@ -377,6 +447,27 @@ class TestMainDryRun(unittest.TestCase):
                                 "--dry-run", "--interval", "0.01"])
         temps = [p["temperature"] for p in self.published(out)]
         self.assertEqual(temps, [33.0, 31.0, 29.0, 27.0])
+
+
+class TestPackageSurface(unittest.TestCase):
+    """`from simulator import ...` 这份名单要和子模块对得上。
+
+    `load_script` 现在返回的是 `Frame` 对象，用的人自然会写
+    `from simulator import load_script, Frame` —— 而包这层是惰性转发、
+    名字没登记在 __all__ 里就是 AttributeError。这条是补上一课之后加的：
+    Frame 一开始漏登记了。
+    """
+
+    def test_all登记的名字都拿得到(self):
+        import simulator
+        for name in simulator.__all__:
+            with self.subTest(name=name):
+                self.assertTrue(hasattr(simulator, name), f"{name} 在 __all__ 里但取不到")
+
+    def test_load_script返回的对象的类型也登记了(self):
+        import simulator
+        self.assertIs(simulator.Frame, Frame)
+        self.assertIn("Frame", simulator.__all__)
 
 
 if __name__ == "__main__":

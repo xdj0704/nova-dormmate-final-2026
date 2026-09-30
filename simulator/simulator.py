@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -61,6 +62,9 @@ for _stream in (sys.stdout, sys.stderr):
 # source 用来区分「这条是谁发的」：模拟器发的、人手发的，排查时一眼能看出来。
 SOURCE_SIM = "sim"
 SOURCE_MANUAL = "manual"
+
+# 报文里 time 字段的形状。和统一 JSON 的约定一致：固定 YYYY-MM-DD HH:mm:ss。
+TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
 # 演示序列：依次覆盖全部 4 种 status，取值与回归测试数据一致
 DEMO_SEQUENCE = [
@@ -149,16 +153,60 @@ def cooling_sample(step: int, start: tuple[float, float] = COOLING_START,
     return round(temperature, 1), round(float(start[1]), 1)
 
 
-def load_script(path: str | Path) -> tuple[list[tuple[str, float, float]], float | None]:
-    """读 json 剧本 → ([(nodeId, 温度, 湿度), ...], 剧本自带的间隔或 None)。
+def parse_frame_time(name: str, index: int, raw) -> datetime | None:
+    """校验剧本里那一帧的 time。没写就返回 None（= 用当下时间）。
+
+    写了个格式不对的值就直接报错，不静默退回当下时间 —— 剧本里的时间是拿来
+    算「这段持续了多久」的，悄悄换成现在，跑出来的优先级就全是错的，而屏幕上
+    一条错误信息都没有。宁可现在停下来。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not TIME_RE.match(raw):
+        raise ScriptError(
+            f"{name} 第 {index} 帧的 time 要写成 \"YYYY-MM-DD HH:mm:ss\"，现在是 {raw!r}"
+        )
+    try:
+        return datetime.strptime(raw, TIME_FORMAT)
+    except ValueError:
+        # 形状对但日期不存在（比如 2026-02-30 或者 25 点）
+        raise ScriptError(f"{name} 第 {index} 帧的 time 不是一个真实的时间：{raw!r}") from None
+
+
+@dataclass(frozen=True)
+class Frame:
+    """剧本里的一帧：发给谁、什么值、报文里的时间。
+
+    `time` 为空 = 用当下墙上时间（Phase1 的老剧本就是这样，行为不变）。
+    写了具体时间 = 报文里就用它 —— 这样剧本的「持续了多久」是**写死的、
+    可复现的**，不取决于跑得多快。core 算持续时间用的是报文里的 time，
+    所以一份 20 分钟的剧本可以在 20 秒内跑完，core 依然认为它持续了 20 分钟。
+    墙上时间只影响一件事：离线超时（节点多久没来消息了）。
+    """
+
+    node: str
+    temperature: float
+    humidity: float
+    time: datetime | None = None
+
+
+def load_script(path: str | Path) -> tuple[list[Frame], float | None]:
+    """读 json 剧本 → ([Frame, ...], 剧本自带的间隔或 None)。
 
     格式（frames 里的 comment 字段是给人看的，会被忽略）：
         {"interval": 2,
          "frames": [{"node": "dorm-a", "temperature": 31, "humidity": 78},
-                    {"node": "dorm-b", "temperature": 16, "humidity": 60, "repeat": 2}]}
+                    {"node": "dorm-b", "temperature": 16, "humidity": 60,
+                     "repeat": 2, "time": "2026-09-22 20:00:00"}]}
 
     repeat 默认 1。每轮只消费一帧，所以剧本写几帧就发几条。
     帧里没有 node 就用 dorm-a —— 只有一个宿舍的剧本不用每帧都重复写。
+    帧里没有 time 就用当下时间；写了就必须是 YYYY-MM-DD HH:mm:ss。
+
+    注意 `time` 跟着 repeat 一起复制：一条 repeat: 3 的异常帧是「同一条读数
+    在时间上出现了三次」，三次的报文时间一样 —— 这正是「异常次数 +3、但这段
+    的起始时间不变」该有的样子。要模拟时间往前走，就一帧一帧把 time 写出来
+    （剧本要让 core 算出持续时间，本来就该写清楚）。
     """
     file = Path(path)
     if not file.exists():
@@ -178,7 +226,7 @@ def load_script(path: str | Path) -> tuple[list[tuple[str, float, float]], float
     if not isinstance(frames, list) or not frames:
         raise ScriptError(f"{file.name} 里没有 frames，或 frames 是空的 —— 至少要有一帧")
 
-    out: list[tuple[str, float, float]] = []
+    out: list[Frame] = []
     for i, frame in enumerate(frames, 1):
         if not isinstance(frame, dict):
             raise ScriptError(f"{file.name} 第 {i} 帧不是对象")
@@ -196,10 +244,11 @@ def load_script(path: str | Path) -> tuple[list[tuple[str, float, float]], float
                 f"{file.name} 第 {i} 帧的温度/湿度不是数字："
                 f"{frame['temperature']!r} / {frame['humidity']!r}"
             ) from None
+        moment = parse_frame_time(file.name, i, frame.get("time"))
         repeat = frame.get("repeat", 1)
         if not isinstance(repeat, int) or isinstance(repeat, bool) or repeat < 1:
             raise ScriptError(f"{file.name} 第 {i} 帧的 repeat 要是 ≥1 的整数，现在是 {repeat!r}")
-        out.extend([(node, temperature, humidity)] * repeat)
+        out.extend([Frame(node, temperature, humidity, moment)] * repeat)
 
     if not out:
         raise ScriptError(f"{file.name} 的 frames 里没有一帧是真的数据")
@@ -292,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     # 剧本与模式二选一：剧本自带每一帧的温湿度，再叠一个 --mode 只会打架
-    script_frames: list[tuple[str, float, float]] = []
+    script_frames: list[Frame] = []
     if args.script:
         if args.mode != "demo":
             print("[错误] --script 和 --mode 只能用一个：剧本里已经写好了每一帧的数据",
@@ -315,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if script_frames:
         # 剧本里出现的节点都要有 seq 计数器，哪怕命令行一个都没选
-        nodes = list(dict.fromkeys(nodes + [f[0] for f in script_frames]))
+        nodes = list(dict.fromkeys(nodes + [f.node for f in script_frames]))
     warn_unknown_nodes(nodes)
 
     mode_label = f"剧本 {Path(args.script).name}" if script_frames else args.mode
@@ -355,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
                     break
                 frame = script_frames[frame_index]
                 frame_index += 1
-                plan = [(frame[0], frame[1], frame[2])]
+                plan = [frame]
             else:
                 plan = []
                 for node in nodes:
@@ -367,12 +416,13 @@ def main(argv: list[str] | None = None) -> int:
                             state.step, step_size=args.cool_step)
                     else:
                         temperature, humidity = demo_sample(state.step)
-                    plan.append((node, temperature, humidity))
+                    plan.append(Frame(node, temperature, humidity))
 
-            for node, temperature, humidity in plan:
+            for frame in plan:
+                node, temperature, humidity = frame.node, frame.temperature, frame.humidity
                 state = states[node]
                 payload = build_payload(node, temperature, humidity,
-                                        seq=state.next_seq())
+                                        now=frame.time, seq=state.next_seq())
                 message = dumps(payload)
                 # 记下这一轮用掉了第几次采样，下一轮才有新值
                 state.step += 1
