@@ -97,6 +97,21 @@
      `tests/config.test.js` 会去 core.py 里把那行抠出来对一次。 */
   const CMD_ACTION_FOCUS = 'focus';
 
+  /* 「把这张现场快照登到案卷上」那个动作的名字（Phase6 E2）。**只有 web 页面发**
+     —— 它是唯一一个有摄像头、也有一句「记录现场」语音指令的出口。
+
+     报文里带上来的是一份**文件信息**（快门时刻 stamp、宽高、字节数、前端画的
+     那行水印、文件名），图片本体留在浏览器里。所以这条指令说不了「这个宿舍
+     现在怎么样」—— 它连温湿度字段都没有。core 收到之后只做一件事：往那一间
+     **开着的事件**的 snapshots 里追加一笔，**一个状态都不动**。
+
+     和 focus 一样，它**不进 events.COMMANDS**（那个元组的含义是「会去改事件
+     状态的那一组」）；core 认的全部动词是
+     `events.COMMANDS + (FOCUS, SNAPSHOT)`。
+
+     对应 events.py 里的 `SNAPSHOT = "snapshot"`。 */
+  const CMD_ACTION_SNAPSHOT = 'snapshot';
+
   /* ---- 函数 ---- */
 
   /**
@@ -153,6 +168,7 @@
     CMD_RETAIN: CMD_RETAIN,
     CMD_ACTION: CMD_ACTION,
     CMD_ACTION_FOCUS: CMD_ACTION_FOCUS,
+    CMD_ACTION_SNAPSHOT: CMD_ACTION_SNAPSHOT,
     topicFor: topicFor,
     brokerUrl: brokerUrl,
     brokerUrlFor: brokerUrlFor,

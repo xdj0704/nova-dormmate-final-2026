@@ -146,9 +146,21 @@ check('★ 焦点动作名和 core.py 的 FOCUS 是同一个词', C.CMD_ACTION_F
    「不认识的 action」。清单是拼出来的（`events.COMMANDS + (FOCUS,)`），
    所以查的是那一行 —— 盯着「FOCUS 出现过」等于什么都没查，它在注释里也出现。 */
 check('★ 而且它确实在 core 认的动作清单里（不是个没人认的词）',
-  /^COMMANDS\s*=\s*events\.COMMANDS\s*\+\s*\(FOCUS\s*,?\s*\)/m.test(CORE), true);
+  /^COMMANDS\s*=\s*events\.COMMANDS\s*\+\s*\(FOCUS\s*,\s*events\.SNAPSHOT\s*,?\s*\)/m.test(CORE), true);
 check('★ 两个动作名不是同一个词（焦点和开始处理是两件事）',
   C.CMD_ACTION_FOCUS === C.CMD_ACTION, false);
+
+/* 快照那个动作名（Phase6 E2）。出处还是 events.py —— 和 handle 一样，
+   它是**事件那一层**的东西（写的是案卷），所以常量在那边而不在 core.py。
+   但它**没进 events.COMMANDS**：那个元组的含义是「会去改事件状态的那一组」，
+   拍照一个状态都不动。所以这里除了比字面量，还要盯住这一点 —— 哪天有人
+   图省事把它塞进 COMMANDS，那条「拍照不碰状态」的约定就在源码层面松了。 */
+check('★ 快照动作名和 events.py 的 SNAPSHOT 是同一个词', C.CMD_ACTION_SNAPSHOT,
+  (EVENTS.match(/^SNAPSHOT\s*=\s*"([^"]*)"/m) || [])[1]);
+check('★ 快照没被塞进「会改事件状态的那一组」',
+  /^COMMANDS\s*=\s*\(\s*HANDLE\s*,?\s*\)/m.test(EVENTS), true);
+check('★ 三个动作名互不相同', new Set(
+  [C.CMD_ACTION, C.CMD_ACTION_FOCUS, C.CMD_ACTION_SNAPSHOT]).size, 3);
 
 /* ============ C. topicFor 的形状 ============ */
 

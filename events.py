@@ -69,6 +69,27 @@ TERMINAL_STATES = (RECOVERED, UNRESOLVED)
 HANDLE = "handle"
 COMMANDS = (HANDLE,)
 
+# 前端拍了一张现场快照，要挂到案卷上（Phase6 E2）。
+#
+# **它不在 COMMANDS 里**，这是有意的：上面那个元组的含义是「会去改事件状态
+# 的那一组」，而这一条**一个状态都不动** —— 它只往 snapshots 里追加一笔。
+# 和 core 那边的 `focus` 是同一种东西：是个动作，但不进状态机。
+# （core.py 拼出来的那张完整清单是 `events.COMMANDS + (FOCUS, SNAPSHOT)`。）
+SNAPSHOT = "snapshot"
+
+# 案卷里那条**相机**记录靠这个字段认。
+#
+# 为什么不用「有没有 state」来区分：状态迁移那几条（开案 / 转处理 / 结案）
+# 每条都带 "state"，相机这几条不带 —— 拿「缺了某个字段」当类型标记，以后
+# 再加一种记录（录音？到场照片？）就得重新猜一遍。写一个显式的 kind，
+# 读的人一眼看得出来这是什么，加新种类也只是多一个取值。
+CAMERA = "camera"
+
+# 水印那一行字是**浏览器画的**（那是画，不是判），原样留档是为了事后能拿它
+# 和照片上那行字对。但案卷是 core 的文件，长度得由 core 说了算 —— 不截的话，
+# 前端一句话就能把 data/events.json 撑大，而且每次 fsync 都要把那一坨再写一遍。
+WATERMARK_MAX_CHARS = 200
+
 # 事件文件版本。读到别的版本不当坏文件处理（字段是往前兼容的），
 # 只是记一笔，方便以后真要改格式时能认出旧文件。
 EVENTS_VERSION = 1
@@ -309,6 +330,15 @@ class Event:
             # 数出来的结果和判定用的那个计数器不是一回事。
             "abnormalAfter": self.pending_abnormal,
             "verifyCount": len(self.verify),
+            # 这条事件上登了几张现场快照（Phase6 E2）。**只报个数，不报内容** ——
+            # snapshots 里那几条记录（含前端画的水印字）一律不进这份视图，
+            # 理由和上面那段一样：这份是每个周期都要重发一遍的东西，而「拍了
+            # 几张」一格就能说清。要细看是哪几张，去读 data/events.json。
+            #
+            # 报了它，前端才有东西可对账：页面拍完照只能说「已经发出去」，
+            # 「core 真的登记上了」得等下一帧快照里这个数涨了才算数 ——
+            # 和「点完处理按钮画面不动」是同一条规矩。
+            "cameraCount": self.camera_count,
         }
 
     # -- 记账 ---------------------------------------------------------------
@@ -319,6 +349,30 @@ class Event:
         while len(self.snapshots) > SNAPSHOT_MAX:
             del self.snapshots[1]
             self.snapshots_dropped += 1
+
+    def add_camera(self, entry: Mapping[str, Any]) -> dict[str, Any]:
+        """在案卷上登一张现场快照（Phase6 E2）。返回真正写进去的那一条。
+
+        和上面那些走 `add_snapshot` 的调用是同一本账、同一个上限 —— 一条事件
+        从开案到结案本来就只写四五条，相机再挤进来几张也不会把开案那条顶掉
+        （`add_snapshot` 永远留 `[0]`）。
+
+        这里只写案卷，**一个状态字段都不碰**（state / verify / recovered_at
+        全不动）。想加一句「拍了照就算处理过了」的捷径，得先绕过这一层。
+        """
+        record: dict[str, Any] = {"kind": CAMERA}
+        record.update(dict(entry))
+        self.add_snapshot(record)
+        return record
+
+    @property
+    def camera_count(self) -> int:
+        """这条事件上登了几张**相机**快照。
+
+        不能直接写 `len(self.snapshots)` —— 那个数里混着开案 / 转处理 / 结案
+        那几条状态迁移记录，报给前端的会是「3 张」，而人一张照片都没拍过。
+        """
+        return sum(1 for item in self.snapshots if item.get("kind") == CAMERA)
 
     def note_reason(self, reason: str | None) -> None:
         """记一句「业务大脑为什么盯上它」。重复的不记，最多留 5 句。
@@ -582,6 +636,87 @@ class EventBook:
         return True, (
             f"{event.event_id} 转「处理中」，等后续 {self.verify_after} 条异常 / "
             f"{self.recover_after} 条正常来判"
+        )
+
+    def record_snapshot(
+        self,
+        node_id: str,
+        *,
+        when: str | None = None,
+        source: str | None = None,
+        event_id: str | None = None,
+        stamp: str | None = None,
+        watermark: str | None = None,
+        file: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        size: int | None = None,
+    ) -> tuple[bool, str]:
+        """前端拍了一张现场快照，登到这一间**开着的那条事件**上（Phase6 E2）。
+
+        返回 `(接没接受, 要说给日志听的话)`。和 `apply_action` 一样，这个函数
+        看不到 NodeState，也不返回任何能改节点状态的东西 —— 红线在这里依然是
+        **结构上**成立的：一张照片证明不了这个宿舍好了。
+
+        三件事说清楚：
+
+        * **挂在哪条事件上，由 core 说了算。** 前端可以在 `event_id` 里
+          写上它以为的那条，core 拿它**只做对账**：对不上就拒，不会照着
+          前端说的去改归属。理由和 `validate_command` 里那条一样 ——
+          谁的地盘谁做主，前端说错了要报出来，不能顺着改。
+        * **两个时间都记。** `stamp` 是快门按下去那一刻（前端报的），
+          `time` 是 core 收到这条指令的那一刻（core 自己的钟）。和
+          `handle` 那条路一个口径：动作什么时候发生的只能问发它的人，
+          core 什么时候知道的只能问 core。
+        * **前端画的水印只留档，不当判据。** 那行字是画上去的，不是算出来
+          的；core 不检查它写对一个字没有（check 了也没什么可做的）。它被
+          截到 `WATERMARK_MAX_CHARS`，因为案卷是 core 的文件。
+        """
+        node_id = str(node_id)
+        event = self._open.get(node_id)
+
+        if event is None:
+            last = self.last_for(node_id)
+            tail = (
+                f"（上一条 {last.event_id} 已经是 {last.state}）" if last
+                else "（这个节点还没有过事件）"
+            )
+            return False, f"{node_id} 现在没有未结案的事件，这张快照没地方可挂{tail}"
+
+        wanted = str(event_id or "").strip()
+        if wanted and wanted != event.event_id:
+            return False, (
+                f"eventId 对不上：这条快照说是 {wanted}，"
+                f"core 手里开着的是 {event.event_id} —— 挂在哪条案卷上由 core 说了算，"
+                f"不照着前端说的改"
+            )
+
+        text = str(watermark or "")
+        if len(text) > WATERMARK_MAX_CHARS:
+            text = text[:WATERMARK_MAX_CHARS]
+
+        record = event.add_camera({
+            "time": str(when or now_text()),
+            "eventId": event.event_id,
+            "nodeId": node_id,
+            "stamp": str(stamp or ""),
+            "watermark": text,
+            "file": str(file or ""),
+            "width": width,
+            "height": height,
+            "size": size,
+            "source": str(source or ""),
+            "note": "现场快照（Phase6 E2）",
+        })
+        self._dirty = True
+        # force=True：这一步的**全部意义**就是「案卷上多了一笔」，
+        # 掉电丢了这一条，就只剩浏览器里那张图和一个没登记过的文件名。
+        self.save(force=True)
+
+        pixels = f"{width}×{height}" if width and height else "尺寸未报"
+        return True, (
+            f"{event.event_id} 登下第 {event.camera_count} 张现场快照"
+            f"（{pixels}，{record.get('stamp') or '时刻未报'}）"
         )
 
     # -- 内部：开案与结案 ---------------------------------------------------

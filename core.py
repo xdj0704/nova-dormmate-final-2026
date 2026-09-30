@@ -91,11 +91,17 @@ SNAPSHOT_EVENTS_MAX = 20
 SNAPSHOT_REJECTS_MAX = 20
 
 # 指令动词。`events.COMMANDS` 是**会去改事件状态**的那一组（目前只有 handle）；
-# focus 不在那一组里，因为它一行都不碰事件簿 —— 它改的是「谁被点名了」，
-# 那是展示用的注意力，不是宿舍的状况。两组拼起来才是 core 认的全部动词，
-# 而 validate_command 拿到的就是这一份。
+# 另外两个都不在那一组里，原因各不相同：
+#   focus    —— 一行都不碰事件簿。它改的是「谁被点名了」，那是展示用的
+#               注意力，不是宿舍的状况。
+#   snapshot —— 碰事件簿，但**只追加一笔、一个状态都不动**（Phase6 E2）。
+# 三组拼起来才是 core 认的全部动词，而 validate_command 拿到的就是这一份。
+#
+# 分组的依据是「改不改事件状态」，不是「重不重要」：SNAPSHOT 之所以没进
+# events.COMMANDS，正是因为它不该被当成一次状态迁移 —— 哪天有人想写
+# 「拍照即视为开始处理」，那张照片得先绕过这个分组才行。
 FOCUS = "focus"
-COMMANDS = events.COMMANDS + (FOCUS,)
+COMMANDS = events.COMMANDS + (FOCUS, events.SNAPSHOT)
 
 # 写进拒绝日志的原始报文最多留这么多个字符。原样全存的话，
 # 一条 1 MB 的垃圾能把日志刷没，而看的人只需要认出来「这是谁发的什么鬼」。
@@ -343,6 +349,35 @@ COMMAND_FIELDS: tuple[tuple[str, type], ...] = (
     ("action", str),
 )
 
+# 每种动作**只对自己**额外要的字段（Phase6 E2）。上面那张表是所有指令都有的
+# 那两样，这一张按 action 分。
+#
+# 为什么不干脆往上面那张表里加：往 handle / focus 上要一个 width 毫无意义，
+# 而「指令缺字段」那条报错会变成对一条 handle 也喊「缺少 width」。分开之后，
+# 每种动作要什么、缺了报什么，都是它自己的事。
+#
+# 这几个都是**必填**的，因为 snapshot 这条指令存在的全部意义就是「报上来一份
+# 快照文件的信息」：缺了宽高和字节数，core 记下的只是一行「拍过照」的空话，
+# 事后既对不上那张图，也说不清是哪一张。
+COMMAND_FIELDS_BY_ACTION: dict[str, tuple[tuple[str, type], ...]] = {
+    events.SNAPSHOT: (
+        ("stamp", str),      # 快门按下去那一刻（前端报的，core 不自己造）
+        ("width", int),
+        ("height", int),
+        ("bytes", int),
+    ),
+}
+
+# 可选的附加字段：给了就原样记进案卷，不给不影响这条指令成立。
+# 三个都是字符串 —— 水印那一行的长度上限在 events.WATERMARK_MAX_CHARS。
+COMMAND_OPTIONAL_FIELDS_BY_ACTION: dict[str, tuple[tuple[str, type], ...]] = {
+    events.SNAPSHOT: (
+        ("eventId", str),    # 前端以为的那条案卷，core 只拿它**对账**
+        ("watermark", str),
+        ("file", str),
+    ),
+}
+
 
 def validate_command(
     topic: Any,
@@ -425,6 +460,54 @@ def validate_command(
             "（大小写不折叠：'Handle' 和 'handle' 不是一回事）",
         ))
 
+    # 6b) 这个动作额外要的字段（目前只有 snapshot 要）。
+    #     放在 action 认过之后 —— 不然一条 action 写错的报文会被报成
+    #     「缺少 stamp」，而真正的问题是那个动词根本不存在。
+    extras: dict[str, Any] = {}
+    for key, expected in COMMAND_FIELDS_BY_ACTION.get(payload["action"], ()):
+        if key not in payload:
+            problems.append(f"{payload['action']} 指令缺少 {key}")
+            continue
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, expected):
+            problems.append(
+                f"{payload['action']} 指令 {key} 应为 {expected.__name__}，"
+                f"实际是 {type(value).__name__}"
+            )
+            continue
+        # 宽高字节数都得是正数：0×0 的照片和 0 字节的文件都不存在，
+        # 收下来的话案卷上会写着一行「0×0」而没人知道该拿它怎么办。
+        if expected is int and value <= 0:
+            problems.append(f"{payload['action']} 指令 {key} 要是个正数，实际是 {value}")
+            continue
+        extras[key] = value
+
+    for key, expected in COMMAND_OPTIONAL_FIELDS_BY_ACTION.get(payload["action"], ()):
+        value = payload.get(key)
+        if value is None:
+            continue
+        # 给了但类型不对 -> 拒，不是悄悄丢掉。丢掉的话前端以为记上了，
+        # 而案卷里那一格是空的，事后对不上还得回头查这一条。
+        if isinstance(value, bool) or not isinstance(value, expected):
+            problems.append(
+                f"{payload['action']} 指令 {key} 应为 {expected.__name__}，"
+                f"实际是 {type(value).__name__}"
+            )
+            continue
+        extras[key] = value
+
+    # snapshot 的 stamp 是「快门那一刻」，和 time 一样要是个能读的时刻。
+    # 它比 time 更要紧：time 是 core 自己会补的，stamp 补不出来 ——
+    # core 收到这条指令的时候，照片早就拍完了。
+    stamp = extras.get("stamp")
+    if stamp is not None and parse_time(stamp) is None:
+        problems.append(
+            f"snapshot 指令 stamp 格式不对：{stamp!r}，应是 YYYY-MM-DD HH:mm:ss"
+        )
+
+    if problems:
+        return Verdict(False, reasons=tuple(problems))
+
     # 7) time 是可选的：给了就得是那个格式，不给由 core 补上此刻。
     #    可选是因为指令是"当前这一刻发生的动作"，前端不该被迫自己造一个时间；
     #    允许给，是为了剧本能复现出固定的时刻（d3_event.json 就是这么写死的）。
@@ -443,6 +526,7 @@ def validate_command(
     source = payload.get("source")
     if isinstance(source, str):
         record["source"] = source
+    record.update(extras)
 
     return Verdict(True, record=record)
 
@@ -795,7 +879,7 @@ class Core:
     ) -> Verdict:
         """收到一条前端指令：校验 -> 按动词分派 -> 打一行日志。
 
-        两个动词走的是**两条完全不同的路**，分开写而不是塞进一个函数：
+        三个动词走的是**三条不同的路**，分开写而不是塞进一个动词表：
 
         * `handle` —— 前端说「我在处理了」。能变的只有事件的状态
           （OPEN -> HANDLING）；这个宿舍到底好没好，只能由后面收到的遥测
@@ -803,8 +887,13 @@ class Core:
         * `focus` —— 前端说「大家都看这个」。只动 self.focus，**一行都不碰
           事件簿**：被点名不是事件动作，它不该在案卷上留下任何痕迹，
           更不该给出一条绕过验证窗口的路。
+        * `snapshot` —— 前端说「我拍了一张」（Phase6 E2）。只往开着的那条
+          事件的 snapshots 里**追加一笔**，state / verify / recovered_at
+          一个都不动：一张照片证明不了这个宿舍好了，它也绝不能顺手把
+          OPEN 推成 HANDLING。（这就是 SNAPSHOT 没进 events.COMMANDS
+          的原因，见那个常量的注释。）
 
-        两条路的共同点是都不改 self.nodes —— 红线在这一层依然成立。
+        三条路的共同点是都不改 self.nodes —— 红线在这一层依然成立。
         """
         if now_wall is None:
             now_wall = time.time()
@@ -831,6 +920,35 @@ class Core:
         if record["action"] == FOCUS:
             message = self.set_focus(node_id, source=record.get("source"), now_wall=now_wall)
             log("指令", f"{node_id} focus（{who}）-> 接受：{message}")
+            return verdict
+
+        if record["action"] == events.SNAPSHOT:
+            # 第一条**碰得到案卷、但一个状态都不动**的动词。三条路分开写而不是
+            # 合成一张动词表，好处在这一眼看得见：handle 那条会改 state，这条
+            # 只会往 snapshots 里追加一笔，focus 那条连事件簿都不碰。
+            accepted, message = self.event_book.record_snapshot(
+                node_id,
+                # 和 handle 同一条口径：动作什么时候发生的问发它的人（没给就
+                # 用 core 的此刻），core 什么时候收到的由 core 自己带在
+                # snapshots 那条记录里（record_snapshot 内部取 now_text()）。
+                when=record.get("time") or format_time(now_wall),
+                source=record.get("source"),
+                event_id=record.get("eventId"),
+                stamp=record.get("stamp"),
+                watermark=record.get("watermark"),
+                file=record.get("file"),
+                width=record.get("width"),
+                height=record.get("height"),
+                size=record.get("bytes"),
+            )
+            log("指令", (
+                f"{node_id} snapshot（{who}）-> "
+                f"{'接受' if accepted else '没接受'}：{message}"
+            ))
+            # 重发快照。事件那条的 cameraCount 变了 —— 前端拍完照只会说
+            # 「已经发出去」，要等这一帧回来才敢说「core 登记上了」。
+            # 没接受时也发：计数和日志变了，而前端只订这一条 topic。
+            self.publish_state(now_wall)
             return verdict
 
         accepted, message = self.event_book.apply_action(

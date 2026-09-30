@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -37,6 +38,30 @@ import rules  # noqa: E402
 NOW = 1_700_000_000.0
 
 NODES = ("dorm-a", "dorm-b", "dorm-c")
+
+# 「一份最小的、合法的快照文件信息」长什么样 —— 字段清单**从 core 自己那张表
+# 推出来**，不在这边再抄一份。抄一份的话，core 哪天给某个动作加了个必填字段，
+# 这边还是老的，测试会红在一个跟它没关系的地方，而且报出来的理由（缺少某个
+# 字段）看不出是测试没跟上。
+#
+# 只补**必填**那几个：可选字段（eventId / watermark / file）不给就是不给，
+# 「缺席也算合法」正是它们存在的意思。值挑最小的合法值（1 / 一个能读的时刻），
+# 不是挑一个好看的数字 —— 这条测试问的是「过不过得了」，不是「记下来长什么样」。
+COMMAND_SAMPLE_FIELDS = {
+    action: {
+        key: ("2026-09-30 20:30:00" if key == "stamp" else 1)
+        for key, _expected in fields
+    }
+    for action, fields in core.COMMAND_FIELDS_BY_ACTION.items()
+}
+
+
+def command_body(node_id: str = "dorm-a", action: str = "handle", **extra) -> str:
+    """一条指令的 payload 文本。额外字段按动作补最小的那几个。"""
+    body = {"nodeId": node_id, "action": action}
+    body.update(COMMAND_SAMPLE_FIELDS.get(action, {}))
+    body.update(extra)
+    return json.dumps(body, ensure_ascii=False)
 
 
 def payload_text(node_id: str = "dorm-a", temperature: float = 31,
@@ -1141,16 +1166,425 @@ class TestFocusCommand(unittest.TestCase):
         self.assertEqual(self._focus_in_snapshot(client)["by"], "来源未标")
 
     def test_all_commands_are_reachable_through_the_same_validator(self):
-        """两个动词都得能从 validate_command 过掉 —— 漏登记一个的话，
-        那个词会被拒，而理由写的是「目前只有 ['handle']」，看着像没实现。"""
+        """每个动词都得能从 validate_command 过掉 —— 漏登记一个的话，
+        那个词会被拒，而理由写的是「目前只有 ['handle']」，看着像没实现。
+
+        最小合法报文**按动作给**（E2）：handle / focus 只要 nodeId + action，
+        snapshot 还要一份快照文件的信息。全都用同一个最小报文的话，这条测试
+        会退化成「snapshot 缺 stamp」—— 那测的是我没有填字段，不是它能不能过。
+        """
         for action in core.COMMANDS:
             verdict = core.validate_command(
-                config.CMD_TOPIC,
-                json.dumps({"nodeId": "dorm-a", "action": action}),
-                NODES,
+                config.CMD_TOPIC, command_body(action=action), NODES,
             )
             self.assertTrue(verdict.ok, f"{action} 过不了校验：{verdict.reasons}")
-        self.assertEqual(core.COMMANDS, ("handle", "focus"))
+        self.assertEqual(core.COMMANDS, ("handle", "focus", "snapshot"))
+
+
+class TestSnapshotCommand(unittest.TestCase):
+    """Phase6 E2 的 snapshot 指令：web 页面拍了一张现场快照，要挂到案卷上。
+
+    这里盯的是红线在**第三个动词**上是不是照样成立：snapshot 只许往开着的那条
+    事件的 snapshots 里追加一笔，事件状态、节点状态、优先级一个字节都不许动。
+
+    为什么它比 handle 那条更容易松：照片看着像**证据**。「都拍下来了，那就当
+    处理过了吧」—— 这一句真写出来，红线就没了，而且不会有任何报错：一个
+    按了没按过「开始处理」的宿舍，会顶着一张照片显示成「处理中」。
+    """
+
+    def _send(self, c, node_id="dorm-b", action=events.SNAPSHOT, source="web", **extra):
+        return c.handle_command(
+            config.CMD_TOPIC,
+            command_body(node_id, action, source=source, **extra),
+            now_wall=NOW,
+        )
+
+    def _raw(self, c, body: dict):
+        """发一条**一个字段都不补**的报文。
+
+        `command_body` 会自动把 `COMMAND_SAMPLE_FIELDS` 里那几个必填字段填上
+        （那是给「所有动作都过得了校验」那条测试用的）。「少一个字段会怎样」
+        这条测试要的恰恰是**不填**，所以它得绕开那个便利函数 —— 否则传进去的
+        是「缺 stamp 的报文」，发出去的还是齐全的那一份，测试永远绿。
+        """
+        return c.handle_command(
+            config.CMD_TOPIC, json.dumps(body, ensure_ascii=False), now_wall=NOW
+        )
+
+    def _logged(self, c, **extra):
+        """发一条，把日志里那几行也捞回来 —— 拒绝时那句「为什么」只说给日志听，
+        而页面上要显示的就是它（点了没反应是最难查的那种坏）。"""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            verdict = self._send(c, **extra)
+        return verdict, buf.getvalue()
+
+    def _open_a_case(self, c, node_id="dorm-b"):
+        """喂一条异常，让这一间开出一条还开着的案卷。"""
+        c.handle_message(topic_of(node_id), payload_text(node_id), now_wall=NOW)
+        return c.event_book.open_event(node_id)
+
+    def _card(self, snapshot, node_id="dorm-b"):
+        """快照里那条案卷的**视图** —— MQTT 上发给屏幕看的那一份。"""
+        for item in snapshot["events"]["events"]:
+            if item["nodeId"] == node_id:
+                return item
+        return None
+
+    # ---- 登上去长什么样 ----
+
+    def test_it_lands_on_the_open_event(self):
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        verdict = self._send(c, stamp="2026-09-22 20:31:00",
+                             width=640, height=480, bytes=48213, file="shot-1.png")
+
+        self.assertTrue(verdict.ok, verdict.reasons)
+        self.assertEqual(event.camera_count, 1)
+        shot = event.snapshots[-1]
+        self.assertEqual(shot["kind"], events.CAMERA)
+        self.assertEqual(shot["eventId"], event.event_id)
+        self.assertEqual(shot["nodeId"], "dorm-b")
+        self.assertEqual(shot["stamp"], "2026-09-22 20:31:00")
+        self.assertEqual((shot["width"], shot["height"]), (640, 480))
+        self.assertEqual(shot["size"], 48213)
+        self.assertEqual(shot["file"], "shot-1.png")
+        self.assertEqual(shot["source"], "web")
+
+    def test_the_two_times_are_both_kept(self):
+        """`stamp` 是快门按下去那一刻（前端报的），`time` 是 core 收到那一刻
+        （core 自己的钟）。两个都留着 —— 「照片是 20:31 拍的、core 20:33 才
+        收到」这件事只有两个时间都在才查得出来。"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1)
+
+        shot = event.snapshots[-1]
+        self.assertEqual(shot["stamp"], "2026-09-22 20:31:00")
+        self.assertEqual(shot["time"], core.format_time(NOW))
+
+    def test_the_command_time_wins_when_it_is_given(self):
+        """给了 time 就用它 —— 和 handle 同一条口径：动作什么时候发生的，
+        只能问发它的人。"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1,
+                   time="2026-09-22 20:32:00")
+
+        self.assertEqual(event.snapshots[-1]["time"], "2026-09-22 20:32:00")
+
+    def test_camera_count_shows_up_in_the_snapshot(self):
+        """页面拍完照只能说「已经发出去」；「core 真的登记上了」得等下一帧
+        快照里这个数涨了才算数 —— 和「点完处理按钮画面不动」是同一条规矩。"""
+        c, client = make_core()
+        self._open_a_case(c)
+        before = self._card(client.state_payloads()[-1])["cameraCount"]
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1)
+
+        self.assertEqual(
+            (before, self._card(client.state_payloads()[-1])["cameraCount"]), (0, 1))
+
+    def test_the_count_does_not_include_the_state_transitions(self):
+        """案卷上本来就躺着几条**状态迁移**记录（开案那条一定在）。
+        cameraCount 报的必须只是相机那几张 —— 直接交 `len(self.snapshots)` 上去
+        的话，一条刚开案、人一张都没拍过的事件会显示成「1 张」。"""
+        c, client = make_core()
+        event = self._open_a_case(c)
+
+        self.assertGreaterEqual(len(event.snapshots), 1)          # 开案那一条
+        self.assertEqual(self._card(client.state_payloads()[-1])["cameraCount"], 0)
+
+    def test_recording_a_snapshot_republishes_the_state(self):
+        """必须重发 —— 前端只订快照这一条 topic，不重发的话那个数一直停在
+        上一回的值上，页面会永远停在「已经发出去」。"""
+        c, client = make_core()
+        self._open_a_case(c)
+        before = len(client.on(config.STATE_TOPIC))
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1)
+
+        self.assertEqual(len(client.on(config.STATE_TOPIC)), before + 1)
+
+    def test_two_shots_both_stay(self):
+        """第二张不顶掉第一张 —— 现场快照是**只增**的。"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1, file="a.png")
+        self._send(c, stamp="2026-09-22 20:32:00", width=1, height=1, bytes=2, file="b.png")
+
+        shots = [s for s in event.snapshots if s.get("kind") == events.CAMERA]
+        self.assertEqual([s["file"] for s in shots], ["a.png", "b.png"])
+        self.assertEqual(event.camera_count, 2)
+
+    def test_it_is_counted_as_a_command(self):
+        c, _client = make_core()
+        self._open_a_case(c)
+        before = c.counters.commands
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1)
+
+        self.assertEqual(c.counters.commands, before + 1)
+
+    # ---- 红线：拍一张不是一次状态迁移 ----
+
+    def test_it_does_not_touch_the_event_state(self):
+        """**红线**。拿一条真开着的案卷看：拍完还是 OPEN、actions 还是空的、
+        verify 还是空的、recovered_at 还是 null。"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+        frozen = (event.state, list(event.actions), list(event.verify), event.recovered_at)
+
+        verdict = self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1)
+
+        self.assertTrue(verdict.ok)
+        self.assertEqual(
+            (event.state, list(event.actions), list(event.verify), event.recovered_at),
+            frozen,
+        )
+        self.assertEqual(event.state, events.OPEN)
+
+    def test_it_does_not_change_nodes_or_priority(self):
+        """**红线的行为版**。快照里确实变了东西（events 那块多了一张、
+        counters 里指令数 +1），不许变的是这两个：每个节点的状态、谁是重点。"""
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-a"), payload_text("dorm-a", 31, 78), now_wall=NOW)
+        self._open_a_case(c)
+        before = client.state_payloads()[-1]
+        frozen = (before["nodes"], before["priority"])
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1)
+
+        after = client.state_payloads()[-1]
+        self.assertEqual((after["nodes"], after["priority"]), frozen)
+        self.assertEqual(c.event_book.open_event("dorm-b").state, events.OPEN)
+
+    def test_a_watermark_that_claims_recovery_changes_nothing(self):
+        """水印那行字是**前端画的**。原样留档是为了事后能拿它和照片上那行对，
+        不是判据 —— 在里面写「已恢复」也只是多了一行字，案卷的状态一个字不动。
+        （这条红了，说明有人开始拿这张图当数据用了。）"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1,
+                   watermark="dorm-b | 已恢复 | 一切正常")
+
+        self.assertEqual(event.snapshots[-1]["watermark"], "dorm-b | 已恢复 | 一切正常")
+        self.assertEqual(event.state, events.OPEN)
+
+    def test_the_code_path_cannot_write_a_state(self):
+        """上一条的**静态版**在 tests/test_events.py 的 TestRedLine 里
+        （`test_record_snapshot_cannot_write_a_state`）。
+
+        放在那边是因为那个类整组都是「不是行为测试」的结构检查，和
+        apply_action / set_focus 那两条并排才看得出是一套规矩。跑一遍只能
+        证明「这一次没改」；哪天有人写着「拍够三张就自动转处理中」，上面那几条
+        用的还是一条指令，照样全绿。
+        """
+        src = inspect.getsource(events.EventBook.record_snapshot)
+        code = "".join(src.split('"""')[::2])   # 去掉 docstring，留代码
+        self.assertNotIn("event.state =", code)
+
+    # ---- 挂不上的那些 ----
+
+    def test_no_open_case_means_it_is_not_attached_and_says_why(self):
+        """没开案就没地方挂。**不是静默丢掉** —— 日志里那一行会说清楚为什么。
+
+        注意 `verdict.ok` 在这里是 **True**：这条报文本身是合法的（动作认得、
+        字段齐全、时刻读得出来），不合法的是**此刻挂不上去**这件事。这和 handle
+        那条路一模一样 —— 「指令合法」和「事情办成了」从来不是一回事，混成一个
+        布尔值之后，前端就没法区分「我发错了」和「时候不对」。
+        """
+        c, _client = make_core()
+
+        verdict, printed = self._logged(c, stamp="2026-09-22 20:31:00",
+                                        width=1, height=1, bytes=1)
+
+        self.assertTrue(verdict.ok, verdict.reasons)
+        self.assertIn("[指令]", printed)
+        self.assertIn("没接受", printed)
+        self.assertIn("没有未结案的事件", printed)
+        self.assertIn("dorm-b", printed)
+        self.assertIn("还没有过事件", printed)          # 连"上一条"都没有
+
+    def test_a_closed_case_cannot_be_reopened(self):
+        """结案之后拍的那张挂不上去 —— 已结案的案卷是**封存**的。
+        挂上去的话，「这条事件有几张照片」会随着事后补拍一直涨，而复盘想看的
+        恰恰是出事那一刻的现场。
+
+        拒绝的措辞里点名了**上一条**是谁、什么状态：光说「没有未结案的事件」
+        的话，人还得自己去翻案卷才明白刚才那条是已经结掉的还是压根没开过。
+        """
+        c, _client = make_core(recoverConsecutiveNormal=1)
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b"), now_wall=NOW)
+        event = c.event_book.open_event("dorm-b")
+        c.handle_message(topic_of("dorm-b"),
+                         payload_text("dorm-b", 25, 60, "正常"), now_wall=NOW)
+        self.assertEqual(event.state, events.RECOVERED)
+        frozen = list(event.snapshots)
+
+        verdict, printed = self._logged(c, stamp="2026-09-22 20:31:00",
+                                        width=1, height=1, bytes=1)
+
+        self.assertTrue(verdict.ok, verdict.reasons)
+        self.assertEqual(event.snapshots, frozen)
+        self.assertEqual(event.camera_count, 0)
+        self.assertIn("没接受", printed)
+        self.assertIn(event.event_id, printed)          # 「上一条 … 已经是 RECOVERED」
+        self.assertIn(events.RECOVERED, printed)
+
+    def test_an_event_id_that_does_not_match_is_not_attached(self):
+        """前端可以在 eventId 里写上它**以为**的那条。core 拿它只做对账：
+        对不上就不挂，且**不照着前端说的改归属** —— 谁的地盘谁做主。
+
+        注意这里也**不是**「往对的那条上挂」：前端以为自己看的是 A 案，core
+        手里开着的是 B 案，说明中间有人切过焦点。硬挂到 B 上的话，那张照片会
+        安安静静地落在一条前端根本不知道的案卷上。
+        """
+        c, _client = make_core()
+        event = self._open_a_case(c)
+        frozen = list(event.snapshots)
+
+        verdict, printed = self._logged(c, stamp="2026-09-22 20:31:00",
+                                        width=1, height=1, bytes=1,
+                                        eventId="dorm-b-19990101-000000")
+
+        self.assertTrue(verdict.ok, verdict.reasons)
+        self.assertEqual(event.snapshots, frozen)
+        self.assertEqual(event.camera_count, 0)
+        self.assertIn("没接受", printed)
+        self.assertIn("对不上", printed)
+        self.assertIn(event.event_id, printed)
+
+    def test_a_matching_event_id_is_accepted(self):
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        verdict = self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1,
+                             eventId=event.event_id)
+
+        self.assertTrue(verdict.ok, verdict.reasons)
+        self.assertEqual(event.snapshots[-1]["eventId"], event.event_id)
+
+    # ---- 缺字段与坏字段 ----
+
+    def test_a_missing_piece_of_file_info_is_rejected(self):
+        """四样缺一不可，而且**缺哪个就报哪个**。全都报成「快照不合法」的话，
+        前端得回来一条条试。
+
+        这里走 `_raw` 而不是 `_send`：`_send` 会把那几个必填字段自动补齐，
+        传进去一份「缺 stamp 的报文」发出去的却是齐全的那一份。
+        """
+        full = {"stamp": "2026-09-22 20:31:00", "width": 640, "height": 480, "bytes": 100}
+        for key in full:
+            with self.subTest(missing=key):
+                c, _client = make_core()
+                event = self._open_a_case(c)
+                body = {"nodeId": "dorm-b", "action": events.SNAPSHOT}
+                body.update({k: v for k, v in full.items() if k != key})
+                verdict = self._raw(c, body)
+                self.assertFalse(verdict.ok, f"少了 {key} 居然过了")
+                self.assertTrue(any(key in r for r in verdict.reasons),
+                                f"少了 {key}，理由里却没点名：{verdict.reasons}")
+                self.assertEqual(event.camera_count, 0)
+
+    def test_zero_or_negative_numbers_are_rejected(self):
+        """0×0 的照片和 0 字节的文件都不存在。收下来的话案卷上会写着一行
+        「0×0」，事后没人知道该拿它怎么办。
+
+        只查「拒没拒」不够 —— 拒的理由得点名是哪一格，不然前端只知道
+        「这条不行」。"""
+        full = {"stamp": "2026-09-22 20:31:00", "width": 640, "height": 480, "bytes": 100}
+        for key, bad in (("width", 0), ("height", -1), ("bytes", 0)):
+            with self.subTest(field=key, value=bad):
+                c, _client = make_core()
+                event = self._open_a_case(c)
+                body = {"nodeId": "dorm-b", "action": events.SNAPSHOT, **full, key: bad}
+                verdict = self._raw(c, body)
+                self.assertFalse(verdict.ok, f"{key}={bad} 居然过了")
+                self.assertTrue(any(key in r for r in verdict.reasons), verdict.reasons)
+                self.assertEqual(event.camera_count, 0)
+
+    def test_a_bad_stamp_is_rejected(self):
+        """stamp 补不出来 —— core 收到这条指令的时候，照片早就拍完了。
+        所以它必须是个能读的时刻，不能是「刚刚」。"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+        frozen = list(event.snapshots)
+
+        verdict = self._raw(c, {
+            "nodeId": "dorm-b", "action": events.SNAPSHOT,
+            "stamp": "刚刚", "width": 640, "height": 480, "bytes": 100,
+        })
+
+        self.assertFalse(verdict.ok)
+        self.assertTrue(any("stamp" in r for r in verdict.reasons), verdict.reasons)
+        self.assertEqual(event.snapshots, frozen)
+
+    def test_a_bad_optional_field_type_is_rejected_not_dropped(self):
+        """可选字段给了但类型不对 -> 拒。悄悄丢掉更糟：前端以为记上了，
+        而案卷里那一格是空的，事后对不上还得回来查这条。"""
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        verdict = self._raw(c, {
+            "nodeId": "dorm-b", "action": events.SNAPSHOT,
+            "stamp": "2026-09-22 20:31:00", "width": 640, "height": 480, "bytes": 100,
+            "watermark": 12345,
+        })
+
+        self.assertFalse(verdict.ok)
+        self.assertTrue(any("watermark" in r for r in verdict.reasons), verdict.reasons)
+        self.assertEqual(event.camera_count, 0)
+
+    def test_the_watermark_is_clipped(self):
+        """案卷是 core 的文件，长度由 core 说了算。不截的话，前端一句话就能把
+        data/events.json 撑大，而且每次 fsync 都要把那一坨再写一遍。
+
+        截了也**不报错**：这是留档的一行字，长了截短就完了，没必要让整张
+        快照挂不上。
+        """
+        c, _client = make_core()
+        event = self._open_a_case(c)
+
+        verdict = self._send(c, stamp="2026-09-22 20:31:00", width=1, height=1, bytes=1,
+                             watermark="很" * (events.WATERMARK_MAX_CHARS + 50))
+
+        self.assertTrue(verdict.ok, verdict.reasons)
+        self.assertEqual(len(event.snapshots[-1]["watermark"]), events.WATERMARK_MAX_CHARS)
+        self.assertEqual(event.camera_count, 1)
+
+    def test_the_action_is_case_sensitive_like_the_others(self):
+        """和 handle / focus 一样不做大小写折叠 —— 松一点看着更友好，下一步
+        就是有人发 'Snapshot' 之后「点了没反应」而日志里一条拒绝都没有。"""
+        c, _client = make_core()
+        self._open_a_case(c)
+
+        verdict = self._send(c, action="Snapshot")
+
+        self.assertFalse(verdict.ok)
+        self.assertTrue(any("不认识的 action" in r for r in verdict.reasons),
+                        verdict.reasons)
+
+    def test_an_unknown_node_is_rejected_before_anything_else(self):
+        """节点名不认识就没有案卷可挂 —— 这一步在 validate_command 里就挡住了，
+        和遥测那条路同一个理由。
+
+        顺序也查一下：一条同时「节点名不认识」又「缺 stamp」的报文，报出来的
+        应该是节点那一条 —— 报「缺 stamp」的话，人会去补字段，补完还是不行。
+        """
+        c, _client = make_core()
+        self._open_a_case(c)
+
+        verdict = self._raw(c, {"nodeId": "dorm-z", "action": events.SNAPSHOT})
+
+        self.assertFalse(verdict.ok)
+        self.assertTrue(any("未知节点" in r for r in verdict.reasons), verdict.reasons)
+        self.assertFalse(any("缺少" in r for r in verdict.reasons), verdict.reasons)
 
 
 class TestSnapshotEventsAndRejects(unittest.TestCase):

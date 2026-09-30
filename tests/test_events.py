@@ -135,6 +135,31 @@ class TestConstants(unittest.TestCase):
         """动作不能乱加：加一个动作之前得先想清楚它在状态机上是什么。"""
         self.assertEqual(events.COMMANDS, (events.HANDLE,))
 
+    def test_snapshot_is_not_in_the_state_changing_group(self):
+        """Phase6 E2 的 snapshot **故意**不在 COMMANDS 里。
+
+        那个元组的含义是「会去改事件状态的那一组」。拍照一个状态都不动 ——
+        它要是被塞进去，下面好几条检查（apply_action 的动词白名单之类）就会
+        开始把它当成一次状态迁移看待，而「拍一张照片」离「这个宿舍好了」
+        隔着十万八千里。
+        """
+        self.assertNotIn(events.SNAPSHOT, events.COMMANDS)
+        self.assertEqual(events.SNAPSHOT, "snapshot")
+
+    def test_the_camera_kind_is_its_own_word(self):
+        """给案卷上那条记录打类型标记的那个词。它和动作名是**两个**词：
+        一个是「前端发的是什么指令」，一个是「案卷上躺着的是什么记录」。
+        合成一个的话，以后加第二种记录（录音、到场照片）就没地方放了。
+        """
+        self.assertEqual(events.CAMERA, "camera")
+        self.assertNotEqual(events.CAMERA, events.SNAPSHOT)
+
+    def test_the_watermark_has_a_ceiling(self):
+        """案卷是 core 的文件 —— 一行由**前端**画的水印不能没有上限，
+        否则一句话就能把 data/events.json 撑大。"""
+        self.assertIsInstance(events.WATERMARK_MAX_CHARS, int)
+        self.assertGreater(events.WATERMARK_MAX_CHARS, 0)
+
 
 class TestMakeEventId(unittest.TestCase):
     def test_from_text_time(self):
@@ -984,6 +1009,216 @@ class TestEventsMax(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 现场快照（Phase6 E2）
+# ---------------------------------------------------------------------------
+
+
+def camera(**extra) -> dict:
+    """一份最小的、合法的相机记录。
+
+    故意**不带 kind** —— 那个字段由 `add_camera` 自己写上去。调用方在这里
+    也写一遍的话，「有没有打上类型标记」这件事就再也测不出来了
+    （前端忘了带、core 也没补，两边都以为对方会写）。
+    """
+    body = {"stamp": "2026-09-22 20:31:00", "width": 640, "height": 480, "size": 48213}
+    body.update(extra)
+    return body
+
+
+class TestCameraSnapshots(unittest.TestCase):
+    """案卷上那几张现场照片 —— 只到 `EventBook` 这一层，不走 core。"""
+
+    def setUp(self):
+        self.sim = Sim()
+        hot_segment(self.sim)                 # 开出一条还开着的案卷
+        self.event = self.sim.event
+        assert self.event is not None
+
+    def test_add_camera_marks_the_kind_itself(self):
+        """类型标记由**这边**写，不由调用方传。
+
+        调用方传的话，某条路径漏了它就得到一条没有 kind 的记录 ——
+        `camera_count` 会把它当成状态迁移数漏掉，而记录明明躺在 snapshots 里。
+        """
+        written = self.event.add_camera(camera(extra_marker="x"))
+
+        self.assertEqual(written["kind"], events.CAMERA)
+        self.assertEqual(self.event.snapshots[-1]["kind"], events.CAMERA)
+        self.assertEqual(written["extra_marker"], "x")
+
+    def test_the_count_ignores_the_state_transitions(self):
+        """开案那一条**没有** kind —— 它是一次状态迁移，不是一张照片。
+        拿 len(snapshots) 当照片数的写法在这一条上就红了。"""
+        self.assertGreaterEqual(len(self.event.snapshots), 1)
+        self.assertNotIn("kind", self.event.snapshots[0])
+        self.assertEqual(self.event.camera_count, 0)
+
+        self.event.add_camera(camera())
+        self.assertEqual(self.event.camera_count, 1)
+
+    def test_the_view_reports_the_count(self):
+        self.event.add_camera(camera())
+        self.event.add_camera(camera())
+        self.assertEqual(self.event.view()["cameraCount"], 2)
+
+    def test_the_view_still_does_not_ship_the_snapshots_themselves(self):
+        """`view()` 是**每个周期都发一次**的那一份。把整叠 snapshots 塞进去的话，
+        每来一条遥测都要把全部水印重发一遍 —— 水印里还带着文件名和时间戳。
+        屏幕要的只是「有几张」（`cameraCount`），要看得细去读 data/events.json。
+        """
+        self.event.add_camera(camera(watermark="dorm-b | 偏热 | ..."))
+        view = self.event.view()
+        self.assertIn("cameraCount", view)
+        self.assertNotIn("snapshots", view)
+        self.assertNotIn("watermark", json.dumps(view, ensure_ascii=False))
+
+    def test_the_first_entry_survives_the_overflow(self):
+        """挤掉的时候**保留 index 0**：那是开案那一条。
+
+        顺带盯住 camera_count 和 snapshots 在挤过之后还对得上 ——
+        `del snapshots[1]` 把中间那条挪掉之后，两边的账不能错位。
+        """
+        first = self.event.snapshots[0]
+        for i in range(events.SNAPSHOT_MAX + 5):
+            self.event.add_camera(camera(stamp=f"2026-09-22 20:31:{i:02d}"))
+
+        self.assertEqual(len(self.event.snapshots), events.SNAPSHOT_MAX)
+        self.assertEqual(self.event.snapshots[0], first)
+        self.assertEqual(self.event.camera_count, events.SNAPSHOT_MAX - 1)
+        self.assertEqual(self.event.snapshots_dropped,
+                         events.SNAPSHOT_MAX + 5 - self.event.camera_count)
+
+    # ---- EventBook.record_snapshot：core 真正调的那一个 ----
+
+    def test_record_snapshot_lands_on_the_open_event(self):
+        ok, message = self.sim.book.record_snapshot(
+            NODE, when="2026-09-22 20:31:00", source="web", stamp="2026-09-22 20:31:00",
+            watermark="dorm-b", file="shot-1.png", width=640, height=480, size=48213,
+        )
+
+        self.assertTrue(ok, message)
+        self.assertIn(self.event.event_id, message)
+        shot = self.event.snapshots[-1]
+        self.assertEqual(shot["kind"], events.CAMERA)
+        self.assertEqual(shot["eventId"], self.event.event_id)
+        self.assertEqual(shot["nodeId"], NODE)
+        self.assertEqual(shot["file"], "shot-1.png")
+        self.assertEqual(shot["source"], "web")
+        self.assertEqual((shot["width"], shot["height"], shot["size"]), (640, 480, 48213))
+
+    def test_record_snapshot_keeps_both_times(self):
+        """`stamp` 是快门那一刻（前端报的），`time` 是 core 收到那一刻。
+        两个都留着：只有两个都在，「照片 20:31 拍的、core 20:33 才收到」这件事
+        才看得出来。"""
+        self.sim.book.record_snapshot(NODE, stamp="2026-09-22 20:31:00")
+
+        shot = self.event.snapshots[-1]
+        self.assertEqual(shot["stamp"], "2026-09-22 20:31:00")
+        self.assertNotEqual(shot["time"], shot["stamp"])
+        self.assertIsNotNone(events.parse_time(shot["time"]),
+                             f"core 补的 time 读不出来：{shot['time']!r}")
+
+    def test_record_snapshot_uses_the_time_it_is_given(self):
+        self.sim.book.record_snapshot(NODE, when="2026-09-22 20:32:00",
+                                      stamp="2026-09-22 20:31:00")
+        self.assertEqual(self.event.snapshots[-1]["time"], "2026-09-22 20:32:00")
+
+    def test_record_snapshot_clips_the_watermark(self):
+        """截了也**不报错** —— 那只是一行留档的字，长了截短就完了，
+        没必要为一句话把整张快照挡在门外。"""
+        long_text = "很" * (events.WATERMARK_MAX_CHARS + 50)
+        ok, _message = self.sim.book.record_snapshot(NODE, watermark=long_text)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(self.event.snapshots[-1]["watermark"]),
+                         events.WATERMARK_MAX_CHARS)
+
+    def test_record_snapshot_says_which_one_it_is(self):
+        """返回的那句话是**要说给日志听**的，所以它得能自己站住：
+        哪条案卷、第几张。光回一个 True 的话，终端上那一行只剩一个动作名。"""
+        _ok, first = self.sim.book.record_snapshot(NODE, stamp="2026-09-22 20:31:00")
+        _ok, second = self.sim.book.record_snapshot(NODE, stamp="2026-09-22 20:32:00")
+
+        self.assertIn("第 1 张", first)
+        self.assertIn("第 2 张", second)
+        # 没报宽高的时候，那句话里得写着「尺寸未报」，不能是「None×None」
+        # 或者干脆空着 —— 后面那条是给日志看的，读的人当时手里没有别的上下文。
+        self.assertIn("尺寸未报", first)
+        self.assertIn("时刻未报", self.sim.book.record_snapshot(NODE)[1])
+
+    def test_record_snapshot_prints_the_pixels_when_they_are_given(self):
+        _ok, message = self.sim.book.record_snapshot(
+            NODE, stamp="2026-09-22 20:31:00", width=640, height=480)
+        self.assertIn("640×480", message)
+
+    def test_record_snapshot_refuses_without_an_open_case(self):
+        """没开案的时候说清楚，而且**一个字都不写**。"""
+        book = events.EventBook(NODES, 3, 3)
+        ok, message = book.record_snapshot(NODE, stamp="2026-09-22 20:31:00")
+
+        self.assertFalse(ok)
+        self.assertIn(NODE, message)
+        self.assertIn("没有未结案的事件", message)
+        self.assertIn("还没有过事件", message)
+        self.assertIsNone(book.open_event(NODE))
+
+    def test_record_snapshot_names_the_closed_case_it_could_not_attach_to(self):
+        """有过案卷、但已经结了：拒绝的话里得点名**是那一条**。
+        光说「没有未结案的事件」的话，人还得自己去翻案卷才知道刚才那条
+        是结掉的还是压根没开过。"""
+        book = events.EventBook([NODE], 1, 3)
+        # recover_after 两边都得是 1：node 那边的计数和 book 那边的门槛
+        # 不是一个数的话，结不了案，而这条测试后面每一句都建在「已经结了」上。
+        sim = Sim(book=book, recover_after=1)
+        hot_segment(sim)
+        closed = sim.event
+        assert closed is not None
+        closed_id = closed.event_id
+        sim.normal("2026-09-22 20:10:00")          # recover_after=1：一条正常就结案
+        self.assertEqual(closed.state, events.RECOVERED)
+
+        ok, message = book.record_snapshot(NODE, stamp="2026-09-22 20:31:00")
+
+        self.assertFalse(ok)
+        self.assertIn(closed_id, message)
+        self.assertIn(events.RECOVERED, message)
+        self.assertEqual(closed.camera_count, 0)
+        self.assertNotIn("kind", closed.snapshots[-1])
+
+    def test_record_snapshot_refuses_a_mismatched_event_id(self):
+        """前端可以在 eventId 里写上它以为的那条。对不上就不挂 —— 而且
+        **不往对的那条上挂**：前端以为看的是 A 案、core 手里开着的是 B 案，
+        说明中间有人切过焦点，那张照片落在 B 上会安安静静地挂错地方。"""
+        ok, message = self.sim.book.record_snapshot(
+            NODE, event_id="dorm-b-19990101-000000", stamp="2026-09-22 20:31:00")
+
+        self.assertFalse(ok)
+        self.assertIn("对不上", message)
+        self.assertIn(self.event.event_id, message)
+        self.assertEqual(self.event.camera_count, 0)
+
+    def test_record_snapshot_accepts_a_matching_event_id(self):
+        ok, _message = self.sim.book.record_snapshot(
+            NODE, event_id=self.event.event_id, stamp="2026-09-22 20:31:00")
+        self.assertTrue(ok)
+        self.assertEqual(self.event.camera_count, 1)
+
+    def test_an_empty_event_id_is_not_a_mismatch(self):
+        """没写 eventId 和写了个空串是一回事 —— 不能因为它「对不上」就拒。
+        （前端从快照里读 eventId，而快照里那条事件可能刚被挤掉，读到 undefined
+        的时候拼出的是空串。）"""
+        for given in (None, "", "   "):
+            with self.subTest(event_id=given):
+                sim = Sim()
+                hot_segment(sim)
+                ok, _message = sim.book.record_snapshot(
+                    NODE, event_id=given, stamp="2026-09-22 20:31:00")
+                self.assertTrue(ok)
+                assert sim.event is not None
+                self.assertEqual(sim.event.camera_count, 1)
+
+
+# ---------------------------------------------------------------------------
 # 持久化
 # ---------------------------------------------------------------------------
 
@@ -1250,6 +1485,52 @@ class TestRedLine(unittest.TestCase):
         self.assertNotIn("RECOVERED", body)
         self.assertNotIn("UNRESOLVED", body)
         self.assertNotIn("recovered_at", body)
+
+    def test_record_snapshot_cannot_write_a_state(self):
+        """**Phase6 E2 那条红线的静态版。**
+
+        拍照比 handle 更容易滑过去：handle 改的是「这个宿舍在处理了」，而照片
+        看着像**证据** —— 「都拍下来了，那就当处理过了吧」这一句真写出来，
+        红线就没了，而且不会有任何报错：一个没人按过「开始处理」的宿舍会顶着
+        一张照片显示成「处理中」。
+
+        行为测试那边（test_core.TestSnapshotCommand）发一条指令跑一遍，只能
+        证明**这一次**没改。这里盯源码：哪天有人加一句「拍够三张自动转
+        HANDLING」，那条行为测试照样绿 —— 它用的还是一条指令。
+        """
+        body = self._function_body(self.source, "    def record_snapshot(")
+        # 查的是**写状态的字段名**，不是「state 这四个字母」——函数体里有一句
+        # `已经是 {last.state}`，那是把上一条的状态读出来说给日志听，正当得很。
+        # 太宽的词会让这条检查第一次报错时就被当成误报注释掉。
+        for forbidden in ("event.state", "event.verify", "verify_from",
+                          "recovered_at", "self._close", "apply_action",
+                          "pending_abnormal"):
+            self.assertNotIn(forbidden, body,
+                             f"record_snapshot 里出现了 {forbidden!r} —— 拍照不该改状态")
+
+    def test_record_snapshot_cannot_see_the_node(self):
+        """它拿不到 NodeState，也就没有能力去改节点状态 —— 和 apply_action
+        同一条：这是**结构上做不到**，不是「约定上不做」。"""
+        head = self.source.split("    def record_snapshot(")[1].split("    ) -> tuple")[0]
+        self.assertNotIn("node:", head)
+        self.assertNotIn("NodeState", head)
+
+    def test_only_one_place_adds_a_camera(self):
+        """「案卷上多一张照片」只能从 add_camera 走。
+
+        它负责打 kind、负责挤上限、负责把 snapshots_dropped 数上去。另开一条
+        直接 append 的路，那三件事就有一件会漏 —— 而漏的是哪一件，取决于
+        当时谁图快。
+        """
+        appends = [line.strip() for line in self.source.splitlines()
+                   if line.strip() == "self.snapshots.append(dict(entry))"]
+        self.assertEqual(len(appends), 1)
+        owner_line = next(i for i, line in enumerate(self.source.splitlines())
+                          if line.strip() == "self.snapshots.append(dict(entry))")
+        lines = self.source.splitlines()
+        owner = next(line.strip() for line in reversed(lines[:owner_line])
+                     if line.startswith("    def "))
+        self.assertTrue(owner.startswith("def add_snapshot("), owner)
 
     def test_telemetry_path_asks_the_same_node_state(self):
         """事件层读的是 core 的那一份计数，不是自己另数一遍。"""
