@@ -18,3 +18,13 @@ miniapp/project.private.config.json
 # 写进忽略列表而不是只靠「记得别 add」，是为了防 git add -A 手滑把它带进去。
 # 哪天真要收编它，用 git add -f broker/mosquitto.conf 就行。
 broker/
+
+# 这两个是练习时试手写的草稿，不是项目的一部分：
+#   analysis_no_pandas.py —— 不依赖 pandas 的 CSV 读法实验，自己写死了
+#     文件名 "dormmate (2).csv"，和主流程的 analysis/analysis.py 没有关系
+#   dormmate (2).csv      —— 上面那个脚本的输入，GBK 编码、62 字节，
+#     和主流程那几份 UTF-8 + BOM 的 CSV 不是一个口径，混进仓库只会让人
+#     以为「项目里有个 GBK 的 CSV」
+# 留在盘上照旧能跑，只是不进仓库。哪天真要收编，git add -f 就行。
+analysis_no_pandas.py
+dormmate (2).csv
