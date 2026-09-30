@@ -45,11 +45,11 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这十九个（一个 const + 十八个函数，多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这二十个（一个 const + 十九个函数，多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'SNAPSHOT_VERSION,readSnapshot,nodeOf,openEvent,latestEvent,eventStateText,'
   + 'handlingOf,actionState,fanOn,trendOf,trendText,calmLine,focusBanner,'
-  + 'alertLine,speakLine,snapshotSummary,buildMlNote,mlFetchFailed,cmdNote');
+  + 'alertLine,selectedNode,speakLine,snapshotSummary,buildMlNote,mlFetchFailed,cmdNote');
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
@@ -109,16 +109,18 @@ vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { readSnapshot, nodeOf, openEvent, latestEvent, eventStateText,
   handlingOf, actionState, fanOn, trendOf, trendText, calmLine, focusBanner,
-  alertLine, speakLine, snapshotSummary, buildMlNote, mlFetchFailed, cmdNote } = context;
+  alertLine, selectedNode, speakLine, snapshotSummary, buildMlNote, mlFetchFailed,
+  cmdNote } = context;
 
-check('★ 十八个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
+check('★ 十九个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
   eventStateText, handlingOf, actionState, fanOn, trendOf, trendText, calmLine,
-  focusBanner, alertLine, speakLine, snapshotSummary, buildMlNote, mlFetchFailed,
-  cmdNote]
+  focusBanner, alertLine, selectedNode, speakLine, snapshotSummary, buildMlNote,
+  mlFetchFailed, cmdNote]
   .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function', 'function',
-  'function', 'function', 'function', 'function', 'function', 'function']);
+  'function', 'function', 'function', 'function', 'function', 'function',
+  'function']);
 
 /* 版本号是 const（不是函数），要从上下文的词法作用域里读 ——
    它和 core.py 的 SNAPSHOT_VERSION 必须同时改，读出来对一次是值得的。 */
@@ -731,9 +733,38 @@ check('★ 念出来的是 core 给的 durationText（不是这边用 durationSe
       durationSec: 1200, durationText: '不到 1 分钟' }), nodeRow('dorm-c')] }))
     .indexOf('不到 1 分钟') > 0, true);
 
-/* ---------- K. speakLine（Phase6 E2：「朗读状态」念的那两句） ---------- */
+/* ---------- K. selectedNode（Phase6 E2：现在说的是哪个宿舍） ---------- */
 
-console.log('\n=== K. speakLine ===');
+console.log('\n=== K. selectedNode ===');
+
+/* 这一条是**唯一**的挑法出口。焦点 > 重点，两个都没有就是空串（不是随便挑一个）。
+   Web 页面那边「记录现场」「开始处理」「朗读状态」三条指令都靠它决定是哪一个
+   宿舍 —— 它们要是各挑各的，就会出现「照片挂到 dorm-c 而横幅写着 dorm-b」。 */
+check('★ 有重点就取重点', selectedNode(busySnapshot()), 'dorm-b');
+check('★ 有焦点就取焦点', selectedNode(snapshotOf({ focus: { nodeId: 'dorm-c' } })), 'dorm-c');
+check('★ 两个都有时焦点赢（就近：那是人刚点的那一个）',
+  selectedNode(busySnapshot({ focus: { nodeId: 'dorm-c', by: 'mobile' } })), 'dorm-c');
+check('★ 两个都没有就是空串（不是随便挑一个，也不是 null）',
+  selectedNode(snapshotOf()), '');
+check('没有快照时也是空串', selectedNode(null), '');
+check('★ focus 里 nodeId 不是字符串时当没有', selectedNode(snapshotOf({
+  focus: { nodeId: 42 } })), '');
+
+/* 和 focusBanner 是同一件事的两种说法 —— 它俩要是能不一致，那「唯一挑法」
+   这句话就是假的。 */
+[
+  ['只有重点', busySnapshot()],
+  ['只有焦点', snapshotOf({ focus: { nodeId: 'dorm-c' } })],
+  ['两个都有', busySnapshot({ focus: { nodeId: 'dorm-c' } })],
+  ['都没有', snapshotOf()],
+].forEach(function (pair) {
+  check('★ ' + pair[0] + '：selectedNode 和 focusBanner 挑的是同一个',
+    selectedNode(pair[1]), focusBanner(pair[1]).nodeId || '');
+});
+
+/* ---------- L. speakLine（Phase6 E2：「朗读状态」念的那两句） ---------- */
+
+console.log('\n=== L. speakLine ===');
 
 check('★ 平静时和 alertLine 一样：calmLine 加个句号',
   speakLine(snapshotOf()), '当前 3 个宿舍都正常。');
@@ -852,9 +883,9 @@ check('★ 念的是人话，没有 ｜ 那种只给眼睛看的符号',
     banner.nodeId === null ? line.indexOf('宿舍') > 0 : line.indexOf(banner.nodeId) === 0, true);
 });
 
-/* ---------- L. snapshotSummary（日志里那一行） ---------- */
+/* ---------- M. snapshotSummary（日志里那一行） ---------- */
 
-console.log('\n=== L. snapshotSummary ===');
+console.log('\n=== M. snapshotSummary ===');
 
 check('没收到快照', snapshotSummary(null), '还没有收到快照');
 check('★ 整行', snapshotSummary(busySnapshot()),
@@ -880,9 +911,9 @@ check('★ 「未结案」是 OPEN + HANDLING 两个加起来（不是只看 OPE
 check('★ 版本号读的是快照里的 v（不是这边写死的 2）',
   snapshotSummary(snapshotOf({ v: 2 })).indexOf('快照 v2') === 0, true);
 
-/* ---------- M. buildMlNote / mlFetchFailed（Rule-ML 那一段） ---------- */
+/* ---------- N. buildMlNote / mlFetchFailed（Rule-ML 那一段） ---------- */
 
-console.log('\n=== M. buildMlNote / mlFetchFailed ===');
+console.log('\n=== N. buildMlNote / mlFetchFailed ===');
 
 const ML_OK = {
   text: '规则和 ML 在这份数据上大体一致，只有少数几条对不上。',
@@ -955,9 +986,9 @@ check('★ 降级时说明里告诉人怎么补（跑一次 analysis.py），并
   mlFetchFailed('x').note.indexOf('analysis/analysis.py') > 0
     && mlFetchFailed('x').note.indexOf('看板其余部分不受影响') > 0, true);
 
-/* ---------- N. cmdNote ---------- */
+/* ---------- O. cmdNote ---------- */
 
-console.log('\n=== N. cmdNote（按下「开始处理」之后那行字）===');
+console.log('\n=== O. cmdNote（按下「开始处理」之后那行字）===');
 
 const sent = cmdNote(true);
 check('★ 发出去时点明「好没好由 core 判，这一步不结案」',
@@ -979,9 +1010,9 @@ check('失败时不说「已记下这一笔」之类的话（页面不记账）'
 check('原因缺失时兜一句', cmdNote(false, '').indexOf('不知道什么原因') > 0, true);
 check('原因不是字符串时也兜住', cmdNote(false, null).indexOf('不知道什么原因') > 0, true);
 
-/* ---------- O. 纯函数：不改输入 ---------- */
+/* ---------- P. 纯函数：不改输入 ---------- */
 
-console.log('\n=== O. 纯函数 ===');
+console.log('\n=== P. 纯函数 ===');
 
 /* 【为什么用「跑完再比一遍 JSON」而不是 Object.freeze】
    freeze 只在严格模式下才抛，而 logic.js 不是严格模式（它是个普通模块，
@@ -1015,9 +1046,9 @@ check('★ speakLine 两次调用一模一样', speakLine(twice), speakLine(twic
 check('★ snapshotSummary 两次调用一模一样',
   snapshotSummary(twice), snapshotSummary(twice));
 
-/* ---------- P. 变异：改坏一处，看抓不抓得住 ---------- */
+/* ---------- Q. 变异：改坏一处，看抓不抓得住 ---------- */
 
-console.log('\n=== P. 变异（真跑一遍，不是看代码猜）===');
+console.log('\n=== Q. 变异（真跑一遍，不是看代码猜）===');
 
 /* 「横幅的理由必须是 core 给的那串字」——理由要是这边拼的，改一下快照里的
    reason，横幅就该跟着变。不变就说明那句话是写死在代码里的。 */

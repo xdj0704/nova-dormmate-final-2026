@@ -475,12 +475,7 @@ export function focusBanner(snapshot) {
  * @returns {string} 以句号收尾的一句话
  */
 export function alertLine(snapshot) {
-  const focus = snapshot && isObject(snapshot.focus) ? snapshot.focus : null;
-  const top = snapshot && isObject(snapshot.priority) ? snapshot.priority : null;
-  const focusedId = focus && typeof focus.nodeId === 'string' ? focus.nodeId : '';
-  const topId = top && typeof top.nodeId === 'string' ? top.nodeId : '';
-  const subject = focusedId || topId;
-
+  const subject = selectedNode(snapshot);
   if (!subject) return calmLine(snapshot) + '。';
 
   const node = nodeOf(snapshot, subject);
@@ -522,6 +517,24 @@ function cameraCountOf(event) {
 }
 
 /**
+ * 「现在说的是哪个宿舍」—— 被点名 > 是重点。没有就是空串。
+ *
+ * 单独开一个口是因为 Phase6 E2 的 web 页面也要用：「记录现场」得知道这张照片
+ * 该挂到哪一间、「开始处理」得知道是给谁按的、「朗读状态」得知道念谁。
+ * 而它**不能**自己再挑一遍 —— 挑法（`focusedId || topId`）在这个文件里已经出现
+ * 三处，第四处抄下去，改一处忘一处的那天就会「横幅说 dorm-b、照片挂到 dorm-c」，
+ * 而两边看着都对。
+ *
+ * 实现就是读 focusBanner 挑出来的那一个，一个判断都不新加。
+ *
+ * @param {Object|null} snapshot
+ * @returns {string} 宿舍名；此刻没有重点也没人点名时是空串
+ */
+export function selectedNode(snapshot) {
+  return focusBanner(snapshot).nodeId || '';
+}
+
+/**
  * 语音「朗读状态」念的那两句。
  *
  *   dorm-b 温度 31 摄氏度，湿度 78%，偏热，已持续 20 分钟。事件待处理，已登记 1 张现场快照。
@@ -537,7 +550,8 @@ function cameraCountOf(event) {
  *
  * 【和 focusBanner 说的是同一个宿舍】挑谁这一条和 alertLine 完全相同
  * （被点名 > 是重点），三处只能有一份挑法：横幅说 A 而念出来的是 B 的话，
- * 站在旁边听的人看不出哪里不对。
+ * 站在旁边听的人看不出哪里不对。E2 起这条挑法收进了 `selectedNode`，
+ * 三处都是调它，Web 页面那边也是。
  *
  * 【两句，不是一个长句】温湿度一句、事件一句，中间断开 —— 一口气念完的话，
  * 听的人抓不住哪儿是数字、哪儿是状态。结尾照旧是句号。
@@ -552,14 +566,10 @@ function cameraCountOf(event) {
  * @returns {string} 以句号收尾
  */
 export function speakLine(snapshot, nodeId) {
-  const focus = snapshot && isObject(snapshot.focus) ? snapshot.focus : null;
-  const top = snapshot && isObject(snapshot.priority) ? snapshot.priority : null;
-  const focusedId = focus && typeof focus.nodeId === 'string' ? focus.nodeId : '';
-  const topId = top && typeof top.nodeId === 'string' ? top.nodeId : '';
   /* 空串 / 全是空白当没传 —— 页面上那个值是从快照里读出来的，读到 undefined
      拼出来就是空串，那不该被当成一个宿舍名。 */
   const asked = typeof nodeId === 'string' ? nodeId.trim() : '';
-  const subject = asked || focusedId || topId;
+  const subject = asked || selectedNode(snapshot);
 
   if (!subject) return calmLine(snapshot) + '。';
 
