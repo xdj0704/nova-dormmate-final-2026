@@ -1,0 +1,163 @@
+{
+  "_note": [
+    "「优先关注」的期望值表。Python 的 rules.py 和 JS 的 dashboard/logic.js",
+    "各读一遍这份文件，逐条对上才算过 —— 一份数据，两个出口，一种说法。",
+    "",
+    "为什么要有这份东西：四步判据（时长 > 次数 > 严重度 > nodeId 字典序）",
+    "在两个语言里各写了一遍。不是「理论上可能不一致」，是**改了一边忘了另一边**",
+    "的时候两边都照样跑，只是页面上说的是 dorm-b、core 发出去的快照里是 dorm-c。",
+    "两边各写一套单元测试治不了这个病：两套测试都绿，而它们期望的是不同的东西。",
+    "所以期望值只留这一份，两边都读它。",
+    "",
+    "durationSec 一律是**秒**（整数）。JS 那边收的是毫秒，测试里 ×1000 再喂进去 ——",
+    "单位换算留在测试里显式做，不藏进 fixture：藏进去的话，两边对不上时",
+    "第一个要看的地方（是不是单位错了）就看不见了。",
+    "",
+    "reasons 是**不带节点名**的那半句，包括赢家。两边唯一的、故意的差别是：",
+    "JS 的 pickPriority().reason 前面有节点名（「dorm-b 已连续…」），",
+    "Python 的 RankedNode.reason 没有（「已连续…」）。这个差别由两边的测试",
+    "各自显式地对齐（JS 那边断言 winner + ' ' + reason），不靠这份文件含糊过去。",
+    "why：那句话在页面上是独立一行，必须有名字；在快照里节点名是另一个字段，",
+    "再重复一遍就成了「优先关注 dorm-b：dorm-b 已连续…」。",
+    "",
+    "这份表只覆盖两边都支持的默认严重度权重（偏热 3 / 偏湿 2 / 偏冷 1）。",
+    "Python 的 rank_priority 可以接一个 weights 覆盖，JS 那边权重是写死的 ——",
+    "所以权重覆盖只在 Python 的单元测试里测，不进这份共用表。"
+  ],
+
+  "duration": [
+    { "seconds": 0, "expect": "不到 1 分钟" },
+    { "seconds": 0.5, "expect": "不到 1 分钟" },
+    { "seconds": 59, "expect": "不到 1 分钟" },
+    { "seconds": 59.9, "expect": "不到 1 分钟" },
+    { "seconds": 60, "expect": "1 分钟" },
+    { "seconds": 119, "expect": "1 分钟" },
+    { "seconds": 120, "expect": "2 分钟" },
+    { "seconds": 300, "expect": "5 分钟" },
+    { "seconds": 3599, "expect": "59 分钟" },
+    { "seconds": 3600, "expect": "1 小时" },
+    { "seconds": 3660, "expect": "1 小时 1 分钟" },
+    { "seconds": 3900, "expect": "1 小时 5 分钟" },
+    { "seconds": 7200, "expect": "2 小时" },
+    { "seconds": 86399, "expect": "23 小时 59 分钟" }
+  ],
+
+  "cases": [
+    {
+      "name": "第 1 步：时长最长者胜（三段时长 3 / 7 / 5 分钟）",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "偏冷", "count": 2, "durationSec": 180 },
+        { "nodeId": "dorm-b", "status": "偏热", "count": 2, "durationSec": 420 },
+        { "nodeId": "dorm-c", "status": "偏湿", "count": 2, "durationSec": 300 }
+      ],
+      "order": ["dorm-b", "dorm-c", "dorm-a"],
+      "reasons": {
+        "dorm-b": "已连续偏热 7 分钟（2 次），持续时间最长",
+        "dorm-c": "虽然偏湿，但只持续 5 分钟",
+        "dorm-a": "虽然偏冷，但只持续 3 分钟"
+      }
+    },
+    {
+      "name": "第 1 步优先于条数：只异常 1 分钟但 99 条，也得排在后面",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "偏热", "count": 99, "durationSec": 60 },
+        { "nodeId": "dorm-b", "status": "偏冷", "count": 1, "durationSec": 420 }
+      ],
+      "order": ["dorm-b", "dorm-a"],
+      "reasons": {
+        "dorm-b": "已连续偏冷 7 分钟（1 次），持续时间最长",
+        "dorm-a": "虽然偏热，但只持续 1 分钟"
+      }
+    },
+    {
+      "name": "第 2 步：时长打平（都是 6 分钟），比次数",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "偏冷", "count": 2, "durationSec": 360 },
+        { "nodeId": "dorm-b", "status": "偏热", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-c", "status": "偏湿", "count": 2, "durationSec": 360 }
+      ],
+      "order": ["dorm-b", "dorm-c", "dorm-a"],
+      "reasons": {
+        "dorm-b": "已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长，异常次数最多",
+        "dorm-c": "也偏湿，持续时间和它一样长，但只有 2 条异常数据",
+        "dorm-a": "也偏冷，持续时间和它一样长，但只有 2 条异常数据"
+      }
+    },
+    {
+      "name": "第 2 步优先于严重度：次数多的偏冷，排在次数少的偏热前面",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "偏热", "count": 2, "durationSec": 360 },
+        { "nodeId": "dorm-b", "status": "偏冷", "count": 5, "durationSec": 360 }
+      ],
+      "order": ["dorm-b", "dorm-a"],
+      "reasons": {
+        "dorm-b": "已连续偏冷 6 分钟（5 次），持续时间和 dorm-a 一样长，异常次数最多",
+        "dorm-a": "也偏热，持续时间和它一样长，但只有 2 条异常数据"
+      }
+    },
+    {
+      "name": "第 3 步：时长和次数都打平，比严重度（偏热 > 偏湿 > 偏冷）",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "偏冷", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-b", "status": "偏热", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-c", "status": "偏湿", "count": 3, "durationSec": 360 }
+      ],
+      "order": ["dorm-b", "dorm-c", "dorm-a"],
+      "reasons": {
+        "dorm-b": "已连续偏热 6 分钟（3 次），持续时间和 dorm-c 一样长、异常次数也一样，但偏热比偏湿更要紧",
+        "dorm-c": "也偏湿，时长和次数都跟它一样，但偏湿没有偏热要紧",
+        "dorm-a": "也偏冷，时长和次数都跟它一样，但偏冷没有偏热要紧"
+      }
+    },
+    {
+      "name": "第 4 步：四步全平，按 nodeId 字典序（三个都偏热）",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "偏热", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-b", "status": "偏热", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-c", "status": "偏热", "count": 3, "durationSec": 360 }
+      ],
+      "order": ["dorm-a", "dorm-b", "dorm-c"],
+      "reasons": {
+        "dorm-a": "已连续偏热 6 分钟（3 次），和 dorm-b 完全并列，按节点名顺序排在前面",
+        "dorm-b": "也偏热，时长和次数都跟它一样，按节点名顺序排在后面",
+        "dorm-c": "也偏热，时长和次数都跟它一样，按节点名顺序排在后面"
+      }
+    },
+    {
+      "name": "第 4 步与数据到达顺序无关：列表顺序倒着给，结果一样",
+      "nodes": [
+        { "nodeId": "dorm-c", "status": "偏热", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-a", "status": "偏热", "count": 3, "durationSec": 360 },
+        { "nodeId": "dorm-b", "status": "偏热", "count": 3, "durationSec": 360 }
+      ],
+      "order": ["dorm-a", "dorm-b", "dorm-c"],
+      "reasons": {
+        "dorm-a": "已连续偏热 6 分钟（3 次），和 dorm-b 完全并列，按节点名顺序排在前面",
+        "dorm-b": "也偏热，时长和次数都跟它一样，按节点名顺序排在后面",
+        "dorm-c": "也偏热，时长和次数都跟它一样，按节点名顺序排在后面"
+      }
+    },
+    {
+      "name": "只有一个异常节点：不写「持续时间最长」（一步都没比过）",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "正常", "count": 0, "durationSec": 0 },
+        { "nodeId": "dorm-b", "status": "偏热", "count": 2, "durationSec": 300 },
+        { "nodeId": "dorm-c", "status": "正常", "count": 0, "durationSec": 0 }
+      ],
+      "order": ["dorm-b"],
+      "reasons": {
+        "dorm-b": "已连续偏热 5 分钟（2 次），是目前唯一的异常节点"
+      }
+    },
+    {
+      "name": "三个都正常：空表，不是「挑一个最不坏的」",
+      "nodes": [
+        { "nodeId": "dorm-a", "status": "正常", "count": 0, "durationSec": 0 },
+        { "nodeId": "dorm-b", "status": "正常", "count": 0, "durationSec": 0 },
+        { "nodeId": "dorm-c", "status": "正常", "count": 0, "durationSec": 0 }
+      ],
+      "order": [],
+      "reasons": {}
+    }
+  ]
+}

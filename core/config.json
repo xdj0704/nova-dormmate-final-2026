@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "core（唯一业务大脑）的全部可调参数。改了这里不用动代码，重启 core 即可。",
+    "",
+    "这里**不放** topic 字符串。topic 只有一处出处：项目根的 config.py",
+    "（config.topic_for / TOPIC_PATTERN / STATE_TOPIC）。放第二份的话，",
+    "改 topic 时只改一边，于是 core 订阅的和前端订阅的是两条不同的 topic ——",
+    "而且两边都「没报错」，只是页面上永远没有数据。这个坑在 Phase1 的",
+    "旧三段式 topic 迁移里已经踩过一次了。",
+    "",
+    "broker 里那三项写 null = 用 config.py 里那份（也就跟着",
+    "DORMMATE_MQTT_HOST 这些环境变量走）。写了具体值就以这里为准。",
+    "「null 就跟着 config.py」而不是「两边必须相等」是有意的：换 broker 时",
+    "只要设一个环境变量，不用同时改两个文件。",
+    "",
+    "thresholds 这一份是**给人和给报告看的**，规则的真源仍然是 status_rules.py ——",
+    "core 启动时会逐项核对，对不上直接拒绝启动并说清改哪一边。所以这里改成 20",
+    "不会「悄悄生效」，而是启动时就报错。理由和 rules.py 转发 judge_status 一样：",
+    "同一件事有两个说法，迟早会有一次两边不一致。"
+  ],
+
+  "nodes": ["dorm-a", "dorm-b", "dorm-c"],
+
+  "thresholds": {
+    "temperatureLow": 18,
+    "temperatureHigh": 30,
+    "humidityHigh": 75
+  },
+
+  "priority": {
+    "severity": { "偏热": 3, "偏湿": 2, "偏冷": 1, "正常": 0 }
+  },
+
+  "offlineTimeoutSec": 30,
+  "recoverConsecutiveNormal": 3,
+  "historyMax": 50,
+
+  "broker": {
+    "host": null,
+    "port": null,
+    "qos": null,
+    "keepaliveSec": 30
+  },
+
+  "loop": {
+    "timeoutSec": 0.5
+  }
+}
