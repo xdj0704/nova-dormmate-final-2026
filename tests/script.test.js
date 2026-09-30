@@ -183,6 +183,50 @@ global.localStorage = { getItem: () => null, setItem() {} };
 global.URL.createObjectURL = (blob) => { capturedBlob = blob; return 'blob:fake-url'; };
 global.URL.revokeObjectURL = () => {};
 
+/* ---------- 语音合成桩（Step 3-3） ----------
+
+   window.speechSynthesis 换成假的：speak() 只把 utterance 记下来（不真念），
+   cancel() 数次数。utterance 上的 fireError(code) 模拟"念到一半出错"——
+   真浏览器走的是它的 onerror 回调。
+
+   三种模式，对应"浏览器支持到什么程度"：
+     'ok'      speechSynthesis 和 SpeechSynthesisUtterance 都在
+     'partial' 只有前者，没有那个构造函数（Chrome 上这两个是分开的两样东西）
+     'off'     两个都没有
+
+   默认装 'ok'（和上面 installMediaDevices('ok') 一个道理）：3-2 那批测的是
+   **识别**，不该被"这台浏览器支不支持合成"干扰。 */
+let spokenTexts = [];
+let cancelCount = 0;
+
+function fakeUtterance(text) {
+  return {
+    text, lang: '',
+    onerror: null,
+    fireError(code) { if (this.onerror) this.onerror({ error: code }); },
+  };
+}
+
+function installSpeechSynthesis(mode) {
+  spokenTexts = [];
+  cancelCount = 0;
+  const synth = {
+    speak(u) { spokenTexts.push(u); },
+    cancel() { cancelCount += 1; },
+  };
+  const Ctor = mode === 'ok'
+    ? function UtteranceStub(text) { return fakeUtterance(text); }
+    : undefined;
+  Object.defineProperty(global.window, 'speechSynthesis', {
+    value: mode === 'off' ? undefined : synth, configurable: true, writable: true,
+  });
+  Object.defineProperty(global.window, 'SpeechSynthesisUtterance', {
+    value: Ctor, configurable: true, writable: true,
+  });
+}
+
+installSpeechSynthesis('ok');
+
 // 顺序同 index.html：先 rules.js，再 script.js
 vm.runInThisContext(fs.readFileSync(RULES, 'utf8'), { filename: RULES });
 vm.runInThisContext(fs.readFileSync(SCRIPT, 'utf8'), { filename: SCRIPT });
@@ -757,6 +801,105 @@ const exportedNote = els['export-note'].textContent;
     listening.aborted === 1, String(listening.aborted));
   check('自己主动中止不会被当成错误显示出来',
     voiceError() === '', voiceError());
+
+  /* ---------- Step 3-3：语音播报 ---------- */
+
+  /* 念的那句话单独拿出来测：它是"哪些字会进到耳朵里"的唯一出处，
+     不该只有"走没走到 speak()"这一条。 */
+
+  run('nodes.clear()');
+  check('一个节点都没收到时念「还没有收到」，不念「都正常」',
+    run('statusReadout()') === '还没有收到任何节点的数据', run('statusReadout()'));
+
+  run(`
+    nodes.set('dorm-b', { temperature:31, humidity:78, status:'偏热' });
+    nodes.set('dorm-a', { temperature:25, humidity:60, status:'正常' });
+  `);
+  check('按 nodeId 排序，不是按收到的先后（后到的 dorm-b 排在后面）',
+    run('statusReadout()') === 'dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热',
+    run('statusReadout()'));
+
+  run("nodes.set('dorm-c', { temperature:25.5, humidity:60, status:'正常' })");
+  check('小数照 fmt 的格式念（25.5 不写成 25.50）',
+    run('statusReadout()').includes('dorm-c 25.5℃ 60% 正常'), run('statusReadout()'));
+
+  /* 前端**不许**重算状态：规则只有 Python 侧那一份实现。31℃/78% 规则上算
+     偏热，这里故意把报文的 status 写成偏湿 —— 念出来的必须是报文里那个。 */
+  run("nodes.clear(); nodes.set('dorm-a', { temperature:31, humidity:78, status:'偏湿' })");
+  check('念的是报文里的 status，不是页面自己重算的',
+    run('statusReadout()') === 'dorm-a 31℃ 78% 偏湿', run('statusReadout()'));
+
+  /* ---- 说「朗读」真的念出来（走完整条链路） ---- */
+
+  run(`
+    nodes.clear();
+    nodes.set('dorm-a', { temperature:25, humidity:60, status:'正常' });
+    nodes.set('dorm-b', { temperature:31, humidity:78, status:'偏热' });
+  `);
+  installSpeechSynthesis('ok');
+
+  voiceBtn.fire('click');
+  lastRecognition.say('朗读');
+  check('说「朗读」真的调了 speak()', spokenTexts.length === 1, String(spokenTexts.length));
+  check('念的就是当前状态那句话',
+    spokenTexts[0] && spokenTexts[0].text === 'dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热',
+    spokenTexts[0] && spokenTexts[0].text);
+  check('lang 是 zh-CN', spokenTexts[0] && spokenTexts[0].lang === 'zh-CN',
+    spokenTexts[0] && spokenTexts[0].lang);
+  check('念之前先 cancel（否则第二句要排队等第一句念完）',
+    cancelCount === 1, String(cancelCount));
+  check('页面上显示的就是要念的那一句（静音时只能靠它确认念了什么）',
+    voiceAction() === '正在朗读：dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热', voiceAction());
+  check('utterance 留着一个引用（被 GC 掉的话 Chrome 念到一半会停）',
+    run('speaking') === spokenTexts[0], String(run('speaking') === spokenTexts[0]));
+
+  /* ---- 每次现算，不缓存上一句 ---- */
+
+  run("nodes.set('dorm-c', { temperature:16, humidity:60, status:'偏冷' })");
+  voiceBtn.fire('click');
+  lastRecognition.say('朗读');
+  check('第二句照样先 cancel 再 speak',
+    cancelCount === 2 && spokenTexts.length === 2,
+    `cancel=${cancelCount} speak=${spokenTexts.length}`);
+  check('新收到的节点立刻进下一句（念的是此刻的数据，不是上一次那份）',
+    spokenTexts[1].text.includes('dorm-c 16℃ 60% 偏冷'), spokenTexts[1].text);
+
+  /* ---- 浏览器不支持 ---- */
+
+  installSpeechSynthesis('off');
+  const unsupported = run('speakStatus()');
+  check('不支持时返回 {ok:false} 而不是抛异常',
+    unsupported && unsupported.ok === false, JSON.stringify(unsupported));
+  check('不支持时把要念的内容照样写在页面上',
+    unsupported.message.includes('不支持') && unsupported.message.includes('dorm-c'),
+    unsupported.message);
+  check('不支持时压根没碰 speechSynthesis',
+    spokenTexts.length === 0 && cancelCount === 0,
+    `speak=${spokenTexts.length} cancel=${cancelCount}`);
+
+  installSpeechSynthesis('partial');
+  check('只有 speechSynthesis、没有那个构造函数，也算不支持（少查一个就是 TypeError）',
+    run('speechSupported()') === false, String(run('speechSupported()')));
+  check('这种浏览器里说「朗读」不抛异常，照样返回 {ok:false}',
+    (() => {
+      try { const r = run('speakStatus()'); return r && r.ok === false; } catch (e) { return false; }
+    })(), '抛了异常');
+
+  /* ---- 念的时候出错 ---- */
+
+  installSpeechSynthesis('ok');
+  voiceBtn.fire('click');
+  lastRecognition.say('朗读');
+  const speakingNow = spokenTexts[spokenTexts.length - 1];
+  speakingNow.fireError('not-allowed');
+  check('朗读失败：原始的 event.error 露在页面上',
+    voiceAction().includes('not-allowed'), voiceAction());
+  check('朗读失败：把「正在朗读」覆盖掉，不留一句假话',
+    !voiceAction().includes('正在朗读') && voiceAction().includes('朗读失败'), voiceAction());
+
+  speakingNow.fireError(undefined);
+  check('连错误码都没有时写 unknown，不写 undefined',
+    voiceAction().includes('（unknown）'), voiceAction());
 
   /* ---------- 报告 ---------- */
 

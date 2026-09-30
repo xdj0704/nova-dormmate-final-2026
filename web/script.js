@@ -679,15 +679,94 @@ function setVoiceAction(text, isPlaceholder = false) {
   el.voiceAction.classList.toggle('is-placeholder', isPlaceholder);
 }
 
-/* 占位：Step 3-3 在这里接语音合成，把下面这段念出来。
-   现在先打到控制台，好确认取到的是哪几个节点。 */
+/* ---------- 语音播报（Step 3-3） ----------
+
+   用浏览器自带的 speechSynthesis。和 Step 3-2 的识别不一样：识别要联网
+   （Chrome 是把录音传上去识别的），合成不用 —— 声音就在本机，断网也念得出来。
+
+   念的是**当前收到的所有节点**，一句话念完。念什么由下面这两个函数现算，
+   页面一个字都不拼 —— 和看板那边 8-3 的分工是同一条原则。 */
+
+const SPEECH_LANG = 'zh-CN';
+
+/* 正在念的那一句。留个引用不是"记住上一条"（每次都是现算的），是防一个真实的坑：
+   Chrome 里 utterance 被 GC 掉，念到一半会直接停。变量一直指着它，它就活着。 */
+let speaking = null;
+
+/**
+ * 浏览器支不支持语音合成。
+ *
+ * 两个都要查：Chrome 上 speechSynthesis 一直在，但 SpeechSynthesisUtterance
+ * 是个构造函数，缺了它 `new` 出来就是个 TypeError。少查一个的话，不支持的
+ * 环境里说一句「朗读」就是一条未捕获的异常 —— 界面上只表现为"什么都没发生"。
+ * （看板那边 8-3 查的是同样两样东西。）
+ */
+function speechSupported() {
+  return typeof window.speechSynthesis !== 'undefined'
+    && typeof window.SpeechSynthesisUtterance === 'function';
+}
+
+/**
+ * 要念的那句话，形如 `dorm-a 25℃ 60% 正常；dorm-b 31℃ 78% 偏热`。
+ *
+ * 状态直接取报文里的 `status`，**不重算**。规则在这个项目里只有一份实现
+ * （Python 侧的 `status_rules`，页面和看板都只负责渲染）；前端自己再算一遍的话，
+ * 屏幕上显示的和耳朵听到的迟早会在某条边界数据上分家，而且不报错。
+ *
+ * 按 nodeId 排序，不是按收到的先后。同一份数据念出来的句子必须每次都一样 ——
+ * 顺序跟着到达时间跑的话，连"刚才念的和现在念的是不是同一句"都没法比。
+ *
+ * 一个节点都没有时说的是「还没有收到」，**不是「都正常」**：页面刚打开那几秒
+ * 是**不知道**，说成"正常"就是句假话（和看板 B1 / B4 同一个口径）。
+ */
+function statusReadout() {
+  const lines = [...nodes.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+    .map(([id, p]) => `${id} ${fmt(p.temperature)}℃ ${fmt(p.humidity)}% ${p.status}`);
+  return lines.length ? lines.join('；') : '还没有收到任何节点的数据';
+}
+
+/**
+ * 把当前状态念出来。
+ *
+ * 返回值仍然是 `{ok, message}`，和 `takeSnapshot()` 同一个形状 ——
+ * 路由层（`handleVoiceText`）不用分辨命令是谁，拿到结果直接显示就行。
+ *
+ * **message 就是"要念的那句话"本身**，不是另写一句提示。静音、没音箱、音量
+ * 太小的场合，页面上那行字是唯一能确认"它到底念了什么"的地方；提示语和朗读
+ * 内容各写各的，那行字就失去意义了（看板 8-3 也是这么处理的）。
+ *
+ * 先 `cancel()` 再 `speak()`：连着说两次「朗读」，第二句会老老实实排在队列里
+ * 等着，等第一句念完（三个节点要好几秒）才开口，而那时候念的是**上一次算出来
+ * 的**内容，早就不算数了。掐掉上一句、立刻念最新的才对。
+ */
 function speakStatus() {
-  const lines = [...nodes.entries()].sort().map(
-    ([id, p]) => `${id} ${fmt(p.temperature)}℃ ${fmt(p.humidity)}% ${p.status}`,
-  );
-  const text = lines.length ? lines.join('；') : '还没有收到任何节点的数据';
-  console.log('[DormMate] speakStatus() 占位输出：', text);
-  return { ok: true, message: '朗读还没实现（Step 3-3），内容已打到控制台' };
+  const text = statusReadout();
+
+  if (!speechSupported()) {
+    return {
+      ok: false,
+      message: '这个浏览器不支持语音合成（window.speechSynthesis 不存在）。'
+        + '要念的是：' + text,
+    };
+  }
+
+  window.speechSynthesis.cancel();
+
+  speaking = new window.SpeechSynthesisUtterance(text);
+  speaking.lang = SPEECH_LANG;
+
+  /* 出错也要说出来。这时候路由层已经把「正在朗读…」显示上去了，不覆盖的话
+     页面会一直声称它在念 —— 而实际上什么都没响。原始的错误码写在最前面：
+     解释文案可能对不上，错误码不会骗人（和 3-2 那张 VOICE_ERRORS 表、
+     看板 8-3 是同一条原则）。 */
+  speaking.onerror = function (event) {
+    const code = (event && event.error) ? event.error : 'unknown';
+    setVoiceAction(`朗读失败（${code}）。要念的是：${text}`, false);
+  };
+
+  window.speechSynthesis.speak(speaking);
+  return { ok: true, message: '正在朗读：' + text };
 }
 
 /* 把识别到的文字派发给固定指令。
