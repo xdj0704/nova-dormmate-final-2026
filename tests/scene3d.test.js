@@ -39,6 +39,7 @@ const { pathToFileURL } = require('node:url');
 
 const ROOT = path.join(__dirname, '..');
 const SCENE_FILE = path.join(ROOT, 'three', 'scene.js');
+const ROOM_FILE = path.join(ROOT, 'three', 'room.js');
 const HTML_FILE = path.join(ROOT, 'three', 'index.html');
 const LIB_FILE = path.join(ROOT, 'three', 'lib', 'three.module.js');
 
@@ -370,8 +371,16 @@ let focusRingRef = null;
 
   const imports = [...code.matchAll(/^\s*import\s[\s\S]*?from\s+['"]([^'"]+)['"]/gm)]
     .map((m) => m[1]);
-  check('只有一条 import', imports.length === 1, imports.length + ' 条：' + imports.join(', '));
-  check('且来源是裸名字 three', imports[0] === 'three', imports[0]);
+  // E1-2 起多了一条**相对** import（'./room.js'：一间房怎么搭搬去了那边）。
+  // 这条断言盯的从来不是「只能有一条」，而是「只能有一个裸名字」—— importmap
+  // 只映射了 "three"，源码里冒出第二个裸名字浏览器会直接报找不到模块。
+  // 相对路径不碰这条线，所以这里从「恰好一条」放宽成「恰好这两条而且写全了」，
+  // 数量仍然写死 —— 又冒出一条照样会红，得有人过来说明它是什么。
+  check('import 只有「裸名字 three」和「相对 ./room.js」两条',
+    imports.length === 2 && imports.indexOf('three') >= 0 && imports.indexOf('./room.js') >= 0,
+    imports.length + ' 条：' + imports.join(', '));
+  check('那条相对 import 指的是真文件',
+    fs.existsSync(ROOM_FILE), 'three/room.js 不存在');
 
   // importmap 只映射了 "three" 这一条。要是源码里冒出第二个裸名字，
   // 浏览器会直接报找不到模块 —— 这条盯着它。
@@ -386,15 +395,31 @@ let focusRingRef = null;
   /* ===== 准备假模块 ===== */
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-3d-'));
+
+  // 临时目录里没有 package.json 时，Node 把 .js 当 CommonJS，而 room.js 是 ESM。
+  // 放一个 {"type":"module"} 进去，两个文件就都按模块解析 —— 这样源码里写的
+  // './room.js' 一个字都不用改，测的仍然是线上那条 import。
+  fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}', 'utf8');
+
   const stubPath = path.join(tmp, 'three-stub.mjs');
   fs.writeFileSync(stubPath, STUB_SOURCE, 'utf8');
+  const stubUrl = pathToFileURL(stubPath).href;
 
   const rewritten = src.replace(/from\s+['"]three['"]/,
-    "from '" + pathToFileURL(stubPath).href + "'");
+    "from '" + stubUrl + "'");
   check('源码里的 three 被改写成了本地假模块', rewritten !== src);
 
   const sceneCopy = path.join(tmp, 'scene-under-test.mjs');
   fs.writeFileSync(sceneCopy, rewritten, 'utf8');
+
+  // room.js 要放进**同一个**临时目录：scene.js 里那条 './room.js' 是相对它自己
+  // 解析的，而它现在就住在这个目录里。两个文件共用同一个假 three 模块实例，
+  // 所以 stub.log 里记的是两边一起干的事（和真浏览器里一模一样）。
+  const roomSrc = fs.readFileSync(ROOM_FILE, 'utf8');
+  const roomRewritten = roomSrc.replace(/from\s+['"]three['"]/, "from '" + stubUrl + "'");
+  check('room.js 里的 three 也被改写成了同一个假模块',
+    roomRewritten !== roomSrc, 'room.js 里没找到 three 那条 import');
+  fs.writeFileSync(path.join(tmp, 'room.js'), roomRewritten, 'utf8');
 
   const mod = await import(pathToFileURL(sceneCopy).href);
   const stub = await import(pathToFileURL(stubPath).href);
@@ -683,10 +708,22 @@ let focusRingRef = null;
     check('场景设了背景色（不设是纯黑，墙和地板的暗部会和背景糊在一起）',
       sceneRef.background !== null && sceneRef.background !== undefined);
 
+    // E1-2 起这些零件挂在「房间」这个 Group 底下（scene -> room -> 床/窗/风扇），
+    // 不再是 scene 的直接儿子。断言的本意是「必须挂在场景这棵树上 —— 光建出来
+    // 不 add 是画不出来的」，所以按树找，而不是只数直接儿子有几个。
+    // （直接儿子那一条另有一条断言盯着，见下。）
+    const inSceneTree = function (obj) {
+      let hit = false;
+      sceneRef.traverse(function (o) { if (o === obj) hit = true; });
+      return hit;
+    };
     check('床、窗户、风扇都在场景的名册里（只是建出来不 add 是不会被画的）',
-      sceneRef.children.indexOf(bedRef) >= 0
-      && sceneRef.children.indexOf(pivotRef) >= 0
-      && sceneRef.children.indexOf(fanMountRef) >= 0);
+      inSceneTree(bedRef) && inSceneTree(pivotRef) && inSceneTree(fanMountRef),
+      [bedRef, pivotRef, fanMountRef].map(function (o) {
+        return o && o.name + (inSceneTree(o) ? '✓' : '✗');
+      }).join(' '));
+    check('而且场景里确实挂着一个「房间」Group（零件是被它带着进树的）',
+      !!find('room') && sceneRef.children.indexOf(find('room')) >= 0);
 
     /* ---- 「当前重点」标记环（Step 8-3）---- */
 
