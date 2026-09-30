@@ -12,6 +12,8 @@
     2) 判：status 一律用 rules.judge_status 重算，**不信报文里写的值**
     3) 排：把异常节点交给 rules.rank_priority，得出「最该先看的是谁、为什么」
     4) 发：retained 快照发到 dormmate/v1/state，坏报文发到 dormmate/v1/log/reject
+       （清 retained 的那条空报文既不是数据也不是坏报文，只记一笔——见
+       validate_message 第 2 步前面那段）
 
 四条红线在代码里的落点（改这个文件之前先看一遍）：
 
@@ -138,12 +140,18 @@ class Verdict:
     reject topic。ok=True 时也可能带 notes —— 那是「能用，但有问题」的情形
     （最典型的是报文里的 status 和规则算出来的不一致），不能因为有问题就丢，
     也不能装作没看见。
+
+    还有一种**既不是数据也不是错**的：ignored=True。它只有一种来源 ——
+    空 payload，也就是 MQTT 里「清掉一条保留消息」的做法（见 validate_message
+    第 2 步）。这种消息 ok 也是 False（它确实没有 record），但调用方要先看
+    ignored：**不许发 reject topic**，reasons 里那句话只是给人看的。
     """
 
     ok: bool
     record: dict[str, Any] | None = None
     reasons: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
+    ignored: bool = False
 
 
 # 必填字段和它们的类型。顺序就是统一 JSON 里那五个的顺序 ——
@@ -169,6 +177,9 @@ def validate_message(
     -> 数值是不是有限数 -> time 格式 -> 节点认不认识 -> topic 和报文说的
     是不是同一个节点。
 
+    这九道之外还有一条**放行**（不是判据，所以不占编号）：长度为 0 的 payload
+    是「清掉一条保留消息」，不是报文 —— 见下面第 2 步前面那一段注释。
+
     最后那一条在 core 这里和前端**故意不一样**：前端只警告不丢弃
     （页面上挂一条可疑数据，看的人自己判断），core 直接拒收。理由是这条
     数据进了内存之后会被当成真的：算时长、算优先级、进快照，然后被所有
@@ -180,6 +191,23 @@ def validate_message(
         return Verdict(False, reasons=(
             f"topic 形状不对：{topic!r}，约定是 dormmate/v1/nodes/<nodeId>/telemetry",
         ))
+
+    # 空报文（清 retained）—— **不是报文，也不是坏报文**，先摘出去。
+    # MQTT 里「清掉一条 retained」的做法就是往同一个 topic 发一条
+    #    **长度为 0** 的保留消息：broker 删掉存的那条，同时把它转发给当前在线的
+    #    订阅者 —— 于是 core 会真的收到一条空 payload。
+    #
+    #    它不是数据，也不是坏数据（`publish_one --clear` 就是干这个的，而
+    #    README 里跑剧本的第 ① 步正是清 retained）。按坏数据处理的话，每清一次
+    #    就往 reject topic 灌三条假警报，而排查表里写着「reject 有流量就该查」——
+    #    照着自己写的步骤做，看到一个查不出原因的警报。
+    #
+    #    只认长度为 0：空白字符不是清 retained，那是真写坏了，照旧拒收。
+    if payload_text == "":
+        return Verdict(
+            False, ignored=True,
+            reasons=(f"{topic_id} 的保留消息被清掉了（空报文），不当作数据",),
+        )
 
     # 2) JSON
     if not isinstance(payload_text, str):
@@ -431,6 +459,10 @@ class Counters:
     received: int = 0
     rejected: int = 0
     status_mismatch: int = 0
+    # 收到过几条「清 retained」的空报文。它既不是 received 也不是 rejected：
+    # 不数它的话，broker 明明投递了 15 条、快照上只有 14 条，差的那一条
+    # 在任何地方都看不见 —— 这个项目里「看不见的东西才叫丢」。
+    retained_cleared: int = 0
 
 
 class Core:
@@ -477,6 +509,13 @@ class Core:
             now_wall = time.time()
 
         verdict = validate_message(topic, payload_text, self.cfg["nodes"])
+
+        if verdict.ignored:
+            # 清 retained 的空报文：记一笔就走。不改任何节点的状态 ——
+            # 这条消息说的是「broker 存的那一份删了」，跟这个宿舍现在
+            # 什么状况一点关系都没有，拿它去动历史或结算一段才是错的。
+            self.counters.retained_cleared += 1
+            return verdict
 
         if not verdict.ok:
             self.counters.rejected += 1
@@ -590,6 +629,7 @@ class Core:
                 "received": self.counters.received,
                 "rejected": self.counters.rejected,
                 "statusMismatch": self.counters.status_mismatch,
+                "retainedCleared": self.counters.retained_cleared,
             },
         }
 
@@ -718,6 +758,10 @@ class Core:
     def on_message(self, client: Any, userdata: Any, message: Any) -> None:
         text = message.payload.decode("utf-8", errors="replace")
         verdict = self.handle_message(message.topic, text)
+
+        if verdict.ignored:
+            log("保留", f"{message.topic} -> " + "；".join(verdict.reasons))
+            return
 
         if not verdict.ok:
             log("拒绝", f"{message.topic} -> " + "；".join(verdict.reasons))

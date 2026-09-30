@@ -380,6 +380,82 @@ class TestRejectPublishing(unittest.TestCase):
         self.assertEqual(client.on(config.REJECT_TOPIC), [])
 
 
+class TestRetainedClear(unittest.TestCase):
+    """空 payload = 清掉一条保留消息（MQTT 的做法），不是报文。
+
+    这一条是从演示现场冒出来的：README 里跑剧本的第 ① 步就是清 retained，
+    而 core 当时把 broker 转发过来的那条空消息判成「JSON 解析失败」、
+    发去了 reject topic —— 照着自己写的步骤做，看到三条查不出原因的假警报
+    （排查表里恰好写着「reject 有流量就该查」）。
+    """
+
+    def test_empty_payload_is_not_rejected(self):
+        c, client = make_core()
+        verdict = c.handle_message(topic_of("dorm-a"), "", now_wall=NOW)
+
+        self.assertTrue(verdict.ignored)
+        self.assertFalse(verdict.ok)          # 没有 record，所以 ok 不能是 True
+        self.assertIsNone(verdict.record)
+        self.assertEqual(client.on(config.REJECT_TOPIC), [])
+        self.assertEqual(c.counters.rejected, 0)
+        self.assertEqual(c.counters.received, 0)
+        self.assertEqual(c.counters.retained_cleared, 1)
+
+    def test_it_touches_no_node_and_sends_no_snapshot(self):
+        """不改节点、不发快照 —— 它说的是「broker 存的那份删了」，
+        跟这个宿舍现在什么状况一点关系都没有。"""
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-a"), payload_text(), now_wall=NOW)
+        before = list(c.nodes["dorm-a"].history)
+
+        c.handle_message(topic_of("dorm-a"), "", now_wall=NOW)
+
+        self.assertEqual(list(c.nodes["dorm-a"].history), before)
+        self.assertEqual(c.nodes["dorm-a"].abnormal_count, 1)  # 那一段还开着
+        self.assertEqual(len(client.state_payloads()), 1)      # 还是只有前面那一次
+
+    def test_whitespace_is_still_a_bad_message(self):
+        """只认长度为 0。空白字符不是「清 retained」，那是真写坏了。"""
+        c, client = make_core()
+        verdict = c.handle_message(topic_of("dorm-a"), "   ", now_wall=NOW)
+
+        self.assertFalse(verdict.ignored)
+        self.assertFalse(verdict.ok)
+        self.assertEqual(len(client.on(config.REJECT_TOPIC)), 1)
+        self.assertEqual(c.counters.retained_cleared, 0)
+
+    def test_bad_topic_is_still_a_topic_error(self):
+        """topic 形状还是先判 —— 顺序是刻意的：先确认这条消息是不是我们这一路的。
+        """
+        verdict = core.validate_message(
+            "dormmate/dorm-a/env", "", NODES
+        )
+        self.assertFalse(verdict.ignored)
+        self.assertIn("topic 形状不对", verdict.reasons[0])
+
+    def test_the_log_line_says_retained_not_rejected(self):
+        c, client = make_core()
+        c.quiet = False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            c.on_message(client, None, _Message(topic_of("dorm-a"), b""))
+
+        printed = out.getvalue()
+        self.assertIn("[保留]", printed)
+        self.assertNotIn("[拒绝]", printed)
+        self.assertIn("保留消息被清掉了", printed)
+
+    def test_snapshot_counts_it(self):
+        """received 和 rejected 都不动，但也不该凭空少一条 —— 计数里看得见。"""
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-a"), "", now_wall=NOW)
+
+        counters = c.snapshot(now_wall=NOW)["counters"]
+        self.assertEqual(counters["retainedCleared"], 1)
+        self.assertEqual(counters["received"], 0)
+        self.assertEqual(counters["rejected"], 0)
+
+
 class TestNodeStateMachine(unittest.TestCase):
     def test_one_abnormal_starts_a_run(self):
         c, _ = make_core()
@@ -800,7 +876,8 @@ class TestSnapshot(unittest.TestCase):
         ])
         self.assertEqual([n["nodeId"] for n in snapshot["nodes"]], list(NODES))
         self.assertEqual(snapshot["counters"],
-                         {"received": 1, "rejected": 0, "statusMismatch": 0})
+                         {"received": 1, "rejected": 0, "statusMismatch": 0,
+                          "retainedCleared": 0})
 
     def test_priority_block(self):
         c, client = make_core()

@@ -20,7 +20,7 @@ three.js —— 都各留了一份本地副本，默认走 CDN，现场没网时
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | 数据源（`simulator/`） | ✅ 已完成（Phase1） | `simulator/simulator.py` 一轮给每个选中的节点各发一条（`--all-nodes` 就是三个一起），另有 `--mode cooling`（风扇降温）、`--mode random`、按 json 剧本跑场景（帧里可以写死 `time`，于是「持续了多久」是可复现的）；`simulator/publish_one.py` 手动发一条，带故障注入（`--topic` / `--raw` / `--clear`）。**status 一律由温湿度按统一规则算出**，模拟器也不例外，报文里没有一处能手工塞状态 |
-| **业务大脑（`core.py` + `rules.py`）** | ✅ 已完成（Phase2） | 独立进程订阅 `dormmate/v1/nodes/+/telemetry`，逐条**校验**（九道判据，topic 里的 nodeId 和报文里的必须一致，非法报文发去 `dormmate/v1/log/reject`）、按统一规则**判状态**（`status` 对不上只记一笔，不拒收）、按节点**存历史**、算出**优先关注**（时长 → 条数 → 严重度 → 字典序，每一步都带一句人话理由），并把全局快照 retained 发到 `dormmate/v1/state`。带遗嘱 LWT：core 一掉线，broker 立刻在 `dormmate/v1/core/status` 上报 `offline`。全部可调参数在 `core/config.json`，启动时与规则真源逐项核对，对不上就拒绝启动 |
+| **业务大脑（`core.py` + `rules.py`）** | ✅ 已完成（Phase2） | 独立进程订阅 `dormmate/v1/nodes/+/telemetry`，逐条**校验**（九道判据，topic 里的 nodeId 和报文里的必须一致，非法报文发去 `dormmate/v1/log/reject`；清 retained 的那条空报文除外）、按统一规则**判状态**（`status` 对不上只记一笔，不拒收）、按节点**存历史**、算出**优先关注**（时长 → 条数 → 严重度 → 字典序，每一步都带一句人话理由），并把全局快照 retained 发到 `dormmate/v1/state`。带遗嘱 LWT：core 一掉线，broker 立刻在 `dormmate/v1/core/status` 上报 `offline`。全部可调参数在 `core/config.json`，启动时与规则真源逐项核对，对不上就拒绝启动 |
 | 实时看板（`web/`） | ✅ 已完成（M1） | 通过 WebSocket 订阅 `dormmate/v1/nodes/+/telemetry`，显示温湿度与状态徽章。状态用**颜色 + 图标**双重编码，不靠颜色单独表意；支持深 / 浅色主题 |
 | 多节点看板（`dashboard/`） | ✅ 已完成（Step 5-3 / 5-4） | 订阅同一个通配符 topic 把三个节点一次收齐，`dorm-a` / `dorm-b` / `dorm-c` 各一张状态卡 + 一张趋势图（温湿度分两张，不用双 Y 轴）。三个节点各存一份互不相干的状态，改一个不动另外两个 |
 | 3D 宿舍实景 | ✅ 已完成（Step 6-1 ~ 6-3） | Three.js 场景嵌在看板里，跟着**当前选中的节点**走：点卡片切节点时，画面、标签、风扇一起切 |
@@ -97,7 +97,7 @@ nova-dormmate-final-2026/    # 仓库根
 │   ├── broker_selftest.py   # 不是测试用例：手动跑的 Broker 收发自检（TCP + WebSocket 两条通路）
 │   ├── test_simulator.py    # Phase1：模拟器（seq / cooling / json 剧本 / 帧写死时间 / 节点归一 / 跑一遍 main）（54 条）
 │   ├── test_publish_one.py  # Phase1：publish_one 的报文 / topic / retain / 退出码（22 条，假 mqtt.Client）
-│   ├── test_core.py         # Phase2：core 的 topic 解析 / 报文校验 / 拒收 / 状态机 / 优先排序 / 快照 / 遗嘱 / 配置核对（83 条）
+│   ├── test_core.py         # Phase2：core 的 topic 解析 / 报文校验 / 拒收 / 清 retained 的空报文 / 状态机 / 优先排序 / 快照 / 遗嘱 / 配置核对（89 条）
 │   ├── test_rules_priority.py # Phase2：rules.py 的四步排序 + 理由措辞 + 「不许写死节点名」的静态检查（29 条）
 │   ├── test_scenarios.py    # Phase2：把 d2_case1/2/3 逐帧喂给 core，断言「优先关注」的换人轨迹（15 条）
 │   ├── fixtures/
@@ -218,7 +218,7 @@ Python 侧现在有两个 `judge_status`，但只有一份实现：`analysis/rul
 | `dormmate/v1/nodes/<nodeId>/telemetry` | 发布端 | 是 | 一条读数 |
 | `dormmate/v1/nodes/+/telemetry` | —— | —— | 订阅用（前后端都用这一条） |
 | `dormmate/v1/state` | core | 是 | 全局状态快照（Phase2：谁该先看、每个节点现在什么样） |
-| `dormmate/v1/log/reject` | core | **否** | 非法报文；坏消息不许留在 broker 上，否则每开一个看板都先看到它 |
+| `dormmate/v1/log/reject` | core | **否** | 非法报文（清 retained 的那条空报文**不算** —— 它根本不是报文）；坏消息不许留在 broker 上，否则每开一个看板都先看到它 |
 | `dormmate/v1/core/status` | core | 是 | core 在线/离线（遗嘱 LWT：core 一掉线，broker 立刻替它发 `offline`） |
 
 topic 字符串**只有 `config.py` 一处出处**（`topic_for` / `TOPIC_PATTERN` / `STATE_TOPIC` …），
@@ -422,7 +422,7 @@ netsh advfirewall firewall add rule name="DormMate 1883" dir=in action=allow pro
 ## 跑测试
 
 ```bash
-py -3.14 -m unittest discover -s tests -t . -v   # ①②③⑪⑫⑬⑭ 以及 Phase2 的 Python 侧，共 709 条
+py -3.14 -m unittest discover -s tests -t . -v   # ①②③⑪⑫⑬⑭ 以及 Phase2 的 Python 侧，共 715 条
 node tests/rules.test.js                          # ④ 规则 JS 侧，31 条
 node tests/scene3d.test.js                        # ⑧ 3D 场景，224 条
 node tests/scene3d-page.test.js                   # ⑨ 3D 页面的 MQTT 接线，65 条
@@ -433,7 +433,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 ```
 
 `unittest discover` 会把 `tests/` 下十个 `test_*.py` 一起收进来
-（23 + 206 + 54 + 30 + 123 + 124 + 22 + 83 + 29 + 15 = 709 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib，
+（23 + 206 + 54 + 30 + 123 + 124 + 22 + 89 + 29 + 15 = 715 条），所以 `py -3.14` 那条要装 pandas 和 matplotlib，
 ⑫ 那 124 条还要 scikit-learn（没装的话，要真跑模型的那几类会被整类 `skipUnless` 跳过，
 纯函数那批照样跑 —— 输出里是 `s` 不是失败）。
 `node` 那七条不需要任何依赖，也不用起服务器。
@@ -451,7 +451,7 @@ node tests/script.test.js                         # ⑤ 页面 JS 侧，130 条
 | ⑫ 124 条 | Step 9-2 的 Isolation Forest 对照。分五块：**常量与约定**——参数就是需求给的三个（`n_estimators=100` / `contamination='auto'` / `random_state=42`，多一个少一个都红）、只用温湿度两列、**判决门槛写的是 0**、`1 = 接近历史常态` / `-1 = 与历史明显不同` 这对约定写成了常量、默认路径指向 `data/` 里那两份；**纯函数**——`ml_text` 认得 `1` / `-1` 也认得 `'1'` 这种形状、不认识的标签原样写出来不假装懂、`score_is_outlier` 只按「小于 0」判（负零不算异常）、**对照表的四种组合**（规则正常/异常 × ML 常态/不同，只有「规则说正常、ML 说不同」才算不一致）、原始值原样带在行里、**分数四舍五入到四位**、结果能直接 `json.dumps`、**每格都是内置类型**（numpy 的 `bool_` / `int64` 不是 JSON 能序列化的东西，跑过一遍才发现）、顺序跟着给的顺序；**门槛核对**——`_check_threshold` 对得上时不吭声、**标签和分数对不上就报错**（而且报的是 `RuntimeError` 不是 `ValueError`：`_main` 会把 `ValueError` 当用法错误吞掉，报错报告不起来比不报更难查）、分数恰好 0 而标签是 -1 也报、空的两串不报；**真数据**——两份各多少条、路径是绝对路径、**规则那一列是 `analysis.add_rule_status()` 重算的**（CSV 里那列 `status` 说了不算）、ML 那一列正好是那六个标签、六个分数逐个钉住、**不一致的就是 11:25 和 11:30 那两条**、反方向一条都没有、参数原样带在结果里、**门槛松紧那个数（拿模型回看 40 条历史里有 18 条被判不同）**、结论那句话和单独算的一致且说的就是这条数据、同一个结果跑两次一字不差；**造的数据**——两边都说正常时不报不一致、**CSV 里 `status` 写着什么不算数**、没有 `nodeId` 列也能跑、列顺序变了结果不变、列里夹着别的列也认、历史 / 新数据是空的时候说人话、新数据里有空格子时说人话、只有一条也要能跑完；**命令行**——默认那两个文件、把模型和参数打出来、把门槛和门槛松紧打出来、表头七列、六条数据都在表里、不一致的行有标记、结论那句和函数返回的是同一句、可以指定别的两个文件（相对路径按项目根展开）、**成功时返回 0**（`capture()` 接的是 `_main` 的返回值：不接的话「跑成功了也返回 1」这种改法一点动静都没有）、文件不在 / 新数据是空文件 / 温湿度不是数字 / 某一行多写一个逗号，四种都报人话而不是甩一串 traceback。另外有一条**结构性守卫**：把 `build_model` 换成探针跑一遍 `run_ml`，断言交给它的那一帧**只有历史那 40 条**、行数等于历史条数、且里面找不到新数据那条 55 ℃ / 5 %。为什么非得这么测：拿新数据一起 fit 的话，「正常」就被新数据自己重新定义了（一条离谱的读数顺手把正常范围拉大，于是它自己就不离谱了），而模型的 `estimators_` 个数、`n_features_in_` 一个都不会变 —— 只看模型本身看不出这件事 |
 | ⑬ 54 条 | Phase1 的模拟器（`simulator/simulator.py`）。**seq 计数**——从 1 开始、每发一条加一、两个节点各数各的、`step` 与 `seq` 是两回事（前者记取到第几个采样点，后者记第几条消息）；**报文**——`seq` / `source` 写得进去、`status` 还是算出来的（温湿度多离谱都只认规则）、`seq` 给小数也当整数写；**cooling**——33→31→29 的状态序列正好是「偏热 偏热 正常」、每轮固定降幅、降到 24 就保持不再往下、**怎么降都掉不进偏冷**（这个模式演示的是从偏热回到正常）、湿度一动不动（状态变了只可能是温度越过 30，归因才清楚）、降幅可调；**json 剧本**——帧序列读得对、`repeat` 展开、帧里能写死 `time`（并真的进了报文）、没写 `time` 就是 `None`（用当下时间）、`repeat` 会把时间一起复制、时间写坏了报的是哪一帧、形状对但日期不存在（`2026-02-30`）也拦下、时间不是字符串也拦下、只有 `comment` 的帧跳过、没写 `node` 就用 dorm-a、剧本自带 `interval`、字符串数字也认；坏剧本一律说人话：文件不在 / 不是 JSON / **存成了 GBK** / 最外层不是对象 / frames 空 / 帧缺字段 / 温度不是数字 / `repeat` 是 0、-1、1.5、`true` / 通篇只有 comment；**仓库里那份演示剧本本身也有测试兜着**（帧序和四种状态全覆盖）；**节点归一**——默认 dorm-a、`--nodes` 逗号分隔、逗号后带空格也认、`--all-nodes` 就是三个、三种写法同时给报错、`--nodes` 是空的报错、**未知节点不拦只警告**（拿 dorm-z 发数据是 D4 要用的手段）；以及拿 `--dry-run` 真跑一遍 `main()`：三节点一轮三条、**三个节点的状态各不相同**（错开起点，不然三张卡一模一样）、seq 每轮加一且按节点各数各的、剧本跑完就停不循环、剧本与 `--mode` 不能同时给、剧本坏了返回 2、两个节点参数同时给返回 2、cooling 的温度确实是往下走的 |
 | ⑭ 22 条 | Phase1 的 `simulator/publish_one.py`（手动发一条 + 故障注入）。用假客户端顶掉真连接，验的是「实际发出去的 topic / payload / qos / retain」；**报文**——正常一条的字段与状态、`status` 仍然是算出来的（没有参数能手工塞一个错的进去）、`seq` / `source` 能指定、`--time` 能指定且格式不对时说人话、缺温湿度时说人话并顺带告诉人还有 `--raw` 这条路、**`--raw` 原样发出去一个字符都不改**（前后空格都不动）、`--raw` 时还给了温湿度就忽略并提示、`--clear` 发的是空串、`--clear` 与 `--raw` 不能同时给；**topic**——默认按约定拼、`--topic` 能覆盖；**真发一遍**——发出去的是约定 topic 且默认不保留（故障消息要是被 retained，之后每开一个看板都先看到这条坏数据）、坏的 JSON 照样上线（**工具不替看板把关**，这是 D4 的手段）、`--clear` 必须带 retain 否则删不掉、`--retain` 要显式开、`--dry-run` 压根不建客户端、参数错了返回 2 而且一条都不发、连不上返回 1 并且告诉人怎么起 broker |
-| ⑮ 83 条 | Phase2 的 `core.py`（业务大脑）。用假客户端顶掉真连接，走的是真的 `on_message` 那条路（不是直接调内部函数）。**导入陷阱**——`find_spec('core').origin` 必须以 `core.py` 结尾、`core/` 里不许有 `__init__.py`、`core/` 下只该有 `config.json` 一个文件（`core/` 一旦变成包，`import core` 拿到的是那个包而且**不报错**，几千行业务逻辑整段失效）；**topic 解析**——严格五段、多一段少一段都不认、`+` 通配符不算节点名；**报文校验**——九道判据各来一遍（非 JSON / 不是对象 / 缺字段 / 类型不对 / NaN / Infinity / `true` 混进数字 / `time` 少秒 / 日期不存在 / 未知节点 / topic 与报文 nodeId 不一致 / status 与重算不符），**拒收的才发 reject**、reject 的 `retain` 必须是 `False`、payload 超长要截断、`status` 对不上只记 `statusMismatch` 不拒收（数据本身没错，丢掉反而少一条读数）、老师给的 4 条回归数据故意把 status 写错喂进去，四条全被判为「不一致」；**状态机**——首条开一段、起点不动、段内从偏热漂到偏湿仍是同一段、**连续 N 条正常才算结束**、中间插一条异常只清计数不动起点、`normals_until_recovery` 在没有开着的段时是 `None`；**恢复路上的那两条读数**——`status` 是最新读数（正常）而优先关注用的是 `abnormal_status`（偏热），且严重度那一步也按后者比（按前者比的话，一个还在异常里的宿舍理由会写成「已连续正常 7 分钟」，**而且不报错**）；**优先排序**——离线的节点不参与但仍在快照里、`tick()` 只在「收到过又安静了」时报掉线（从没来过的节点是「还不知道」，不是「掉了」）、同一次只报一遍、权重从配置里取、**日志只在换人时打**（比的是节点 id 不是整句话 —— 整句话里嵌着越来越长的时长，拿它当判据每一条都「变了」）；以及一条静态检查：`core.py` 的源码里不许出现任何节点名；**快照**——五块的字段名与类型、全部正常时 `priority` 是 `null`、内容变了才发、`force=True` 例外；**遗嘱**——LWT 在 `connect()` **之前**就设好了（paho 2.x 里遗嘱存在 `_will_topic` / `_will_payload`，`_will` 只是个 bool）、掉线发 `offline`、启动发 `online`；**配置核对**——阈值 / 节点列表 / 恢复条数分别改坏，三种都拒绝启动并且**说的是改哪一边**；**命令行**——`--check` 对得上返回 0 并打出摘要、对不上返回 1 且不连 broker |
+| ⑮ 89 条 | Phase2 的 `core.py`（业务大脑）。用假客户端顶掉真连接，走的是真的 `on_message` 那条路（不是直接调内部函数）。**导入陷阱**——`find_spec('core').origin` 必须以 `core.py` 结尾、`core/` 里不许有 `__init__.py`、`core/` 下只该有 `config.json` 一个文件（`core/` 一旦变成包，`import core` 拿到的是那个包而且**不报错**，几千行业务逻辑整段失效）；**topic 解析**——严格五段、多一段少一段都不认、`+` 通配符不算节点名；**报文校验**——九道判据各来一遍（非 JSON / 不是对象 / 缺字段 / 类型不对 / NaN / Infinity / `true` 混进数字 / `time` 少秒 / 日期不存在 / 未知节点 / topic 与报文 nodeId 不一致 / status 与重算不符），**拒收的才发 reject**、reject 的 `retain` 必须是 `False`、payload 超长要截断、`status` 对不上只记 `statusMismatch` 不拒收（数据本身没错，丢掉反而少一条读数）、老师给的 4 条回归数据故意把 status 写错喂进去，四条全被判为「不一致」；**状态机**——首条开一段、起点不动、段内从偏热漂到偏湿仍是同一段、**连续 N 条正常才算结束**、中间插一条异常只清计数不动起点、`normals_until_recovery` 在没有开着的段时是 `None`；**恢复路上的那两条读数**——`status` 是最新读数（正常）而优先关注用的是 `abnormal_status`（偏热），且严重度那一步也按后者比（按前者比的话，一个还在异常里的宿舍理由会写成「已连续正常 7 分钟」，**而且不报错**）；**优先排序**——离线的节点不参与但仍在快照里、`tick()` 只在「收到过又安静了」时报掉线（从没来过的节点是「还不知道」，不是「掉了」）、同一次只报一遍、权重从配置里取、**日志只在换人时打**（比的是节点 id 不是整句话 —— 整句话里嵌着越来越长的时长，拿它当判据每一条都「变了」）；以及一条静态检查：`core.py` 的源码里不许出现任何节点名；**快照**——五块的字段名与类型、全部正常时 `priority` 是 `null`、内容变了才发、`force=True` 例外；**遗嘱**——LWT 在 `connect()` **之前**就设好了（paho 2.x 里遗嘱存在 `_will_topic` / `_will_payload`，`_will` 只是个 bool）、掉线发 `offline`、启动发 `online`；**配置核对**——阈值 / 节点列表 / 恢复条数分别改坏，三种都拒绝启动并且**说的是改哪一边**；**命令行**——`--check` 对得上返回 0 并打出摘要、对不上返回 1 且不连 broker；**清 retained 的空报文**（`--clear` 发的那条）——空 payload 判成 `ignored` 而**不拒收**、`rejected` 和 `received` 都不动、reject topic 一条没有、节点历史与开着的那一段一个字不动、也不因此多发一次快照、计数进 `counters.retainedCleared`、日志打的是 `[保留]` 而不是 `[拒绝]`；**只认长度 0**（空白字符仍按坏报文拒收），topic 形状不对时先报 topic（先确认这条消息是不是我们这一路的） |
 | ⑯ 29 条 | Phase2 的 `rules.py`。`judge_status` **就是** `status_rules.compute_status` 那个对象本身（`assertIs`，转发写成「重抄一遍」这里就红）；`rank_priority` 的四步：时长决出、时长打平比条数、条数也平比严重度、全平按字典序，**只有进到某一步的节点才参与那一步的比较**（时长不同的那些根本不该出现在比条数的名单里）、传进来的东西一个都不改、空输入返回空表、`format_duration` 的边界（59.9 秒说「不到 1 分钟」、非数 / 负数 / NaN / 无穷一律「不到 1 分钟」）、理由的两半（第一名说凭什么赢、其余说输在哪一步，都不许含糊成「它更严重」）；**权重可覆盖**（改了权重赢家和措辞一起变）；以及那条静态检查：把注释和**文档字符串**用 `ast` + `tokenize` 剥掉之后，源码里不许出现任何节点名 —— 但**其他字符串字面量要留着**（写死节点名最典型的形态就是 `if node_id == "dorm-a"`，一起删掉这个检查就永远绿了），所以配了一条元测试：只有注释的代码必须通过、`node.node_id == "dorm-a"` 必须被抓出来 |
 | ⑰ 15 条 | Phase2 的三套剧本（`simulator/scenarios/d2_case*.json`）。不是给人读的演示稿，是**能被断言**的：每一帧逐帧喂给 core，记下每一步的结论，跟预期的**换人轨迹**对。只记「换人」那几步（同一个人连续领先不重复记），因为「没有乱跳」也是结论的一部分。`d2_case1`：空 → dorm-b → dorm-c → 空（时长决出、靠恢复交接），并断言 20:07 / 20:08 那两条正常**没有**触发换人；`d2_case2`：dorm-a → dorm-b → dorm-a → dorm-b → dorm-a → 空，而且每一步的理由必须是真的那一步（第 2 步赢的那行要提「异常次数最多」，第 1 步赢的那几行才提「持续时间最长」）；`d2_case3`：dorm-a → dorm-b → dorm-a → 空，第 2 步赢的那行要提「偏湿比偏冷更要紧」，第一条理由必须是「唯一的异常节点」而不是「持续时间最长」（只有一个异常节点时，比时长那一步根本没发生过）。另有四条件对所有剧本都成立：三个节点都用上、**同一个节点的时间必须往前走**（core 用报文时间算时长，倒着来的时间会算出负数被夹到 0，「持续了多久」就成了空话而且不报错）、**至少换两次人**（只换一次证不了「跟着数据自己变」）、**结尾必须是三个都正常**（收尾状态要看得见，方便截图） |
 | ④ 31 条 | `judgeStatus` / `getAdvice` / `runRegressionTests` 的行为，外加"不许用 export、不许碰 DOM"这类约束 |
@@ -685,6 +685,19 @@ py -3.14 core.py --check          # 只核对配置并打印一份摘要，不�
 数据本身没问题，只是发布端算错了，丢掉它反而让现场少一条读数。第 8 条则必须拒收 ——
 一条消息说自己是 dorm-a 又说自己是 dorm-b，留下来只会让所有下游都跟着错。
 
+**有一条不在这九道里，而且不是判据，是放行**：长度为 0 的 payload。MQTT 里「清掉一条
+保留消息」的做法就是往同一个 topic 发一条空消息（`publish_one --clear` 干的就是这个，
+而跑剧本的第 ① 步正是清 retained）：broker 删掉存的那份，同时把它转发给当前在线的
+订阅者，于是 core 真的会收到一条空 message。它既不是数据也不是坏数据 —— 不判状态、
+不发 reject topic、**不动任何节点的内存**（这条消息说的是「broker 存的那份删了」，
+跟这个宿舍现在什么状况没有关系），只在日志里记一行 `[保留]`，并在快照的
+`counters.retainedCleared` 里数一笔。
+
+一开始它走的是「JSON 解析失败 → 拒收」那条路，代价是每清一次 retained 就往
+`dormmate/v1/log/reject` 灌三条假警报 —— 而下面排查表里写着「reject topic 有流量就该查」。
+照着自己写的步骤做，看到一个查不出原因的问题，那比不报还费时间。
+**只认长度为 0**：空白字符不是清 retained，那是真写坏了，照旧拒收。
+
 ### 优先关注：四步，前一步平了才看下一步
 
 | 步 | 判据 | 理由会这么说 |
@@ -731,6 +744,8 @@ py -3.14 core.py --check          # 只核对配置并打印一份摘要，不�
 ```bash
 # ① 先清掉 retained：上一次跑剩下的最后一条读数会在 core 一订阅上就送过去，
 #    看起来就像「凭空多了一段异常」。清完再起 core，日志才是干净的。
+#    清的时候 core 还在跑的话会打三行 [保留]（不是 [拒绝]）—— 见上面
+#    「报文校验」那节的放行规则：空报文既不算数据也不算坏数据。
 py -3.14 -m simulator.publish_one --clear --node dorm-a
 py -3.14 -m simulator.publish_one --clear --node dorm-b
 py -3.14 -m simulator.publish_one --clear --node dorm-c
@@ -757,7 +772,8 @@ py -3.14 -m simulator.simulator --script simulator/scenarios/d2_case3.json
 
 ### 自测：优先关注自己换人，不用点任何按钮
 
-1. 清 retained → 起 core → 跑 `d2_case1`（步骤见上）
+1. 清 retained → 起 core → 跑 `d2_case1`（步骤见上）。core 已经在跑的时候，
+   那三条清 retained 的空报文在 core 终端上是 `[保留]`、reject topic 上一条都不该有
 2. 看 core 那个终端，预期出现 4 行 `[重点]`：空 → dorm-b → dorm-c → 空
 3. 关键的一步在中间：**20:07 / 20:08 两条正常的行里写着「还差 2 条 / 还差 1 条」，
    而这两行之后 `[重点]` 并没有换人** —— 换人发生在第 3 条正常上。
@@ -3799,6 +3815,7 @@ const ML_REAL = JSON.parse(fs.readFileSync(path.join(ROOT, 'report', 'ml_result.
 | 恢复判据两边还不一样：`core.py` 要连续 3 条正常，`dashboard/logic.js` 一条正常就结束 | **有意留着**，不是漏改。Phase2 先把「唯一业务大脑」立起来，前端这一轮还没改成读 core 那份 retained 快照（`dormmate/v1/state`）。等前端读了快照，状态机就只有一份，这个分歧自然消失。在那之前，同一个宿舍在同一时刻可能有两个说法 —— 所以演示时以 core 的终端和 `dormmate/v1/state` 为准，看板那一栏暂时只当个参考 |
 | 前端还没读 `dormmate/v1/state` | 同上：Phase2 先把「谁说了算」定下来（core 发布、前端渲染），前端接线是下一步。现在 core 发了没人读，快照的用处是用 MQTTX 订阅来核对结论 |
 | core 一启动就会收到 retained 的最后一条读数，把它当成当前数据 | `RETAIN=True` 是为了「后开的看板立刻看到数值」，代价是 core 也照收 —— 它在协议上分不出这条是三小时前的还是刚发的（`time` 字段可以看出来，但 core 没有拿它去做新鲜度判断，因为剧本里的时间**故意**是写死的过去时刻，一查就会把整个演示机制否掉）。所以跑剧本前要先清 retained，见 Phase2 那一节的步骤 |
+| 清 retained **不会**清掉 core 的内存 | `--clear` 发的那条空报文只记一笔（`counters.retainedCleared`），**不动节点**：已经在跑着的 core 里，那个节点已有的历史、开着的那一段、离线计时都照旧。它是「broker 存的那份删了」，跟这个宿舍现在的状况没有关系 —— 拿它去结算一段，等于凭一条和读数无关的消息改业务结论。所以复现步骤写的是「清完 retained **再起** core」：要的是新起的那个进程订阅时读不到旧值，而不是让跑着的那个忘掉什么 |
 | core 没有乱序保护，和前端那条限制是同一个 | `latest` 一律被最后收到的那条顶掉。剧本里同一个节点的时间必须是递增的（`tests/test_scenarios.py` 有一条守着），因为倒着来的时间会让「持续了多久」算出负数被夹到 0 —— 不报错，只是数字变得没意义 |
 | 一个节点一段异常里从偏热漂到偏湿，理由说的是**最近**那条异常 | 「已连续偏热 7 分钟」里的状态取的是这一段**最后一条异常**的状态，不是最早那条、也不是峰值。取最早那条的话，段里早就漂到偏湿了、理由还在说偏热；取峰值则要额外定义「差不多严重时怎么办」。三种都有道理，这里选了最好解释的那一种 |
 
@@ -3867,7 +3884,7 @@ const ML_REAL = JSON.parse(fs.readFileSync(path.join(ROOT, 'report', 'ml_result.
 | `core.py` 报 `ModuleNotFoundError: No module named 'core'` 或 import 到别的东西 | 项目根多了个 `core/__init__.py`（`core/` 现在只是个放配置的目录）。Python 的查找顺序是「包优先于同名的 `.py`」，那个文件一出现，`import core` 拿到的就是包而不是 `core.py`，而且**不报错**。删掉它（`tests/test_core.py` 有一条守着这件事） |
 | 日志里没有 `[重点]` 这一行 | 那是**只在换人时**打印的。同一个宿舍一直领先就不重复打 —— 时长在涨不是新闻，换人才是。想看当前的结论就订阅 `dormmate/v1/state` 看 `priority` 那一段 |
 | 优先关注和看板顶部那一行对不上 | 预期之内：恢复判据两边还不一样（core 要连续 3 条正常，看板一条就结束），且看板还没读 core 的快照。演示时以 core 的终端和 `dormmate/v1/state` 为准。见「已知限制」 |
-| `dormmate/v1/log/reject` 上出现消息 | 有报文没通过校验，`reasons` 里写着是哪一条判据（比如 topic 是 dorm-a、报文里写 dorm-b）。发布端那边看 `--topic` 和 `--node` 是不是给岔了 |
+| `dormmate/v1/log/reject` 上出现消息 | 有报文没通过校验，`reasons` 里写着是哪一条判据（比如 topic 是 dorm-a、报文里写 dorm-b）。发布端那边看 `--topic` 和 `--node` 是不是给岔了。**清 retained 的空报文不在这里**：它打的是 `[保留]`、进 `counters.retainedCleared` —— 空报文不是坏报文，别去追一条本来就没问题的警报 |
 | 剧本跑起来「优先关注」每一条都在跳 | 同一个节点的时间要么在往回走（core 算出的时长被夹到 0），要么两个节点的数据交错得太碎。先看 `tests/test_scenarios.py` 里的轨迹断言是不是红的 —— 脚本层面能保证的事不该靠眼睛盯 |
 
 ## 开源组件来源
