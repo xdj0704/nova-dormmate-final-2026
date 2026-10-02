@@ -34,7 +34,7 @@
 
 /* 和看板共用的那一份。import 用的是相对路径，所以这一页不需要 importmap。 */
 import { readSnapshot, nodeOf, focusBanner, handlingOf, actionState, cmdNote,
-  snapshotSummary } from '../dashboard/logic.js';
+  snapshotSummary, coreLiveness } from '../dashboard/logic.js';
 
 /* ---------- 配置 ---------- */
 
@@ -107,6 +107,9 @@ const el = {
   app: document.getElementById('app'),
   conn: document.getElementById('conn'),
   connText: document.getElementById('conn-text'),
+  /* core 心跳那一条（D4）。和 conn 并排，说的却是另一件事 ——
+     一个是「手机到 broker」，一个是「core 有没有在发」。 */
+  coreHint: document.getElementById('core-hint'),
   focus: document.getElementById('focus'),
   nodes: document.getElementById('nodes'),
   nodeCount: document.getElementById('node-count'),
@@ -240,6 +243,14 @@ function renderNodes() {
     if (!n || !n.nodeId) return '';
     const status = n.status == null ? '' : String(n.status);
     const handling = handlingOf(snapshot, n.nodeId);
+    /* 离线提示（D4）。**和状态徽章分开摆**：离线是「状态之外」的事实
+       （core 的优先排序不排离线的节点），挤进那个徽章里的话，
+       「已离线 · 偏热」看着像第五种环境状态。
+       「多久没来了」那句是 core 算好放进快照的（offlineText），这边只搬运；
+       快照里没这一格时退回光秃秃的「已离线」，不自己拿 lastSeen 去减。 */
+    const offline = n.online ? ''
+      : '<span class="node-offline">已离线'
+        + (n.offlineText ? ' ' + esc(n.offlineText) : '') + '</span>';
     return '<button class="node' + (n.nodeId === watching ? ' is-watching' : '')
       + '" type="button"'
       + ' data-focus-node="' + esc(n.nodeId) + '"'
@@ -248,6 +259,7 @@ function renderNodes() {
       + '<span class="node-read">' + esc(fmt(n.temperature)) + '℃ · '
       + esc(fmt(n.humidity)) + '%</span>'
       + '<span class="badge">' + esc(status || '—') + '</span>'
+      + offline
       /* 「待处理 / 处理中」来自 core 的事件（handlingOf 读的），不是这边判的。
          正常节点没有未结案的事件，这一格就不出现。 */
       + (handling.label !== '无' ? '<span class="node-flag">' + esc(handling.label) + '</span>' : '')
@@ -297,6 +309,9 @@ function renderAll() {
   renderFocus();
   renderNodes();
   renderAction();
+  /* core 那一条同时由定时器驱动；这里再画一次，是为了「刚收到新帧」那一刻
+     它立刻变成「刚刚」，不必等下一个 tick。 */
+  renderCoreHint();
   renderLog();
 }
 
@@ -374,6 +389,24 @@ let client = null;
 function setConn(kind, text) {
   el.conn.className = 'conn conn--' + kind;
   el.connText.textContent = text;
+}
+
+/* ---------- core 心跳（Phase9 D4）---------- */
+
+/**
+ * 顶栏那一条「core 还在不在」。
+ *
+ * ★ 由定时器驱动，不在渲染路径上 —— 它要说的那件事恰恰是「快照不来了」，
+ * 挂在渲染上就等于永远不报（core 一死就没有渲染了）。
+ *
+ * 判据在 logic.js 的 coreLiveness 里（纯函数），这边只把 now 传进去、
+ * 把结果贴到 DOM 上。和看板、3D 用的是**同一个函数、同一句话** ——
+ * 三个屏幕对「core 还在不在」永远是一致的说法。
+ */
+function renderCoreHint() {
+  const live = coreLiveness(snapshot, Date.now());
+  el.coreHint.textContent = live.text;
+  el.coreHint.className = 'core-hint core-hint--' + live.state;
 }
 
 function connect() {
@@ -579,6 +612,10 @@ el.actionHandle.addEventListener('click', function () {
    快照」，而不是「都正常」—— 页面刚打开那几秒，那三个宿舍是**不知道**，
    不是正常。卡片上的状态也一律是「—」「还没有收到数据」。 */
 renderAll();
+
+/* core 心跳的巡检。**每隔一秒看一眼**，不跟着快照走 —— 要报的就是
+   「快照不来了」这件事，等快照来触发等于永远不报。 */
+setInterval(renderCoreHint, 1000);
 
 /* 打开页面就连。连不上时页面只说「还没收到快照」，不会再造一份假数据顶上 ——
    E3 明确禁止「手动输入数据伪造同步效果」。要数据就跑 simulator/，

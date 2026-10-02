@@ -61,6 +61,8 @@ if str(_ROOT) not in sys.path:
 
 import config  # noqa: E402
 import events  # noqa: E402
+import history  # noqa: E402
+import ml_judge  # noqa: E402
 import rules  # noqa: E402
 from status_rules import compute_status  # noqa: E402
 
@@ -76,6 +78,16 @@ TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 #    加字段本身是向后兼容的（旧页面读不到就当没有），但**「前端只订快照
 #    就够不够」这件事变了** —— 旧页面订的是遥测，新页面一条都不订，
 #    这正是版本号该站出来说的那种变化。
+#
+# 3：到现在还没有。Phase8 D5 给每个节点和每条 history 各加了 ML 那三格
+#    （mlLabel/mlText/agree），但版本号**不动** —— 加的同样是「旧页面读不到
+#    就当没有」的字段，而前端**订阅的方式一个字都没变**（还是只订
+#    dormmate/v1/state 这一条）。加字段不升版本、「订阅模型变了」才升，
+#    这就是这个数字一直以来的口径。
+#
+#    Phase9 D4 又加了三处（顶层 core 那一块、每个节点 offlineSec /
+#    offlineText 两格），同一条口径，还是 **2**：旧页面读不到这几格，
+#    画出来就是没有离线提示 —— 而它本来也没有。
 SNAPSHOT_VERSION = 2
 
 # 快照里最多带几条事件。屏幕上放不下 eventsMax（200）条，全带上就是每发一次
@@ -718,6 +730,8 @@ class Core:
         client: Any | None = None,
         quiet: bool = False,
         events_path: str | Path | None = None,
+        history_path: str | Path | None = None,
+        model_dir: str | Path | None = None,
     ) -> None:
         self.cfg = cfg
         self.nodes: dict[str, NodeState] = {
@@ -728,6 +742,9 @@ class Core:
         self.client = client
         self.quiet = quiet
         self._last_state_payload: str | None = None
+        # 上一次把快照**发出去**的时刻（墙上时间）。心跳那一步拿它算间隔 ——
+        # 见 heartbeat()。None = 这个 Core 还一条快照都没发过。
+        self._last_state_at: float | None = None
         # 上一次打过的「重点」是谁。初值用 _UNSET 而不是 None ——
         # None 是「没有重点」这个**合法结论**，两者不能混：
         # 混了的话，一上来就"没有重点"的那次永远打不出来。
@@ -770,6 +787,27 @@ class Core:
         # （测试里几千次），在这儿 print 会把测试输出刷没。存下来，由 run() 打。
         self.events_load_message = self.event_book.load()
 
+        # ---- 历史行（Phase7）----
+        # 默认同样是 None = 不碰磁盘，理由和上面一模一样：造一个 Core 不等于
+        # 「现在该往 data/ 里写文件了」，跑测试的时候更不该。run() 显式递路径。
+        #
+        # 名字叫 history_writer 而不是 history：NodeState 上已经有一个 history
+        # （内存里最近 N 条，给趋势图用的），两个都叫 history 的话，
+        # 「self.history」在哪个类里是什么意思，读的人得先数一层。
+        self.history_path = None if history_path is None else Path(history_path)
+        self.history_writer = history.HistoryWriter(self.history_path)
+
+        # ---- 在线 ML 判决（Phase8 D5）----
+        # 默认同样是 None = **不判 ML**，理由和上面两条一样：造一个 Core 不等于
+        # 「现在该去 models/ 找模型了」。它比上面两条更该守着这个默认 ——
+        # 测试里每造一个 Core 都去读一遍 joblib 的话，几千个用例就是几千次磁盘 I/O。
+        # 真正跑起来的那条路（run()）显式把 config.MODELS_DIR 递进来。
+        #
+        # 它**自己不存状态**：判词直接写在 record 上，跟着那条读数一起进
+        # NodeState.history 和 CSV。另存一份就有两份真相 —— 而这两份一不一致，
+        # 是不会有任何报错的。
+        self.ml_judge = ml_judge.MlJudge(model_dir)
+
     # -- 生命周期 ----------------------------------------------------------
 
     @property
@@ -778,6 +816,23 @@ class Core:
         table = dict(rules.SEVERITY_WEIGHTS)
         table.update(self.cfg.get("priority", {}).get("severity", {}))
         return table
+
+    @property
+    def state_stale_after_sec(self) -> int | None:
+        """「多久没收到新快照，就该怀疑 core 没了」—— 秒。心跳关掉时是 None。
+
+        取心跳间隔的 **3 倍**：连着三次都没来才说话。一次网络抖动、一次
+        进程被系统换出去几十毫秒、一次 GC 停顿，都不该把整页变成「core
+        没声了」；而三次全丢的概率低得多。
+
+        这个数**由 core 算好放进快照**（core.staleAfterSec），三个前端照读 ——
+        各自写一遍的话，「多久算久」在三个屏幕上会是三个答案，而它们并排摆着。
+
+        None 的含义是「判不了」（配置把 stateHeartbeatSec 写成 0 了），
+        **不是**「永远不算久」。页面必须把这两件事分开说。
+        """
+        heartbeat = self.cfg["stateHeartbeatSec"]
+        return 3 * heartbeat if heartbeat > 0 else None
 
     # -- 收 -----------------------------------------------------------------
 
@@ -825,6 +880,20 @@ class Core:
             )
             return Verdict(False, reasons=(f"未知节点 {record['nodeId']!r}",))
 
+        # 在线 ML 判决（Phase8 D5）。**必须在 node.apply 之前**：它判的是
+        # 「这条读数像不像这个宿舍的平时」，而 apply 跑完之后这条读数就已经
+        # 成了「历史」的一部分 —— 顺序反了，判的就变成「像不像含它自己的历史」。
+        #
+        # 判词挂在 record 上，不新增 NodeState 属性：NodeState.history 是
+        # **同一批 dict 的 deque（同一个引用）**，所以这一份计算能喂三个消费者
+        # —— 快照的节点级 mlLabel/mlText/agree、快照里逐行的 history、以及
+        # CSV 的 ml_label / agree 两列。挂属性的话这三处都得再挑一遍，
+        # 「怎么算一致」就有了第二份实现。
+        #
+        # 判不了时 ml_judge 返回 None，这里一个键都不加 —— CSV 那两列留空。
+        # **留空 ≠ 判成正常**：一个是「没判」，一个是「判了说没事」。
+        self._judge_ml(record)
+
         node.apply(record, now_wall, self.cfg["recoverConsecutiveNormal"])
         # 事件状态机跟在后面吃**同一份**判据：它读 node.abnormal_count /
         # consecutive_normal，不自己再数一遍。数两遍等于有两份真相，
@@ -834,6 +903,14 @@ class Core:
         # 顺序也是定的：先 apply 再 observe。反过来的话这里读到的是**上一条**
         # 报文留下的计数，事件会比数据慢一条 —— 而慢的正好是恢复/未恢复
         # 那一条，也就是唯一要紧的那条。
+        # 这一条读数落在哪条案卷里？两头都要看一眼：案卷可能被这条报文
+        # **开出来**（异常段的第一条），也可能被它**收掉**（凑够 N 条正常的那一条）。
+        # 所以先记下「进来时开着的那条」，写完再看一眼「出去时开着的那条」——
+        # 后者管开案那一种（第一条异常读数自己就该带着刚开出来的案号），
+        # 前者管收案那一种（那条正常读数还是验证数据，属于那条案卷）。
+        # 不去拿 last_for() 攀一条早就结掉的案子：那是编。
+        case_before = self.event_book.open_event(record["nodeId"])
+
         reason = self._reason_for(record["nodeId"], now_wall)
         for line in self.event_book.observe(node, record, reason=reason):
             log("事件", line)
@@ -850,6 +927,11 @@ class Core:
                 when=record.get("time") or format_time(now_wall),
                 reason=top.reason,
             )
+
+        # 历史行落盘（Phase7）。放在这儿而不是 handle_message 一进来就写：
+        # event_id 要的是「这条读数落在哪条案卷里」，而那得等 observe 跑完才知道。
+        # 换句话说，这一行写下去的时候，这条报文引起的变化**都已经落定了**。
+        self._write_history(record, case_before)
 
         # 每收一条就重算并（内容变了才）重发快照。放在这里而不是放到
         # 主循环里定时发：定时发的话，两次发布之间收到的那几条数据
@@ -868,6 +950,50 @@ class Core:
             if entry.node_id == node_id:
                 return entry.reason
         return None
+
+    def _write_history(self, record: dict[str, Any], case_before: Any = None) -> None:
+        """把一条**已经校验通过**的报文追加进历史 CSV（Phase7）。
+
+        写的是「读数」不是「状态」：一行下去就不改了，所以这里不重写整个文件、
+        也不用关心上一次写到哪儿了（不像 events.json 那本要随状态机改）。
+
+        `case_before` 是进这个方法之前那个节点开着的事件（可能没有）。挑案卷的
+        规矩见调用点 —— 一句话：**能把这条读数归到某条案卷上就归，归不上就留空**，
+        不为了「这一列不留空」去编一个案号。
+        """
+        case = self.event_book.open_event(record["nodeId"]) or case_before
+        self.history_writer.append(
+            record,
+            event_id="" if case is None else case.event_id,
+            event_state="" if case is None else case.state,
+        )
+        # 写不进去（磁盘满 / 被 Excel 占着 / 目录没了）**不许拖垮 core**：
+        # 那件事和「宿舍是不是偏热」没有关系，而这台 core 还得接着判状态。
+        # 所以只在出错那一刻打一行，之后静默跳过 —— 每条都打的话日志会被刷满。
+        message = self.history_writer.take_error()
+        if message is not None:
+            log("历史", f"{message} —— 以后不再写 CSV，core 照常跑")
+
+    def _judge_ml(self, record: dict[str, Any]) -> None:
+        """给这条读数补上 ML 判词（Phase8 D5）。判不了就一个键都不补。
+
+        补的是三个键，跟着 record 一路走到底（快照和 CSV 都读它）：
+            ml_label   "normal" / "abnormal"           —— CSV 第 6 列、快照 mlLabel
+            ml_text    「接近历史常态」/「与历史明显不同」 —— 快照 mlText，给人看
+            ml_agree   规则和 ML 是不是同一个结论        —— CSV 第 10 列、快照 agree
+
+        收尾照抄 _write_history：**出错不抛异常**。模型文件坏了、没装
+        scikit-learn、预测时抛异常 —— 这些和「这个宿舍现在偏不偏热」一点关系都
+        没有，不能因此让 core 停下判状态。所以原因在这里取一次打成一行日志，
+        之后 ml_judge 内部静默跳过（理由见 ml_judge.py 的文件头）。
+        每条都打的话，日志会被同一句话刷满，真正要看的「谁又偏热了」就淹了。
+        """
+        verdict = self.ml_judge.judge(record)
+        if verdict is not None:
+            record.update(verdict)
+        message = self.ml_judge.take_error()
+        if message is not None:
+            log("ML", f"{message} —— 以后不再判 ML，core 照常跑")
 
     # -- 指令 ---------------------------------------------------------------
 
@@ -1056,14 +1182,35 @@ class Core:
         nodes: list[dict[str, Any]] = []
         for node_id, node in self.nodes.items():
             duration = node.duration_seconds()
+            online = node.is_online(now_wall, timeout)
+            # 「已经多久没收到这个节点的数据了」。两格的口径和 durationSec /
+            # durationText 那一对一样：秒给机器、文本给人，免得三个前端各写
+            # 一遍「多长算多久」的格式化，又出第二、第三套说法。
+            #
+            # 在线、以及**一次都没收到过**的节点，这两格都是 None：
+            #   * 在线 —— 这个数没有意义（它没掉线）
+            #   * 没收到过 —— 「不知道」不是「离线了 3 分钟」（见 is_online）
+            silent = node.offline_since(now_wall)
+            offline_sec = None if online or silent is None else round(silent, 3)
             entry: dict[str, Any] = {
                 "nodeId": node_id,
-                "online": node.is_online(now_wall, timeout),
+                "online": online,
                 # status 可能是 None：**还没收到过数据** ≠ 正常
                 "status": node.status,
                 "temperature": None if node.latest is None else node.latest["temperature"],
                 "humidity": None if node.latest is None else node.latest["humidity"],
                 "time": None if node.latest is None else node.latest["time"],
+                # 在线 ML 的判词（Phase8 D5）。和上面几格一样取自「最近那条读数」，
+                # 所以**一条数据都没收到时是 None**，不能读成「判成正常」。
+                # 收到了但这条没判成（这个宿舍没模型 / 没装 scikit-learn）时也是
+                # None —— 前端两种情况都按「没有 ML 结论」渲染，与 CSV 那列留空
+                # 是同一个口径。
+                "mlLabel": None if node.latest is None else node.latest.get("ml_label"),
+                # 中文判词由 core 算好递出来（ml.ml_text）。让前端拿 normal/abnormal
+                # 自己翻一句人话，就是把「这个结论怎么叫」复制出第二份 ——
+                # 而两份说法的第一次不一致，不会有任何报错。
+                "mlText": None if node.latest is None else node.latest.get("ml_text"),
+                "agree": None if node.latest is None else node.latest.get("ml_agree"),
                 # 秒是给机器算的，durationText 是给人看的 —— 两个都给，
                 # 免得前端自己再写一遍「多长算多久」的格式化，又出第二套说法
                 "abnormalCount": node.abnormal_count,
@@ -1076,6 +1223,11 @@ class Core:
                 ),
                 "reason": ranked[node_id].reason if node_id in ranked else None,
                 "lastSeen": None if node.last_seen is None else format_time(node.last_seen),
+                # 离线多久了（D4）。在线 / 没收到过时是 None，见上面那段。
+                "offlineSec": offline_sec,
+                "offlineText": (
+                    None if offline_sec is None else rules.format_duration(offline_sec)
+                ),
                 "historyCount": len(node.history),
                 # 趋势图的数据源（E3）。前端从这一步起**不再订遥测**，所以图上
                 # 的点必须跟着快照一起来 —— 不然页面刷一下，图上就一条线都没有，
@@ -1089,6 +1241,14 @@ class Core:
                         "temperature": item.get("temperature"),
                         "humidity": item.get("humidity"),
                         "status": item.get("status"),
+                        # 逐行的 ML 判词（Phase8 D5）。节点级那三格只说得清「最近
+                        # 一条」，而看板的实时对照表要的是**每一行**两边各判了什么
+                        # —— 构造样本回放时同一屏上就同时有判得一致和判得不一致的
+                        # 行，只给最近一条的话，前面那几条的结论一转身就没了。
+                        # 没判成的那几行同样是 None，前端跳过不画。
+                        "mlLabel": item.get("ml_label"),
+                        "mlText": item.get("ml_text"),
+                        "agree": item.get("ml_agree"),
                     }
                     for item in node.history
                 ],
@@ -1098,6 +1258,32 @@ class Core:
         return {
             "v": SNAPSHOT_VERSION,
             "time": format_time(now_wall),
+            # ---- core 自己的心跳（Phase9 D4）----
+            #
+            # 【这一块存在的唯一理由】页面上要能看出「core 还在不在」。
+            # 判据不能是「收没收到快照」：快照是 **retained** 的，core 死了之后
+            # broker 手里那一份还在，后开的页面照样会收到它 —— 而它长得和活着
+            # 的时候一模一样。所以判据只能是「收到的那一帧有多旧」。
+            #
+            # 三格的分工：
+            #   epochMs       这一帧是**什么时候**的（毫秒）。前端拿自己的表
+            #                 跟它一比就知道旧不旧。用毫秒整数而不是那串
+            #                 "%Y-%m-%d %H:%M:%S"，是因为后者要前端自己解析，
+            #                 而带不带时区、按谁的时区解，两个浏览器能给两个答案。
+            #   staleAfterSec 超过多少秒没收到更新的帧就该怀疑 core 没了。
+            #                 **由 core 算好**（见 state_stale_after_sec），
+            #                 三个前端照读 —— 各自写一遍就是三个答案。
+            #                 null = 心跳被配置关掉了，这时前端该说「判不了」。
+            #   online        **恒为 true，别拿它判活**。它只可能由活着的 core
+            #                 写下来，死了就没人写了 —— 所以它证明不了任何事，
+            #                 retained 的那一帧会一直带着它。留着这一格是为了
+            #                 让「core 状态」这件事在这份快照里有个名字，
+            #                 真正判活的是上面那两格。
+            "core": {
+                "online": True,
+                "epochMs": int(round(now_wall * 1000)),
+                "staleAfterSec": self.state_stale_after_sec,
+            },
             # 谁被点名了（E3）。null = 没人被点名 —— 那是「大家看默认那个」，
             # 不是「不知道谁被点名了」，所以两个前端都得把这个 null 认成
             # 「回落到 priority」，不能认成「什么都别高亮」。
@@ -1142,11 +1328,44 @@ class Core:
         `force=True` 用于启动和离线判定之后：那时候内容**可能**没变
         （比如 time 变了但别的都没变），但这一步发生的本身就得让人看见。
         """
+        if now_wall is None:
+            now_wall = time.time()
         payload = json.dumps(self.snapshot(now_wall), ensure_ascii=False, sort_keys=False)
         if not force and payload == self._last_state_payload:
             return False
         self._last_state_payload = payload
+        # 记下「发出去的那一刻」，心跳拿它算间隔。**记在这里而不是调用点**：
+        # 发快照有好几条路（收到遥测、拒收、切焦点、掉线），漏记任何一条，
+        # 心跳就会在那条路上多发一次 —— 而多发是看不出来的。
+        self._last_state_at = now_wall
         self.publish(config.STATE_TOPIC, payload, retain=True)
+        return True
+
+    def heartbeat(self, now_wall: float | None = None) -> bool:
+        """到点了就重发一帧快照，**哪怕内容一个字都没变**。发了返回 True。
+
+        【为什么需要它】见 snapshot 里 core 那一块的注释：判活的唯一依据是
+        「这一帧有多旧」，那就必须保证活着的时候帧一定是新的。而 publish_state
+        只在内容变了才发 —— 内容里带着 time，所以有活动的时候一秒一条，
+        安静的时候几分钟一条都没有（刚起 core、模拟器还没开就是这种）。
+        没有心跳的话，那种安静会被页面读成「core 没了」。
+
+        【多久算到点】core/config.json 的 stateHeartbeatSec，写 0 = 关掉。
+        关掉之后快照里 core.staleAfterSec 是 null，页面说「判不了」——
+        比让它随便挑一个数猜要诚实。
+
+        【为什么单独一个方法，不塞进 tick()】tick() 的语义是「看看哪个节点
+        掉线了、返回这一轮新掉的」，纯状态推进；心跳是「往外发一条」。
+        两件事混在一起之后，写 tick 的测试就得同时关心发没发报文。
+        """
+        heartbeat_sec = self.cfg["stateHeartbeatSec"]
+        if heartbeat_sec <= 0:
+            return False
+        if now_wall is None:
+            now_wall = time.time()
+        if self._last_state_at is not None and now_wall - self._last_state_at < heartbeat_sec:
+            return False
+        self.publish_state(now_wall, force=True)
         return True
 
     # -- 发 -----------------------------------------------------------------
@@ -1439,6 +1658,10 @@ def load_config(path: str | Path | None = None) -> dict[str, Any]:
         ("offlineTimeoutSec", 1),
         ("recoverConsecutiveNormal", 1),
         ("historyMax", 1),
+        # D4 的快照心跳。**下限是 0 而不是 1**：0 是有含义的合法值
+        # （关掉心跳），快照里 core.staleAfterSec 会变成 null，
+        # 页面会说「判不了」——那是如实回答，不是错误。
+        ("stateHeartbeatSec", 0),
     ):
         value = cfg.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -1564,6 +1787,19 @@ def build_client(cfg: dict[str, Any], broker: dict[str, Any]) -> mqtt.Client:
     return client
 
 
+def heartbeat_text(cfg: dict[str, Any]) -> str:
+    """心跳那一句话，给人看。启动日志和 `--check` 两处共用一份说法。
+
+    单独开一个函数是因为那句话有两种形态（开着 / 关掉），而两处各写一遍
+    「if 0 then X else Y」的话，迟早有一处忘了改 —— 启动日志说「心跳 5 秒」、
+    --check 说「心跳关」，两个都在屏幕上，谁也不知道该信哪个。
+    """
+    heartbeat = cfg["stateHeartbeatSec"]
+    if heartbeat <= 0:
+        return "关掉了（快照里 staleAfterSec 会是 null，页面会说判不了）"
+    return f"{heartbeat}s（超过 {heartbeat * 3}s 没新帧，页面就说 core 没声了）"
+
+
 def run(cfg: dict[str, Any], quiet: bool = False) -> int:
     broker = resolve_broker(cfg)
     # _qos 单独塞进去：Core 里只认 cfg，不该让它再去读一遍 config.py。
@@ -1572,7 +1808,8 @@ def run(cfg: dict[str, Any], quiet: bool = False) -> int:
 
     # events_path 显式递进来。Core 的默认是「不碰磁盘」——
     # 「真正跑起来」这个决定是在这里下的，不能藏在构造函数里。
-    core = Core(cfg, quiet=quiet, events_path=config.EVENTS_PATH)
+    core = Core(cfg, quiet=quiet, events_path=config.EVENTS_PATH,
+                history_path=config.HISTORY_PATH, model_dir=config.MODELS_DIR)
     client = build_client(cfg, broker)
     core.client = client
     client.on_connect = core.on_connect
@@ -1583,11 +1820,23 @@ def run(cfg: dict[str, Any], quiet: bool = False) -> int:
         f"连 {broker['host']}:{broker['port']}，"
         f"{len(cfg['nodes'])} 个节点 {'/'.join(cfg['nodes'])}，"
         f"离线超时 {cfg['offlineTimeoutSec']}s，"
+        f"快照心跳 {heartbeat_text(cfg)}，"
         f"连续 {cfg['recoverConsecutiveNormal']} 条正常算恢复，"
         f"处理后再连续 {cfg['events']['verifyConsecutiveAbnormal']} 条异常算没治好"
     ))
     # 读历史事件的结果在这里打 —— 起来的时候必须让人看见「这一叠是从哪儿接上的」。
     log("事件", f"{core.events_path.name}：{core.events_load_message}")
+    # 历史 CSV 是**追加**的，所以「这一次接着哪一份往下写」也要让人看见：
+    # 是新起一份，还是接在昨天那份后面继续加，验收时这两件事完全不一样。
+    log("历史", f"{core.history_path.name}："
+                f"{'接在已有文件后面写' if core.history_path.exists() else '新起一份，先写表头'}"
+                f"　（{config.HISTORY_PATH}）")
+    # ML 这条链（Phase8 D5）同样要在启动时说清楚自己是什么状态。三句话分别是
+    # 「加载了 N 个模型」/「还没跑过训练脚本」/「出错了，这条链停了」——
+    # 对应「会判」「没判」「不判」，而不是一律无声无息。
+    # 这一句同时**触发加载**（MlJudge 是懒加载的），所以「加载了几个模型」不会
+    # 拖到第一条遥测才发生 —— 那时候人已经不看日志了。
+    log("ML", core.ml_judge.describe())
     try:
         client.connect(broker["host"], broker["port"], keepalive=broker["keepalive"])
     except OSError as exc:
@@ -1605,6 +1854,9 @@ def run(cfg: dict[str, Any], quiet: bool = False) -> int:
             for node_id in went_offline:
                 log("离线", f"{node_id} 超过 {cfg['offlineTimeoutSec']}s 没有新数据，"
                             "不再参与优先排序（数据保留在快照里）")
+            # 心跳（D4）。安静的时候也把快照重发一遍，否则「页面收到的最后一帧
+            # 有多旧」这件事就判不出来 —— 判活靠的是它。
+            core.heartbeat()
     except KeyboardInterrupt:
         log("退出", "收到 Ctrl+C，正在下线")
     finally:
@@ -1616,6 +1868,11 @@ def run(cfg: dict[str, Any], quiet: bool = False) -> int:
             json.dumps({"core": "offline", "time": format_time()}, ensure_ascii=False),
             retain=True,
         )
+        # 历史 CSV 收尾。每条都 flush 过，所以这里关不关都不会丢数据 ——
+        # 关是因为 Windows 上一个进程攥着的文件，Excel 是打不开的，
+        # 而「一边跑 core 一边翻那份 CSV」正是验收时会做的事。
+        core.history_writer.close()
+
         client.disconnect()
         client.loop(timeout=0.5)   # 把 disconnect 真正送出去
     return 0
@@ -1650,13 +1907,19 @@ def main(argv: list[str] | None = None) -> int:
               f"{cfg['thresholds']['humidityHigh']}）")
         print(f"  严重度权重    {cfg['priority']['severity']}")
         print(f"  离线超时      {cfg['offlineTimeoutSec']} 秒")
+        print(f"  快照心跳      {heartbeat_text(cfg)}")
         print(f"  恢复判据      连续 {cfg['recoverConsecutiveNormal']} 条正常")
         print(f"  未恢复判据    处理后再连续 "
               f"{cfg['events']['verifyConsecutiveAbnormal']} 条异常")
         print(f"  历史上限      {cfg['historyMax']} 条 / 节点")
         print(f"  事件文件      {config.EVENTS_PATH}")
+        print(f"  历史文件      {config.HISTORY_PATH}（每收一条合法遥测追加一行）")
         print(f"                最多留 {cfg['events']['eventsMax']} 条事件，"
               f"每条最多 {cfg['events']['eventsVerifyMax']} 条验证数据")
+        # ML 这条链的状态也报出来（Phase8 D5）。放在事件那两行**之后**：
+        # 「最多留 N 条」说的是上面那个事件文件，插在它俩中间就把一对拆散了。
+        print(f"  ML 模型目录   {config.MODELS_DIR}")
+        print(f"                {ml_judge.MlJudge(config.MODELS_DIR).describe()}")
         print(f"  broker        {broker['host']}:{broker['port']} qos={broker['qos']}")
         print(f"  topic         订阅 {config.TOPIC_PATTERN}")
         print(f"                指令 {config.CMD_TOPIC}（retain=False）")

@@ -21,6 +21,14 @@
       <span id="conn" class="conn conn--pending">
         <span class="conn-dot"></span><span id="conn-text">未连接</span>
       </span>
+      <!-- core 在不在（Phase9 D4）。**和上面那一条不是一回事**：
+           上面那条说的是「这个浏览器到 broker 的这条线」，
+           这一条说的是「core 有没有在发快照」。两个分开摆，是因为它们坏掉之后
+           要查的地方完全不同 —— 一个去查 broker / 网络（或者手机连的是自己的
+           localhost），一个去查 core.py 那个进程还在不在。
+           三块屏幕（看板 / 手机 / 3D）都有这一条，说的是同一句话，
+           判据来自快照里的 core 心跳，见 dashboard/logic.js 的 coreLiveness。 -->
+      <span id="core-hint" class="core-hint"></span>
       <button id="toggle" class="ghost" type="button">连接</button>
       <!-- 这里原本有一个「模拟三节点数据」按钮（凭空造一份本地数据让界面动起来）。
            Step E3-2 把它删了：E3 明确禁止「两边手动输入数据伪造同步效果」，
@@ -203,6 +211,42 @@
         <tbody id="reject-body"></tbody>
       </table>
     </div>
+  </section>
+
+  <!-- 实时 Rule-ML 对照（Phase8 D5）。**和上面几块是同一路数据** ——
+       每一行都是跟着 dormmate/v1/state 快照一起来的：core 收到遥测时给那条读数
+       判了一次 ML，判词就挂在快照每个节点的 history 里。所以这块会跟着新数据动。
+
+       和下面那块「ML 辅助判断」是**两条链**，别混：
+         这块    = core 在线判的，判的是**屏幕上这些读数**，跟着快照走；
+         下面那块 = analysis/analysis.py 离线跑出来的，读 report/ml_result.json，
+                    判的是**上一次跑脚本时那份 CSV**，页面刷多少次它都不变。
+
+       「固定规则」和「ML」两格都是 core 算好的，「是否一致」也是 core 比出来的
+       （逻辑在 ml_judge.py），页面只把三格摆出来 —— 线上谁判的、判成什么，
+       这一页一个结论都不下。没有判词的行（没模型 / 没装 scikit-learn）不画：
+       「没判」在这一块里表现为**这一行不出现**，而不是画一行「正常」。 -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>实时 Rule-ML 对照 <span id="mlc-count" class="count"></span></h2>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>宿舍</th>
+            <th>时间</th>
+            <th>温度 ℃</th>
+            <th>湿度 %</th>
+            <th>固定规则</th>
+            <th>ML</th>
+            <th>是否一致</th>
+          </tr>
+        </thead>
+        <tbody id="mlc-body"></tbody>
+      </table>
+    </div>
+    <p id="mlc-note" class="note"></p>
   </section>
 
   <!-- ML 辅助判断（Step 9-3 的进阶项）。这一块和上面几块**不是一路数据**：

@@ -44,6 +44,40 @@ EVENTS_PATH = os.path.join(
 )
 
 
+# ---- 历史行（Phase7）----
+# core 每收到一条**合法**遥测就往这儿 append 一行，十列见 history.py 的 HEADER
+# （Phase8 D5 起最后一列是 agree，之前是九列）。
+# 它是**离线分析的输入**：
+#
+#     py -3.14 analysis/make_report.py --csv data/history.csv
+#
+# 和 events.json 一样，这份也是运行期产生的数据、不是源码，所以同样进 .gitignore：
+# 它一秒一行、每次跑都在变，入库的话每回演示完都多一个「改动」，真正要提交的
+# 输入（data/ 下那几份 *_sim.csv）反而被淹掉。要看内容就自己跑一遍 core。
+HISTORY_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "history.csv"
+)
+
+
+# ---- 模型（Phase8 D5）----
+# core 启动时扫这个目录，每个 <nodeId>.joblib 管一个宿舍的「像不像它自己平时」。
+# 里面那份是 analysis/train_iforest.py 的训练产物：
+#
+#     py -3.14 analysis/train_iforest.py --csv data/history.csv --out-dir models
+#
+# 和 events.json / history.csv 的区别：那两份是 core **写出来**的，这份是 core
+# **读进去**的。但入不入库这件事一样 —— 它由那份 CSV 唯一决定，重跑一条命令就有，
+# 而 .joblib 是二进制、每灌一批新历史就整份变样，进仓库只会把真正要提交的东西
+# 淹在 diff 里（见 .gitignore 的 models/ 那一段）。
+#
+# 目录不存在**不是错误**：没跑过训练脚本的时候它本来就不存在。那时 core 照常判
+# 规则，只是 CSV 的 ml_label 一列留空 —— **留空 = 没判，不是判成正常**。
+# 启动时那句「加载了几个模型 / 为什么没判」由 ml_judge.MlJudge.describe() 报出来。
+MODELS_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "models"
+)
+
+
 # ---- 数据 ----
 PUBLISH_INTERVAL = 5.0                     # 发布间隔（秒）
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"          # 固定格式，勿改

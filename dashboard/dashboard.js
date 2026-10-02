@@ -42,7 +42,7 @@ import { createDorm3D } from '../three/scene.js';
    全是纯函数，不碰 DOM，所以 tests/logic.test.js 不用打任何桩就能整个测一遍。 */
 import { readSnapshot, nodeOf, eventStateText, handlingOf, fanOn,
   focusBanner, alertLine, snapshotSummary, actionState,
-  buildMlNote, mlFetchFailed, cmdNote } from './logic.js';
+  buildMlNote, mlFetchFailed, cmdNote, coreLiveness } from './logic.js';
 'use strict';
 
 /* ---------- 配置 ---------- */
@@ -172,11 +172,17 @@ const el = {
   clear: document.getElementById('clear'),
   conn: document.getElementById('conn'),
   connText: document.getElementById('conn-text'),
+  /* core 心跳那一条（D4）。和 conn 并排，说的却是另一件事。 */
+  coreHint: document.getElementById('core-hint'),
   toggle: document.getElementById('toggle'),
   /* Step 9-3 进阶项的三件：条数、结论那句、来源说明 */
   mlCount: document.getElementById('ml-count'),
   mlText: document.getElementById('ml-text'),
   mlNote: document.getElementById('ml-note'),
+  /* Phase8 D5 的实时对照表：表体、条数、下面那行说明 */
+  mlcBody: document.getElementById('mlc-body'),
+  mlcCount: document.getElementById('mlc-count'),
+  mlcNote: document.getElementById('mlc-note'),
 };
 
 /* ---------- 消息日志 ---------- */
@@ -246,9 +252,15 @@ function cardHTML(node) {
   const view = viewFor(node.status);
 
   /* 离线是个**状态之外**的事实（core 的优先排序不排离线的节点），
-     所以它单独一个小标，不挤进那个状态徽章里。 */
+     所以它单独一个小标，不挤进那个状态徽章里。
+
+     「多久没来了」那句话是 core 算好放进快照的（offlineText），这边只搬运：
+     ○ 一个宿舍的离线时长只有一个出处，三个屏幕说的是同一个数；
+     ○ 快照里没这一格时（老 core 配新页面）退回光秃秃的「已离线」——
+       不自己拿 lastSeen 去减，那是第二个算法，而它会和 core 的差一截。 */
   const offline = node.online ? ''
-    : '<span class="badge badge--wait">已离线</span>';
+    : '<span class="badge badge--wait">已离线'
+      + (node.offlineText ? ' ' + esc(node.offlineText) : '') + '</span>';
 
   return '<button class="card ' + view.cls + (active ? ' is-active' : '') + '"'
     + ' type="button" data-node="' + esc(nodeId) + '" aria-pressed="' + active + '">'
@@ -594,6 +606,107 @@ function renderRejects() {
   el.rjBody.innerHTML = rows.length === 0
     ? '<tr><td colspan="4" class="log-empty">core 一条都没拒过</td></tr>'
     : rows.map(rejectRowHTML).join('');
+}
+
+/* ---------- 实时 Rule-ML 对照（Phase8 D5） ---------- */
+
+/* 最多画多少行。三个宿舍 × 每节点 historyMax（50）最多 150 行，一次全画出来
+   页面会很长，越老的越没人看。截断了就在条数那句里说清楚截了多少 ——
+   和「被拒绝消息」那块同一个做法。 */
+const ML_COMPARE_MAX = 60;
+
+/**
+ * 快照里「判过 ML 的那些读数」摊平成一个列表。
+ *
+ * 判过的标志是 mlLabel 不是 null：core 判不出来时（这个宿舍没模型、没装
+ * scikit-learn、这条读数缺温湿度）**不往那三个字段里写值**，读回来是 null。
+ * 所以这里判的是「有没有这个值」，不是「值等于什么」—— 把没判的当成
+ * 「判成正常」画出来，是这一块最容易犯、也最看不出来的错。
+ */
+function mlCompareRows() {
+  const nodes = snapshot && Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
+  const out = [];
+  nodes.forEach(function (node) {
+    const items = Array.isArray(node.history) ? node.history : [];
+    items.forEach(function (item) {
+      if (!item || item.mlLabel == null) return;
+      out.push({ nodeId: node.nodeId, item: item });
+    });
+  });
+  return out;
+}
+
+/**
+ * 「是否一致」那一格：布尔 -> 两个字。**页面只做这一层翻译**。
+ *
+ * 「是不是同一个结论」是 core 比出来的（ml_judge.py 里
+ * rule_normal == ml_normal），快照里那个 agree 就是比完的布尔。
+ * 读到 null 时不是「不是」，是「core 没给这个字段」—— 老快照就这样。
+ */
+function agreeText(agree) {
+  if (agree === true) return '是';
+  if (agree === false) return '不是';
+  return '—';
+}
+
+/**
+ * 一行的 HTML。七格全部走 esc()：节点名、时间、status、判词都是从报文和 core
+ * 那边读来的，不是这个文件里的常量（同 events / rejects 那两张表）。
+ *
+ * 两边不一样的行加一个 mlc-mismatch，和报告里那张对照表高亮的是同一件事。
+ */
+function mlCompareRowHTML(row) {
+  const item = row.item;
+  const cls = item.agree === false ? ' class="mlc-mismatch"' : '';
+  return '<tr' + cls + '>'
+    + '<td class="mono">' + esc(row.nodeId) + '</td>'
+    + '<td class="mono">' + esc(item.time || '—') + '</td>'
+    + '<td>' + esc(fmt(item.temperature)) + '</td>'
+    + '<td>' + esc(fmt(item.humidity)) + '</td>'
+    + '<td>' + esc(item.status == null ? '—' : item.status) + '</td>'
+    + '<td>' + esc(item.mlText || item.mlLabel) + '</td>'
+    + '<td>' + esc(agreeText(item.agree)) + '</td>'
+    + '</tr>';
+}
+
+function mlCompareNote(shown) {
+  const mismatch = shown.filter(function (row) { return row.item.agree === false; }).length;
+  /* 这一句是 textContent，不认 markdown —— 别在这里写 **加粗**。 */
+  return '这一块判的是屏幕上这些读数：core 收到每条遥测时用这个宿舍自己的模型判一次，'
+    + '判词跟着快照一起过来（判据在 core 那侧的 ml_judge.py）。'
+    + '「ML」一格是 core 写好的中文判词，「是否一致」是 core 比出来的'
+    + '（固定规则和 ML 是不是同一个结论）—— 页面只把三格摆出来，不判。'
+    + (mismatch > 0
+      ? '　其中 ' + mismatch + ' 条两边不一样，就是红字那几行。'
+      : '　这几条两边判的一样。');
+}
+
+function renderMlCompare() {
+  const rows = mlCompareRows();
+  const shown = rows.length > ML_COMPARE_MAX
+    ? rows.slice(rows.length - ML_COMPARE_MAX) : rows;
+
+  el.mlcCount.textContent = rows.length > 0
+    ? '共 ' + rows.length + ' 条' + (rows.length > shown.length
+      ? '（显示最近 ' + shown.length + ' 条）' : '')
+    : '';
+
+  if (shown.length === 0) {
+    /* 「一行都没有」有两种原因，说清是哪一种 —— 两种要去查的地方完全不同：
+         没有快照 = core 没起；有快照但没判词 = 模型没训，
+         或者训完没重启 core（模型是 core 启动时扫 models/ 加载的）。 */
+    el.mlcBody.innerHTML = '<tr><td colspan="7" class="log-empty">'
+      + esc(!snapshot
+        ? '还没有收到 core 的快照'
+        : 'core 还没判过 ML —— 要么还没训模型（analysis/train_iforest.py），'
+          + '要么训完没重启 core（它是启动时扫 models/ 的）')
+      + '</td></tr>';
+    el.mlcNote.textContent = '';
+    return;
+  }
+
+  el.mlcBody.innerHTML = shown.map(mlCompareRowHTML).join('');
+  el.mlcNote.textContent = mlCompareNote(shown);
 }
 
 /* ---------- 3D 视图 ---------- */
@@ -982,8 +1095,12 @@ function renderAll() {
   renderFocus();
   renderEvents();
   renderRejects();
+  renderMlCompare();
   renderScene();
   renderCharts();
+  /* 这一条同时由定时器驱动（见 renderCoreHint）。两边都画一次不浪费 ——
+     收到新帧的那一刻就让它变成「刚刚」，不必等下一个 tick。 */
+  renderCoreHint();
 }
 
 /* ---------- 清空 ---------- */
@@ -1016,6 +1133,13 @@ function clearAll() {
   el.exportEvents.disabled = true;
   el.rjBody.innerHTML = '<tr><td colspan="4" class="log-empty">屏幕已清空</td></tr>';
   el.rjCount.textContent = '';
+  /* 实时对照表跟着快照走，快照已经被清成 null 了，所以这里直接画一次就行 ——
+     它会走「还没有收到 core 的快照」那条分支。不另写一份清空文案：
+     两份文案迟早会不一样。 */
+  renderMlCompare();
+  /* core 那一条也跟着清：快照已经被清成 null，它会走「还没有收到 core 的快照」。
+     不另写一份清空文案 —— 两份文案迟早会不一样。 */
+  renderCoreHint();
   renderLog();
 
   /* 图表也清掉：留着上一条曲线的话，屏幕上就有一份「已经不在快照里的数据」。 */
@@ -1047,6 +1171,28 @@ let client = null;
 function setConn(kind, text) {
   el.conn.className = 'conn conn--' + kind;
   el.connText.textContent = text;
+}
+
+/* ---------- core 心跳（Phase9 D4）---------- */
+
+/**
+ * 顶部那一条「core 还在不在」。
+ *
+ * ★ 它**必须由一个定时器驱动**，不能只在收到快照时画一次 ——
+ * 要说的那件事恰恰是「快照不来了」。挂在渲染路径上的话，core 一死，
+ * 这一条就永远停在最后一次调用时的样子（也就是「core 在线」），
+ * 而屏幕上那些数字同样停在那儿，两样一起看像是岁月静好。
+ *
+ * 判据全在 logic.js 的 coreLiveness 里（纯函数，五个边界都有测试）：
+ * 读快照里的 epochMs 和 staleAfterSec，跟此刻比。这边只做两件事 ——
+ * 把 now 传进去、把结果贴到 DOM 上。
+ */
+function renderCoreHint() {
+  const live = coreLiveness(snapshot, Date.now());
+  el.coreHint.textContent = live.text;
+  /* class 只换那一个后缀，「core-hint」这个基类留着 —— className 整个覆盖的话
+     样式表里那条 .core-hint 就没了，这一行会变成一个没有样式的裸文字。 */
+  el.coreHint.className = 'core-hint core-hint--' + live.state;
 }
 
 function updateToggle() {
@@ -1313,7 +1459,13 @@ renderEvents();
 renderRejects();
 renderScene();
 renderCharts();
+renderCoreHint();
 renderLog();
+
+/* core 心跳的巡检。**每隔一秒看一眼**，不跟着快照走 —— 要报的就是
+   「快照不来了」这件事，等快照来触发就等于永远不报。
+   1 秒的粒度够用了：判据本身是「十几秒没新帧」，早一秒晚一秒都无所谓。 */
+setInterval(renderCoreHint, 1000);
 
 /* ML 那一段是**异步**的（要等 fetch 回来），所以它不在这串 render 里 ——
    放在这里只是「启动时读一次」这个动作的位置，真正的渲染在 fetch 回来

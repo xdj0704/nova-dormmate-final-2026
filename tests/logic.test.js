@@ -45,11 +45,12 @@ console.log('=== A. 模块形状（纯函数的硬约束）===');
 const EXPORTS = (raw.match(/^export\s+(?:function|const|let)\s+(\w+)/gm) || [])
   .map((line) => line.replace(/^export\s+(?:function|const|let)\s+/, ''));
 
-check('★ 导出清单正好是这二十个（一个 const + 十九个函数，多一个少一个都要在这里说清楚）',
+check('★ 导出清单正好是这二十一个（一个 const + 二十个函数，多一个少一个都要在这里说清楚）',
   EXPORTS.join(','),
   'SNAPSHOT_VERSION,readSnapshot,nodeOf,openEvent,latestEvent,eventStateText,'
   + 'handlingOf,actionState,fanOn,trendOf,trendText,calmLine,focusBanner,'
-  + 'alertLine,selectedNode,speakLine,snapshotSummary,buildMlNote,mlFetchFailed,cmdNote');
+  + 'alertLine,selectedNode,speakLine,snapshotSummary,coreLiveness,buildMlNote,'
+  + 'mlFetchFailed,cmdNote');
 check('没有 default export（用默认导出的话，dashboard.js 那条具名 import 就失效了）',
   /export\s+default/.test(raw), false);
 
@@ -109,18 +110,18 @@ vm.runInContext(stripped, context, { filename: LOGIC_FILE });
 
 const { readSnapshot, nodeOf, openEvent, latestEvent, eventStateText,
   handlingOf, actionState, fanOn, trendOf, trendText, calmLine, focusBanner,
-  alertLine, selectedNode, speakLine, snapshotSummary, buildMlNote, mlFetchFailed,
-  cmdNote } = context;
+  alertLine, selectedNode, speakLine, snapshotSummary, coreLiveness, buildMlNote,
+  mlFetchFailed, cmdNote } = context;
 
-check('★ 十九个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
+check('★ 二十个口都拿得到', [readSnapshot, nodeOf, openEvent, latestEvent,
   eventStateText, handlingOf, actionState, fanOn, trendOf, trendText, calmLine,
-  focusBanner, alertLine, selectedNode, speakLine, snapshotSummary, buildMlNote,
-  mlFetchFailed, cmdNote]
+  focusBanner, alertLine, selectedNode, speakLine, snapshotSummary, coreLiveness,
+  buildMlNote, mlFetchFailed, cmdNote]
   .map((f) => typeof f),
 ['function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function', 'function',
   'function', 'function', 'function', 'function', 'function', 'function',
-  'function']);
+  'function', 'function']);
 
 /* 版本号是 const（不是函数），要从上下文的词法作用域里读 ——
    它和 core.py 的 SNAPSHOT_VERSION 必须同时改，读出来对一次是值得的。 */
@@ -1045,6 +1046,88 @@ check('★ alertLine 两次调用一模一样', alertLine(twice), alertLine(twic
 check('★ speakLine 两次调用一模一样', speakLine(twice), speakLine(twice));
 check('★ snapshotSummary 两次调用一模一样',
   snapshotSummary(twice), snapshotSummary(twice));
+
+/* ---------- P2. coreLiveness（Phase9 D4：core 还在发帧吗） ---------- */
+
+console.log('\n=== P2. coreLiveness（core 是不是还在发快照）===');
+
+/* 【为什么不能靠「收没收到快照」判断 core 死活】
+   core 发的 state 是 **retained** 的：core 一死，broker 会把最后那一帧留着，
+   页面打开照样马上收到，长得和实时消息一模一样。所以判据只能是
+   「这一帧是多久以前的」—— 而这就要求 core 让帧保持新鲜（心跳，5s 一发）。
+
+   这个函数读的是快照里的 core.epochMs / core.staleAfterSec，**不读 core.online**：
+   那个字段恒为 true（只有活着的 core 能写下它），retained 帧一样带着它，
+   拿它判断等于永远说「在线」。 */
+const NOW = 1789000000000;   /* 随便一个整数毫秒，和 Date.now() 无关 */
+
+function coreAt(over) {
+  return snapshotOf({ core: {
+    online: true,
+    epochMs: NOW - 1000,      /* 默认：1 秒前的帧 */
+    staleAfterSec: 15,
+    ...over,
+  } });
+}
+
+const fresh = coreLiveness(coreAt({}), NOW);
+check('★ 刚收到的帧判「在线」', fresh.state, 'live');
+check('★ 并报出这一帧是多久以前的', fresh.ageSec, 1);
+check('★ 那句话里带上了秒数（不是光说一句「在线」）',
+  fresh.text.indexOf('1 秒') > 0, true);
+
+/* 阈值由 core 给（staleAfterSec），不是这边写死的 15。
+   把阈值改小，同一帧就该翻成 stale —— 这条就是「15 不在这边」的证据。 */
+check('★ 阈值听快照的：同一帧，阈值调小就翻成「没声了」',
+  coreLiveness(coreAt({ staleAfterSec: 0.5 }), NOW).state, 'stale');
+check('★ 阈值听快照的：阈值调大就还是「在线」',
+  coreLiveness(coreAt({ epochMs: NOW - 10000, staleAfterSec: 60 }), NOW).state, 'live');
+check('★ 卡在阈值上不算过期（多一秒才算）',
+  [coreLiveness(coreAt({ epochMs: NOW - 15000 }), NOW).state,
+    coreLiveness(coreAt({ epochMs: NOW - 15001 }), NOW).state], ['live', 'stale']);
+
+/* 超过 60 秒要说成「几分钟」，不能报「187 秒」—— 盯着倒计时读秒没意义。 */
+const staleMinutes = coreLiveness(coreAt({ epochMs: NOW - 185000, staleAfterSec: 15 }), NOW);
+check('★ 过期久了用「分钟」说事（不是 185 秒）',
+  [staleMinutes.state, staleMinutes.text.indexOf('3 分钟') > 0], ['stale', true]);
+check('★ 过期时明说屏幕上的数字停在那一刻（不是「数据有误」）',
+  staleMinutes.text.indexOf('停在那一刻') > 0, true);
+check('★ 过期时不提 core.online 那个字段（它恒真，判不了死活）',
+  staleMinutes.text.indexOf('online'), -1);
+
+/* 时钟：手机/电脑的时间被人调慢过（或者 NTP 刚校正完）时，
+   ageSec 会算出负数。钳到 0 并照常判「在线」—— 不能因为时钟歪了就说 core 死了。 */
+const skewed = coreLiveness(coreAt({ epochMs: NOW + 5000 }), NOW);
+check('★ 帧的时间戳比现在还晚（时钟被人调过）时钳到 0，不当成负数',
+  [skewed.state, skewed.ageSec], ['live', 0]);
+
+/* 三层降级各说各的话，不能都笼统说一句「core 离线」——
+   这三种情况要修的地方完全不同（等快照 / 升级 core / 改配置）。 */
+check('★ 还没收到过快照时说「还没收到」，不是「core 离线」',
+  coreLiveness(null, NOW).text.indexOf('还没有收到'), 0);
+check('★ 没收到过快照时状态是 unknown',
+  coreLiveness(null, NOW).state, 'unknown');
+check('★ 快照里没有 core 那一块时点明「core 是旧版本？」',
+  coreLiveness(snapshotOf({}), NOW).text.indexOf('旧版本') > 0, true);
+check('★ 心跳关掉时说的是「判不了」，不是「离线」（core 活着，只是没配心跳）',
+  [coreLiveness(coreAt({ staleAfterSec: null }), NOW).state,
+    coreLiveness(coreAt({ staleAfterSec: null }), NOW).text.indexOf('判不了') > 0],
+  ['unknown', true]);
+check('★ 心跳关掉时告诉人去改哪里（stateHeartbeatSec）',
+  coreLiveness(coreAt({ staleAfterSec: null }), NOW).text.indexOf('stateHeartbeatSec') > 0,
+  true);
+
+/* 纯函数：同一个输入两次一样（里面不许读时钟 —— nowMs 是参数传进来的）。 */
+check('★ 两次调用一模一样（nowMs 是参数，不读 Date.now）',
+  JSON.stringify(coreLiveness(coreAt({}), NOW)),
+  JSON.stringify(coreLiveness(coreAt({}), NOW)));
+check('★ 不改那一份快照',
+  (function () {
+    const s = coreAt({});
+    const copy = JSON.stringify(s);
+    coreLiveness(s, NOW);
+    return JSON.stringify(s) === copy;
+  })(), true);
 
 /* ---------- Q. 变异：改坏一处，看抓不抓得住 ---------- */
 

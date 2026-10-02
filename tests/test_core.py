@@ -821,6 +821,40 @@ class TestPriority(unittest.TestCase):
         self.assertEqual(entry["abnormalCount"], 1)
         self.assertIsNone(entry["reason"], "离线了就不该还挂在优先表上")
 
+    def test_offline_duration_is_reported(self):
+        """D4：离线多久了要说出来，而且**由 core 算好**递出去。
+
+        三个前端各写一遍「多长算多久」的话，同一段离线在三块屏幕上会是
+        三个说法 —— 而它们并排摆着。
+        """
+        c, _ = make_core(offlineTimeoutSec=60)
+        self.feed(c, "dorm-b", ["2026-09-22 20:00:00"])
+        c.nodes["dorm-b"].last_seen = NOW - 185.0
+        entry = [n for n in c.snapshot(NOW)["nodes"] if n["nodeId"] == "dorm-b"][0]
+        self.assertEqual(entry["offlineSec"], 185.0)
+        self.assertEqual(entry["offlineText"], "3 分钟")
+
+    def test_a_node_that_never_reported_has_no_offline_duration(self):
+        """一次都没收到过的节点：online=false，但离线时长是 **None**。
+
+        「还不知道」不是「已经离线 3 分钟」—— 前者要去查它起没起，
+        后者要去查它怎么掉了，两件事。给个 0 或者一个时长的后果是
+        看板上写着「已离线 0 秒」，而那个节点可能压根还没部署。
+        """
+        c, _ = make_core()
+        entry = [n for n in c.snapshot(NOW)["nodes"] if n["nodeId"] == "dorm-c"][0]
+        self.assertFalse(entry["online"])
+        self.assertIsNone(entry["offlineSec"])
+        self.assertIsNone(entry["offlineText"])
+
+    def test_an_online_node_has_no_offline_duration(self):
+        c, _ = make_core()
+        self.feed(c, "dorm-b", ["2026-09-22 20:00:00"])
+        entry = [n for n in c.snapshot(NOW)["nodes"] if n["nodeId"] == "dorm-b"][0]
+        self.assertTrue(entry["online"])
+        self.assertIsNone(entry["offlineSec"])
+        self.assertIsNone(entry["offlineText"])
+
     def test_tick_reports_newly_offline_once(self):
         c, _ = make_core(offlineTimeoutSec=30)
         self.feed(c, "dorm-a", ["2026-09-22 20:00:00"])
@@ -916,26 +950,50 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(snapshot["v"], core.SNAPSHOT_VERSION)
         self.assertEqual(len(snapshot["time"]), 19)
         self.assertEqual(sorted(snapshot), [
-            "counters", "events", "focus", "nodes", "priority", "rejects",
-            "time", "v",
+            "core", "counters", "events", "focus", "nodes", "priority",
+            "rejects", "time", "v",
         ])
+        # Phase8 D5 加了 mlLabel / mlText / agree 三格、Phase9 D4 加了
+        # offlineSec / offlineText 两格。**v 仍然是 2** —— 加字段向后兼容
+        # （旧页面读到 null 就当没有），而订阅方式一个字没变：还是只订
+        # dormmate/v1/state 这一条。加字段不升版本、「订阅模型变了」才升，
+        # 这是这个数字一直以来的口径（见 core.py 里 SNAPSHOT_VERSION）。
         self.assertEqual(sorted(snapshot["nodes"][0]), [
-            "abnormalCount", "durationSec", "durationText", "history",
-            "historyCount", "humidity", "lastSeen", "nodeId", "online",
-            "reason", "status", "temperature", "time",
+            "abnormalCount", "agree", "durationSec", "durationText", "history",
+            "historyCount", "humidity", "lastSeen", "mlLabel", "mlText",
+            "nodeId", "offlineSec", "offlineText", "online", "reason",
+            "status", "temperature", "time",
         ])
+        # D4 的 core 心跳块。staleAfterSec 由 core 算好（心跳的 3 倍），
+        # 三个前端照读 —— 各自写一遍就是三个答案。
+        self.assertEqual(sorted(snapshot["core"]), ["epochMs", "online", "staleAfterSec"])
+        self.assertIs(snapshot["core"]["online"], True)
+        self.assertEqual(snapshot["core"]["staleAfterSec"],
+                         c.cfg["stateHeartbeatSec"] * 3)
+        # epochMs 和 time 说的是**同一时刻**，两个都给：秒串给人看、
+        # 毫秒给前端跟自己的表比。差超过一秒就说明有人只更新了其中一个。
+        self.assertLess(abs(snapshot["core"]["epochMs"] / 1000 - NOW), 1.0)
         self.assertEqual([n["nodeId"] for n in snapshot["nodes"]], list(NODES))
         self.assertEqual(snapshot["counters"],
                          {"received": 1, "rejected": 0, "statusMismatch": 0,
                           "retainedCleared": 0, "commands": 0,
                           "commandRejected": 0})
-        # history 里每条只留画图要用的四个字段（完整报文里的 seq / source
-        # 不进快照 —— 它是每个周期都要重发一遍的）。
+        # history 里每条只留画图和对照表要用的几个字段（完整报文里的 seq /
+        # source 不进快照 —— 它是每个周期都要重发一遍的）。Phase8 D5 那三格
+        # （mlLabel / mlText / agree）在**每一行**上，看板那张实时对照表
+        # 就是靠它们画的；这三个没配模型时都是 None，而 None 是「没判」。
         by_id = {n["nodeId"]: n for n in snapshot["nodes"]}
         self.assertEqual(by_id["dorm-b"]["history"], [{
             "time": "2026-09-22 20:30:00", "temperature": 31.0,
             "humidity": 78.0, "status": "偏热",
+            "mlLabel": None, "mlText": None, "agree": None,
         }])
+        # 节点级那三格：没判过就是 None —— **不是** false。
+        # 前端判的是 `mlLabel != null`，写成 false 的话「没判」会被画成
+        # 「判成不一致」，整张表的红字全亮起来。
+        self.assertEqual(
+            [by_id["dorm-b"]["mlLabel"], by_id["dorm-b"]["mlText"],
+             by_id["dorm-b"]["agree"]], [None, None, None])
         # 一条数据都还没收到的节点：history 是空表而**不是**缺失。
         # 缺失的话前端 `node.history.length` 会当场抛，页面停在半路。
         self.assertEqual(by_id["dorm-a"]["history"], [])
@@ -982,6 +1040,94 @@ class TestSnapshot(unittest.TestCase):
         entry = [n for n in client.state_payloads()[-1]["nodes"] if n["nodeId"] == "dorm-b"][0]
         self.assertEqual(entry["durationText"], rules.format_duration(420))
         self.assertEqual(entry["durationText"], "7 分钟")
+
+
+class TestHeartbeat(unittest.TestCase):
+    """Phase9 D4：快照心跳。
+
+    它存在的唯一理由是让「这一帧有多旧」变成一句能读的话 —— 快照是 retained
+    的，core 死了 broker 手里那份还在，后开的页面照样收得到。所以这里盯两件事：
+      1) 安静的时候心跳**真的**在发（不然页面会把安静读成「core 没了」）
+      2) 没到点的时候**不发**（不然这条 topic 就成了每秒一条的噪音）
+    """
+
+    def test_quiet_system_still_gets_a_fresh_frame(self):
+        """一条遥测都没有的时候，快照也必须一直在更新。
+
+        make_core() 之后一帧都没发过，_last_state_at 是 None —— 第一次
+        heartbeat 就该发。之后每心跳间隔再发一次。
+        """
+        c, client = make_core()
+        self.assertEqual(client.state_payloads(), [], "造出来的时候不该自己发")
+
+        self.assertTrue(c.heartbeat(NOW), "第一拍就该发（_last_state_at 还是 None）")
+        self.assertEqual(len(client.state_payloads()), 1)
+
+        # 心跳间隔是 5 秒：4 秒不到点，不发
+        self.assertFalse(c.heartbeat(NOW + 4))
+        self.assertEqual(len(client.state_payloads()), 1)
+
+        # 到点就发 —— 内容一个字没变也发，这正是心跳的意义
+        self.assertTrue(c.heartbeat(NOW + 5))
+        self.assertEqual(len(client.state_payloads()), 2)
+
+    def test_heartbeat_off_says_so_instead_of_guessing(self):
+        """stateHeartbeatSec=0 = 关掉心跳：不发，而且快照里如实写 null。
+
+        null 的含义是「判不了」，**不是**「永远不算久」。页面必须把这两件事
+        分开说 —— 随便挑个数猜的话，配置写的和页面说的就成了两回事。
+        """
+        c, client = make_core(stateHeartbeatSec=0)
+        self.assertFalse(c.heartbeat(NOW))
+        self.assertFalse(c.heartbeat(NOW + 3600))
+        self.assertEqual(client.state_payloads(), [])
+        self.assertIsNone(c.snapshot(NOW)["core"]["staleAfterSec"])
+        self.assertIsNone(c.state_stale_after_sec)
+
+    def test_stale_threshold_is_three_beats(self):
+        """判定阈值是心跳的 3 倍：连着三次没来才说话。
+
+        一次网络抖动、一次进程被换出去，都不该把整页变成「core 没声了」。
+        """
+        for heartbeat, expected in ((5, 15), (1, 3), (30, 90)):
+            with self.subTest(stateHeartbeatSec=heartbeat):
+                c, _ = make_core(stateHeartbeatSec=heartbeat)
+                self.assertEqual(c.state_stale_after_sec, expected)
+                self.assertEqual(c.snapshot(NOW)["core"]["staleAfterSec"], expected)
+
+    def test_a_normal_publish_also_resets_the_heartbeat_clock(self):
+        """心跳的计时器挂在**发快照**这个动作上，不是挂在 heartbeat() 上。
+
+        收到遥测也会发快照（内容变了）。那一刻要是不重置计时器，
+        一次正常收数之后的几秒里心跳会白多一条 —— 多发是看不出来的，
+        所以只能在这里钉住。
+        """
+        c, client = make_core()
+        c.handle_message(topic_of("dorm-b"), payload_text("dorm-b"), now_wall=NOW)
+        self.assertEqual(len(client.state_payloads()), 1)
+
+        self.assertFalse(c.heartbeat(NOW + 4), "刚发过，这一拍不该再发")
+        self.assertTrue(c.heartbeat(NOW + 5))
+
+    def test_epoch_ms_matches_the_frame_time(self):
+        """epochMs 和 time 必须是**同一时刻**的两种写法。
+
+        差开的话，前端拿 epochMs 判「这帧有多旧」，而人拿 time 对时钟，
+        两边说的就不是同一帧了 —— 而且是静默的。
+        """
+        c, _ = make_core()
+        block = c.snapshot(NOW)["core"]
+        self.assertEqual(block["epochMs"], int(round(NOW * 1000)))
+        self.assertEqual(c.snapshot(NOW)["time"], core.format_time(NOW))
+
+    def test_heartbeat_text_speaks_for_both_states(self):
+        """启动日志和 --check 共用一句话。两处各写一遍的话，迟早有一处忘了改，
+        屏幕上一条说「心跳 5s」、另一条说「关掉了」，谁也不知道信哪个。
+        """
+        on = core.heartbeat_text(make_core()[0].cfg)
+        self.assertIn("5s", on)
+        self.assertIn("15s", on)
+        self.assertIn("关", core.heartbeat_text(make_core(stateHeartbeatSec=0)[0].cfg))
 
 
 class TestFocusCommand(unittest.TestCase):
@@ -1799,6 +1945,9 @@ class TestConfigChecks(unittest.TestCase):
     def test_field_type_problems(self):
         cases = [
             ("offlineTimeoutSec", 0), ("offlineTimeoutSec", "30"),
+            # D4 的心跳：0 是**合法**的（关掉心跳），所以这一条只钉负数和非整数。
+            ("stateHeartbeatSec", -1), ("stateHeartbeatSec", "5"),
+            ("stateHeartbeatSec", True), ("stateHeartbeatSec", None),
             ("recoverConsecutiveNormal", True), ("historyMax", -1),
             ("nodes", []), ("nodes", "dorm-a"), ("nodes", ["dorm-a", "dorm-a"]),
             ("thresholds", []), ("priority", {}),

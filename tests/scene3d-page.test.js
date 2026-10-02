@@ -219,6 +219,10 @@ fs.writeFileSync(path.join(threeDir, 'page.mjs'), pageSrc, 'utf8');
 const extra = {
   conn: makeEl('p'),
   'conn-text': makeEl('span'),
+  /* Phase9 D4：3D 页也有一条 core 心跳提示。少了它 getElementById 返回 null，
+     renderCoreHint() 会在「Cannot set properties of null」上把整个页面脚本打断 ——
+     而那是模块顶层调用，断在哪一步后面全不跑，看着像「3D 页整块坏了」。 */
+  'core-hint': makeEl('p'),
   readout: makeEl('p'),
   'readout-reason': makeEl('p'),
   'cmd-note': makeEl('p'),
@@ -318,7 +322,15 @@ let client = null;
       events: s.events === undefined ? { summary: {}, dropped: 0, events: [] } : s.events,
       rejects: s.rejects === undefined ? { total: 0, items: [], reasons: {} } : s.rejects,
       counters: s.counters === undefined ? {} : s.counters,
+      /* Phase9 D4：core 心跳那一块。不给（null）就落进「这份快照是旧 core 发的」
+         那一档 —— 正是这一页在过渡期的真实处境。 */
+      core: s.core === undefined ? null : s.core,
     };
+  }
+
+  /** 一帧「core 刚发出来的」快照。 */
+  function liveCore() {
+    return { online: true, epochMs: Date.now(), staleAfterSec: 15 };
   }
 
   /** 快照里的一格节点。history 给空数组 —— trendOf 只认两条以上。 */
@@ -433,6 +445,40 @@ let client = null;
   check('读数条下面那行写的是 core 给的理由',
     env.extra['readout-reason'].textContent === '偏热已持续 20 分钟',
     env.extra['readout-reason'].textContent);
+
+  /* ---- core 心跳（Phase9 D4）----
+     3D 这一屏最容易被 retained 快照骗：core 死了，broker 把最后一帧留着，
+     页面打开照样收到、房间照样亮着颜色 —— 看着完全「正常」。
+     所以这条提示必须写出来，而且颜色变了不算，字得说清楚。 */
+  deliver(STATE_TOPIC, mkSnapshot({ core: liveCore(), nodes: [mkNode('dorm-a', STATUS.HOT, 31, 60)] }));
+  check('★ core 在发帧时说「在线」',
+    env.extra['core-hint'].textContent.indexOf('core 在线') === 0,
+    env.extra['core-hint'].textContent);
+  check('★ 那行不带 is-stale（只有过期才染色）',
+    env.extra['core-hint'].className.indexOf('is-stale') < 0,
+    env.extra['core-hint'].className);
+
+  deliver(STATE_TOPIC, mkSnapshot({
+    core: { online: true, epochMs: Date.now() - 60000, staleAfterSec: 15 },
+    nodes: [mkNode('dorm-a', STATUS.HOT, 31, 60)],
+  }));
+  check('★★ core 停了一分钟，那行就说「core 没声了」',
+    env.extra['core-hint'].textContent.indexOf('core 没声了') === 0,
+    env.extra['core-hint'].textContent);
+  check('★ 并且带上 is-stale 那一档配色',
+    env.extra['core-hint'].className.indexOf('is-stale') >= 0,
+    env.extra['core-hint'].className);
+  check('★ 说清楚屏幕上的定格是怎么回事（不是「数据有误」）',
+    env.extra['core-hint'].textContent.indexOf('停在那一刻') >= 0,
+    env.extra['core-hint'].textContent);
+  check('★ 这时房间照样在那儿、颜色也没变（3D 这屏不会自己把房间熄掉）',
+    floorHex('dorm-a') === LOOK[STATUS.HOT].floor, floorHex('dorm-a'));
+
+  /* 老 core 发的快照里没有 core 这一块 —— 如实说「判不了」，不猜。 */
+  deliver(STATE_TOPIC, mkSnapshot({ nodes: [mkNode('dorm-a', STATUS.HOT, 31, 60)] }));
+  check('★ 快照里没有心跳那一块时点明「core 是旧版本？」，不猜死活',
+    env.extra['core-hint'].textContent.indexOf('旧版本') >= 0,
+    env.extra['core-hint'].textContent);
 
   /* 节点名单来自快照 —— 不是页面里写死三个名字。 */
   deliver(STATE_TOPIC, mkSnapshot({

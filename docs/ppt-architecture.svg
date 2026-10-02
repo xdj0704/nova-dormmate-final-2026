@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DormMate Final · PPT 第 3 页配图：四个进程，一个 Broker，三条链
+
+  配色：三条链是三个并列的类别，取 #2a78d6（蓝）/ #c9407f（品红）/ #8a6bd8（紫）。
+  这三个值跑过 dataviz 的 validate_palette.js，亮度带、色度下限、色觉模拟分离度、
+  与底色的对比度全部通过（最差相邻对 protan ΔE 14.3，门槛是 8）。
+  状态色（正常绿 / 偏冷黄 / 偏湿橙 / 偏热红）是保留色，在这张图里只给「红线」那一块用了一次。
+
+  web/ 那一条要如实画：它订阅的是 state 加遥测两条，而且自己算状态。
+  这不是没改干净，是 M1 那版单节点页，底下那行小字专门说明。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" width="1440" height="900"
+     role="img" aria-label="DormMate 系统架构：实时链、指令链、档案链">
+
+  <defs>
+    <style>
+      .sans  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                            "PingFang SC", "Microsoft YaHei", sans-serif; }
+      .mono  { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .t     { fill: #0b0b0b; }
+      .t2    { fill: #52514e; }
+      .t3    { fill: #898781; }
+      .blue  { fill: #1c5bab; }
+      .mag   { fill: #a33066; }
+      .vio   { fill: #5b3fa8; }
+      .amber { fill: #8a5300; }
+      .red   { fill: #d03b3b; }
+      .bx    { fill: #fcfcfb; stroke: #e1e0d9; stroke-width: 1.5; }
+      .box-b { fill: #f7fafe; stroke: #cfe0f5; stroke-width: 1.5; }
+      .box-m { fill: #fdf6f9; stroke: #f3cede; stroke-width: 1.5; }
+      .box-v { fill: #fbf9fe; stroke: #ded3f5; stroke-width: 1.5; }
+      .ln    { stroke: #2a78d6; stroke-width: 2; fill: none; }
+      .ln-m  { stroke: #c9407f; stroke-width: 2; fill: none; }
+      .ln-v  { stroke: #8a6bd8; stroke-width: 2; fill: none; stroke-dasharray: 7 5; }
+      .ln-a  { stroke: #898781; stroke-width: 1.6; fill: none; stroke-dasharray: 3 4; }
+    </style>
+    <marker id="ar-b" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2a78d6"/>
+    </marker>
+    <marker id="ar-m" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c9407f"/>
+    </marker>
+    <marker id="ar-v" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a6bd8"/>
+    </marker>
+    <marker id="ar-a" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#898781"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="900" fill="#f9f9f7"/>
+
+  <!-- ============================ 标题 ============================ -->
+  <text class="sans t" x="32" y="46" font-size="29" font-weight="700">
+    四个进程，一个 Broker，三条链
+  </text>
+  <text class="sans t2" x="32" y="76" font-size="15">
+    上行的是「读数」，下行的是「判断」 —— dashboard / mobile / three 一条阈值都不认识，只订阅 dormmate/v1/state
+  </text>
+
+  <!-- ======================== 链 ① 实时链 ========================= -->
+  <rect x="32" y="100" width="1376" height="400" rx="14" fill="#fcfcfb" stroke="#e1e0d9" stroke-width="1.5"/>
+  <rect x="52" y="86" width="256" height="28" rx="14" fill="#e8f0fc" stroke="#2a78d6" stroke-width="1.5"/>
+  <text class="sans blue" x="180" y="105" font-size="14" font-weight="700" text-anchor="middle">
+    链 ① 实时链 · 数据往上走
+  </text>
+
+  <!-- 采集端 -->
+  <rect class="box-b" x="60" y="180" width="180" height="170" rx="10"/>
+  <text class="sans t" x="150" y="208" font-size="15" font-weight="700" text-anchor="middle">采集端 / 发布者</text>
+  <line x1="76" y1="220" x2="224" y2="220" stroke="#cfe0f5" stroke-width="1"/>
+  <text class="mono t2" x="150" y="246" font-size="11.5" text-anchor="middle">simulator/simulator.py</text>
+  <text class="mono t2" x="150" y="268" font-size="11.5" text-anchor="middle">simulator/publish_one.py</text>
+  <text class="mono t2" x="150" y="290" font-size="11.5" text-anchor="middle">simulator/replay_samples.py</text>
+  <text class="mono t2" x="150" y="312" font-size="11.5" text-anchor="middle">剧本回放（d2_* / d3_*）</text>
+  <text class="sans t3"  x="150" y="336" font-size="11" text-anchor="middle">三间宿舍，各发各的</text>
+
+  <path class="ln" d="M 240 265 L 288 265" marker-end="url(#ar-b)"/>
+  <text class="sans t2" x="264" y="253" font-size="11.5" text-anchor="middle">publish</text>
+
+  <!-- Broker -->
+  <rect class="box-b" x="292" y="170" width="186" height="190" rx="10"/>
+  <text class="sans t" x="385" y="198" font-size="15" font-weight="700" text-anchor="middle">Mosquitto 2.1.2</text>
+  <text class="sans t2" x="385" y="219" font-size="12" text-anchor="middle">TCP 1883　·　retained：是</text>
+  <rect x="304" y="234" width="162" height="46" rx="6" fill="#ffffff" stroke="#cfe0f5" stroke-width="1.5"/>
+  <text class="mono blue" x="385" y="254" font-size="11" text-anchor="middle">dormmate/v1/nodes/</text>
+  <text class="mono blue" x="385" y="271" font-size="11" text-anchor="middle">+/telemetry</text>
+  <text class="sans t3" x="385" y="300" font-size="11" text-anchor="middle">本机一个 Broker，没有服务器、</text>
+  <text class="sans t3" x="385" y="316" font-size="11" text-anchor="middle">没有数据库、前端也不打包</text>
+  <text class="sans t3" x="385" y="342" font-size="11" text-anchor="middle">谁都能往这条 topic 发布</text>
+
+  <path class="ln" d="M 478 265 L 526 265" marker-end="url(#ar-b)"/>
+  <text class="sans t2" x="502" y="253" font-size="11.5" text-anchor="middle">订阅</text>
+
+  <!-- core.py -->
+  <rect x="530" y="150" width="224" height="230" rx="10" fill="#eef4fc" stroke="#2a78d6" stroke-width="2"/>
+  <text class="sans t" x="642" y="180" font-size="18" font-weight="700" text-anchor="middle">core.py</text>
+  <text class="sans blue" x="642" y="199" font-size="12.5" text-anchor="middle">业务大脑 · 唯一判状态的地方</text>
+  <line x1="548" y1="212" x2="736" y2="212" stroke="#cfe0f5" stroke-width="1"/>
+  <text class="sans t2" x="552" y="238" font-size="12.5">1　校验（九道判据）</text>
+  <text class="sans t2" x="552" y="262" font-size="12.5">2　判状态（统一规则）</text>
+  <text class="sans t2" x="552" y="286" font-size="12.5">3　存历史（按节点）</text>
+  <text class="sans t2" x="552" y="310" font-size="12.5">4　算优先关注</text>
+  <text class="sans t2" x="552" y="334" font-size="12.5">5　事件状态机</text>
+  <text class="sans t2" x="552" y="358" font-size="12.5">6　ML 判断</text>
+
+  <path class="ln" d="M 754 265 L 822 265" marker-end="url(#ar-b)"/>
+  <text class="sans t2" x="788" y="248" font-size="11.5" text-anchor="middle">publish</text>
+  <text class="sans t2" x="788" y="263" font-size="11.5" text-anchor="middle">retained</text>
+
+  <!-- 快照 -->
+  <rect x="826" y="177" width="184" height="176" rx="10" fill="#eef4fc" stroke="#2a78d6" stroke-width="2"/>
+  <text class="mono blue" x="918" y="206" font-size="12.5" font-weight="700" text-anchor="middle">dormmate/v1/state</text>
+  <text class="sans t" x="918" y="232" font-size="14" font-weight="700" text-anchor="middle">全局快照</text>
+  <text class="sans t2" x="918" y="253" font-size="12" text-anchor="middle">v2　·　retained</text>
+  <line x1="842" y1="266" x2="994" y2="266" stroke="#cfe0f5" stroke-width="1"/>
+  <text class="sans t2" x="918" y="290" font-size="12" text-anchor="middle">唯一的下行数据</text>
+  <text class="sans t2" x="918" y="311" font-size="12" text-anchor="middle">三个页面只订这一条</text>
+  <text class="sans amber" x="918" y="335" font-size="11" text-anchor="middle">web/ 是例外，见下方</text>
+
+  <path class="ln" d="M 1010 265 L 1082 265" marker-end="url(#ar-b)"/>
+  <text class="sans t2" x="1046" y="233" font-size="11" text-anchor="middle">WebSocket</text>
+  <text class="sans t2" x="1046" y="248" font-size="11" text-anchor="middle">9001</text>
+
+  <!-- 四个前端 -->
+  <rect class="bx" x="1086" y="134" width="306" height="262" rx="10"/>
+  <text class="sans t" x="1100" y="160" font-size="14" font-weight="700">四个前端</text>
+  <text class="sans t3" x="1378" y="160" font-size="11" text-anchor="end">浏览器唯一入口就是 9001</text>
+
+  <rect x="1100" y="176" width="278" height="46" rx="8" fill="#f7fafe" stroke="#cfe0f5" stroke-width="1.5"/>
+  <text class="mono t" x="1112" y="196" font-size="12.5" font-weight="700">dashboard/</text>
+  <text class="sans t2" x="1112" y="212" font-size="11">卡片 + 趋势图 + 事件表 + 3D + 语音</text>
+  <rect x="1296" y="189" width="74" height="20" rx="10" fill="#e8f0fc" stroke="#2a78d6" stroke-width="1"/>
+  <text class="sans blue" x="1333" y="203" font-size="10.5" text-anchor="middle">订 state</text>
+
+  <rect x="1100" y="228" width="278" height="46" rx="8" fill="#f7fafe" stroke="#cfe0f5" stroke-width="1.5"/>
+  <text class="mono t" x="1112" y="248" font-size="12.5" font-weight="700">mobile/</text>
+  <text class="sans t2" x="1112" y="264" font-size="11">谁该管 / 点一下看他 / 开始处理</text>
+  <rect x="1296" y="241" width="74" height="20" rx="10" fill="#e8f0fc" stroke="#2a78d6" stroke-width="1"/>
+  <text class="sans blue" x="1333" y="255" font-size="10.5" text-anchor="middle">订 state</text>
+
+  <rect x="1100" y="280" width="278" height="46" rx="8" fill="#f7fafe" stroke="#cfe0f5" stroke-width="1.5"/>
+  <text class="mono t" x="1112" y="300" font-size="12.5" font-weight="700">three/</text>
+  <text class="sans t2" x="1112" y="316" font-size="11">三间房并排，「该看哪间」画面自己说</text>
+  <rect x="1296" y="293" width="74" height="20" rx="10" fill="#e8f0fc" stroke="#2a78d6" stroke-width="1"/>
+  <text class="sans blue" x="1333" y="307" font-size="10.5" text-anchor="middle">订 state</text>
+
+  <rect x="1100" y="332" width="278" height="46" rx="8" fill="#f6f5f2" stroke="#898781" stroke-width="1.5"
+        stroke-dasharray="5 4"/>
+  <text class="mono t" x="1112" y="352" font-size="12.5" font-weight="700">web/</text>
+  <text class="sans t2" x="1112" y="368" font-size="11">M1 单节点页 · 自己算状态</text>
+  <rect x="1276" y="345" width="94" height="20" rx="10" fill="#ecebe7" stroke="#898781" stroke-width="1"/>
+  <text class="sans t2" x="1323" y="359" font-size="10.5" text-anchor="middle">state + 遥测</text>
+
+  <!-- web/ 额外订阅遥测那条线（如实画出来；这是标注，不是第四条链，所以用虚线灰） -->
+  <path class="ln-a" d="M 380 360 L 380 436 L 1249 436 L 1249 378" marker-end="url(#ar-a)"/>
+  <rect x="632" y="421" width="370" height="30" rx="6" fill="#fcfcfb"/>
+  <text class="sans t3" x="817" y="441" font-size="11.5" text-anchor="middle">
+    web/ 另外还订了这一条：dormmate/v1/nodes/+/telemetry
+  </text>
+
+  <text class="sans t3" x="60" y="478" font-size="11.5">
+    节点名单不写在前端任何一个字面量里 —— 订阅用的是通配符，来几个节点画几张卡；
+    遥测是 retained 的，页面一订上就有数，刷新不用等下一轮。
+  </text>
+
+  <!-- ======================== 链 ② 指令链 ========================= -->
+  <rect x="32" y="522" width="1376" height="168" rx="14" fill="#fcfcfb" stroke="#e1e0d9" stroke-width="1.5"/>
+  <rect x="52" y="508" width="266" height="28" rx="14" fill="#fbe9f1" stroke="#c9407f" stroke-width="1.5"/>
+  <text class="sans mag" x="185" y="527" font-size="14" font-weight="700" text-anchor="middle">
+    链 ② 指令链 · 反向：人 → core
+  </text>
+
+  <rect class="box-m" x="60" y="556" width="232" height="104" rx="10"/>
+  <text class="sans t" x="176" y="582" font-size="13.5" font-weight="700" text-anchor="middle">指令发起方</text>
+  <line x1="76" y1="592" x2="276" y2="592" stroke="#f3cede" stroke-width="1"/>
+  <text class="sans t2" x="176" y="614" font-size="11.5" text-anchor="middle">前端按钮 / 语音（E2）</text>
+  <text class="mono t2" x="176" y="636" font-size="11" text-anchor="middle">send_cmd.py · 剧本 handle 帧</text>
+  <text class="sans t3" x="176" y="653" font-size="10.5" text-anchor="middle">三端 + 手动 + 剧本</text>
+
+  <path class="ln-m" d="M 292 608 L 336 608" marker-end="url(#ar-m)"/>
+  <text class="sans t2" x="314" y="598" font-size="11" text-anchor="middle">publish</text>
+
+  <rect class="box-m" x="336" y="548" width="296" height="120" rx="10"/>
+  <text class="mono mag" x="484" y="576" font-size="13.5" font-weight="700" text-anchor="middle">dormmate/v1/cmd</text>
+  <text class="sans t2" x="484" y="600" font-size="12" text-anchor="middle">retained：否</text>
+  <text class="sans t3" x="484" y="624" font-size="11" text-anchor="middle">指令是一次性的 —— 留在 broker 上，</text>
+  <text class="sans t3" x="484" y="641" font-size="11" text-anchor="middle">下一次起 core 会凭空把事件推成「处理中」</text>
+  <text class="mono t3" x="484" y="660" font-size="10" text-anchor="middle">
+    {"nodeId":"dorm-b","action":"handle","source":"dashboard"}
+  </text>
+
+  <path class="ln-m" d="M 632 608 L 676 608" marker-end="url(#ar-m)"/>
+
+  <rect class="bx" x="676" y="548" width="238" height="120" rx="10"/>
+  <text class="sans t" x="795" y="576" font-size="13" font-weight="700" text-anchor="middle">core 校验 → apply_action()</text>
+  <line x1="692" y1="586" x2="898" y2="586" stroke="#e1e0d9" stroke-width="1"/>
+  <text class="sans t2" x="795" y="610" font-size="12.5" text-anchor="middle">只把事件推成 HANDLING</text>
+  <text class="sans red" x="795" y="636" font-size="14" font-weight="700" text-anchor="middle">不判恢复</text>
+  <text class="sans t3" x="795" y="657" font-size="10.5" text-anchor="middle">事件层不自己定门槛</text>
+
+  <path class="ln-m" d="M 914 608 L 958 608" marker-end="url(#ar-m)"/>
+
+  <rect x="958" y="548" width="434" height="120" rx="10" fill="#fdf0f0" stroke="#d03b3b" stroke-width="2"
+        stroke-dasharray="7 5"/>
+  <text class="sans red" x="1175" y="578" font-size="14.5" font-weight="700" text-anchor="middle">
+    红线：按一下按钮，不能让事件变成「已恢复」
+  </text>
+  <text class="sans t" x="1175" y="604" font-size="13" text-anchor="middle">
+    恢复只能由<tspan font-weight="700">后来收到的数据</tspan>判出来
+  </text>
+  <line x1="978" y1="616" x2="1372" y2="616" stroke="#f3c9c9" stroke-width="1"/>
+  <text class="sans t2" x="1175" y="636" font-size="11.5" text-anchor="middle">
+    结构上成立：Core.handle_command() 的函数体里一次都不出现 self.nodes
+  </text>
+  <text class="sans t2" x="1175" y="656" font-size="11.5" text-anchor="middle">
+    event.state = RECOVERED 只出现在 _close_recovered()，而它只被 observe() 调
+  </text>
+
+  <!-- ======================== 链 ③ 档案链 ========================= -->
+  <rect x="32" y="712" width="1376" height="156" rx="14" fill="#fcfcfb" stroke="#e1e0d9" stroke-width="1.5"/>
+  <rect x="52" y="698" width="300" height="28" rx="14" fill="#f2edfc" stroke="#8a6bd8" stroke-width="1.5"/>
+  <text class="sans vio" x="202" y="717" font-size="14" font-weight="700" text-anchor="middle">
+    链 ③ 档案链 · 事后（不参与实时）
+  </text>
+
+  <rect class="box-v" x="60" y="770" width="126" height="56" rx="10"/>
+  <text class="mono t" x="123" y="804" font-size="13.5" font-weight="700" text-anchor="middle">core.py</text>
+
+  <path class="ln-v" d="M 186 798 L 232 798" marker-end="url(#ar-v)"/>
+
+  <rect class="box-v" x="232" y="744" width="256" height="44" rx="8"/>
+  <text class="mono t" x="244" y="762" font-size="12" font-weight="700">data/history.csv</text>
+  <text class="sans t3" x="244" y="779" font-size="10.5">每节点每一条读数一行（十列）</text>
+
+  <rect class="box-v" x="232" y="808" width="256" height="44" rx="8"/>
+  <text class="mono t" x="244" y="826" font-size="12" font-weight="700">data/events.json</text>
+  <text class="sans t3" x="244" y="843" font-size="10.5">事件案卷：验证数据 + 处理前后快照</text>
+
+  <path class="ln-v" d="M 488 766 L 520 766 L 520 830 L 488 830"/>
+  <path class="ln-v" d="M 520 798 L 556 798" marker-end="url(#ar-v)"/>
+
+  <rect class="box-v" x="556" y="744" width="272" height="108" rx="10"/>
+  <text class="mono t" x="692" y="770" font-size="13.5" font-weight="700" text-anchor="middle">analysis/</text>
+  <line x1="572" y1="780" x2="812" y2="780" stroke="#ded3f5" stroke-width="1"/>
+  <text class="mono t2" x="692" y="800" font-size="11" text-anchor="middle">make_report.py → 单文件 HTML</text>
+  <text class="mono t2" x="692" y="820" font-size="11" text-anchor="middle">train_iforest.py → models/*.joblib</text>
+  <text class="mono t2" x="692" y="840" font-size="11" text-anchor="middle">ml.py → report/ml_result.json</text>
+
+  <path class="ln-v" d="M 828 798 L 872 798" marker-end="url(#ar-v)"/>
+
+  <rect class="box-v" x="872" y="744" width="520" height="108" rx="10"/>
+  <text class="sans t" x="1132" y="770" font-size="13.5" font-weight="700" text-anchor="middle">产物：全程没有手工改过一个数</text>
+  <line x1="888" y1="780" x2="1376" y2="780" stroke="#ded3f5" stroke-width="1"/>
+  <text class="mono t2" x="1132" y="802" font-size="11.5" text-anchor="middle">
+    report/history-report.html（单文件，双击就开）
+  </text>
+  <text class="mono t2" x="1132" y="824" font-size="11.5" text-anchor="middle">
+    models/&lt;nodeId&gt;.joblib + models/MANIFEST.json
+  </text>
+  <text class="sans t3" x="1132" y="845" font-size="10.5" text-anchor="middle">
+    报告里每一格都由脚本从输入现算 —— 要改就改输入再重跑
+  </text>
+
+  <!-- ============================ 页脚 ============================ -->
+  <text class="sans t3" x="32" y="890" font-size="11.5">
+    箭头的方向就是数据的方向。三条链共用一个 Broker、一个 core.py ——
+    上行的是读数，下行的是判断，事后那条链只是把已经发生过的事读出来。
+  </text>
+
+</svg>

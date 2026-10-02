@@ -13,3 +13,8 @@ matplotlib>=3.8
 # 没装的话 analysis/ml.py 会打印一句「没装 scikit-learn」并告诉你这条命令，
 # 不会甩一串 traceback —— 其余功能（报表、摘要、看图）也都不受影响。
 scikit-learn>=1.5
+# Phase8 D5：analysis/train_iforest.py 往 models/ 存模型时直接用它（joblib.dump
+# / joblib.load）。scikit-learn 本来就依赖它、装 sklearn 时一定会带上，这里显式
+# 写一行是因为**我们直接 import 它** —— 直接用的依赖就该出现在这份清单里，
+# 不能靠「另一个包碰巧帮我装了」。
+joblib>=1.3

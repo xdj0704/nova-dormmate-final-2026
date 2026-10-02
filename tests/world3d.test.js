@@ -436,6 +436,33 @@ let stub = null;
     check('撤了处理中又藏回去（不是只加不减）',
       handle.rooms['dorm-c'].tagHandling.hidden === true);
 
+    /* ---- 标签上那句「已离线」（Phase9 D4）----
+       3D 这一屏没有说话的地方：房间还好好站在那儿，只是这个宿舍不再发数据了。
+       光靠外观分不出「没人报数据」和「数据就是这样」，所以得有字。 */
+    const offTag = handle.rooms['dorm-a'].tagOffline;
+    check('平时「已离线」那格是藏着的', offTag.hidden === true);
+    check('而且那格是空的（藏着的格子里留上一帧的字，一不小心就露出来）',
+      offTag.textContent === '', offTag.textContent);
+
+    handle.setReading('dorm-a', { temperature: 31, humidity: 60, status: STATUS.HOT,
+      online: false, offlineText: '3 分钟' });
+    check('★ 离线时露出来', offTag.hidden === false);
+    check('★ 那格的字带着停了多久（core 给的 offlineText，不在这边算）',
+      offTag.textContent === '已离线 3 分钟', offTag.textContent);
+
+    /* 老 core 配新页面：快照里没有 offlineText 这一格，退回四个字，
+       不写「已离线 undefined」。 */
+    handle.setReading('dorm-a', { temperature: 31, humidity: 60, status: STATUS.HOT,
+      online: false });
+    check('★ core 没给时长时只写「已离线」，不写 undefined',
+      offTag.textContent === '已离线', offTag.textContent);
+
+    handle.setReading('dorm-a', { temperature: 31, humidity: 60, status: STATUS.HOT,
+      online: true });
+    check('★ 恢复之后又藏回去（不是只加不减）', offTag.hidden === true);
+    check('而且字清掉了（不靠 hidden 留着上一帧的话，取消隐藏就露出旧话）',
+      offTag.textContent === '', offTag.textContent);
+
     let warned = captureWarn(function () {
       check('NODE_MAP 里没有的节点，setHandling 返回 false',
         handle.setHandling('dorm-z', true) === false);
@@ -484,9 +511,9 @@ let stub = null;
         handle.rooms[id].room.group.children.filter((c) => c.isCSS2DObject)
           .map((c) => c.position.y).join(','));
       check(id + ' 的标签元素类名是 scene-tag', el.className === 'scene-tag', el.className);
-      check(id + ' 的标签有「名字 / 读数 / 状态 / 处理中」四格',
+      check(id + ' 的标签有「名字 / 读数 / 状态 / 处理中 / 已离线」五格',
         el.children.map((c) => c.className).join(',')
-        === 'tag-node,tag-read,tag-status,tag-handling',
+        === 'tag-node,tag-read,tag-status,tag-handling,tag-offline',
         el.children.map((c) => c.className).join(','));
       check(id + ' 那张标签上写着节点名', el.children[0].textContent === id,
         el.children[0].textContent);

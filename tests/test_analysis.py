@@ -18,6 +18,7 @@ import warnings
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -458,6 +459,64 @@ class TestMain(unittest.TestCase):
 
         self.assertFalse(ml_json.exists())
         self.assertIn("ML 辅助判断", text)           # 文字照打，只是不落文件
+
+    def test_报告里有ML的局限这一节(self):
+        folder = Path(tempfile.mkdtemp())
+        note = folder / "ml_note.txt"
+        note.write_text("8 条训练太少，只覆盖了夜里那几个小时。\n",
+                        encoding="utf-8", newline="")
+        report = folder / "report.html"
+        originals = (analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON,
+                     analysis.DEFAULT_ML_NOTE)
+        analysis.DEFAULT_REPORT_HTML = report
+        analysis.DEFAULT_ML_JSON = folder / "ml_result.json"
+        analysis.DEFAULT_ML_NOTE = note
+        try:
+            text = capture(analysis.main, [str(analysis.DEFAULT_CSV), "--no-plot"])
+        finally:
+            (analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON,
+             analysis.DEFAULT_ML_NOTE) = originals
+
+        html = report.read_text(encoding="utf-8")
+        self.assertIn("ML 的局限", html)
+        self.assertIn("8 条训练太少，只覆盖了夜里那几个小时。", html)
+        # 排在 ML 那一段后面：先说这张表算出了什么，再说这套算法哪里靠不住
+        self.assertLess(html.index("ML 异常分析"), html.index("ML 的局限"))
+        self.assertIn("ML 的局限：已放进报告", text)
+
+    def test_没写就不出这一节(self):
+        folder = Path(tempfile.mkdtemp())
+        report = folder / "report.html"
+        originals = (analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON,
+                     analysis.DEFAULT_ML_NOTE)
+        analysis.DEFAULT_REPORT_HTML = report
+        analysis.DEFAULT_ML_JSON = folder / "ml_result.json"
+        # 指到一个不存在的路径上：仓库里那份 data/ml_note.txt 写没写都不影响这条
+        analysis.DEFAULT_ML_NOTE = folder / "没有这份.txt"
+        try:
+            text = capture(analysis.main, [str(analysis.DEFAULT_CSV), "--no-plot"])
+        finally:
+            (analysis.DEFAULT_REPORT_HTML, analysis.DEFAULT_ML_JSON,
+             analysis.DEFAULT_ML_NOTE) = originals
+
+        self.assertNotIn("ML 的局限",
+                         report.read_text(encoding="utf-8"))
+        self.assertIn("ML 的局限：没写", text)        # 命令行上照实说一句
+
+    def test_no_report时不读那份说明(self):
+        # --no-report 时既不写报告，也就没有要说明的那一节 —— 不该白读一个文件
+        folder = Path(tempfile.mkdtemp())
+        original = analysis.DEFAULT_REPORT_HTML
+        analysis.DEFAULT_REPORT_HTML = folder / "report.html"
+        try:
+            with mock.patch.object(analysis, "ml_note_section") as spy:
+                text = capture(analysis.main,
+                               [str(analysis.DEFAULT_CSV), "--no-plot", "--no-report"])
+        finally:
+            analysis.DEFAULT_REPORT_HTML = original
+
+        spy.assert_not_called()
+        self.assertNotIn("ML 的局限", text)
 
 
 class TestSampleData(unittest.TestCase):
@@ -1594,6 +1653,93 @@ class TestMlSkipSection(unittest.TestCase):
         html = analysis.ml_skip_section("<b>坏的</b>")["html"]
         self.assertNotIn("<b>", html)
         self.assertIn("&lt;b&gt;", html)
+
+
+class TestMlNoteSection(unittest.TestCase):
+    """「ML 的局限」：data/ml_note.txt 在就放进报告，不在就不出这一节（Step 9-4）。"""
+
+    def write(self, text: str, name: str = "ml_note.txt") -> Path:
+        path = Path(tempfile.mkdtemp()) / name
+        path.write_text(text, encoding="utf-8", newline="")
+        return path
+
+    def test_文件不在时不出这一节(self):
+        # 出一句占位还是不出？——不出。出一个空标题比不出更糟：
+        # 读报告的人会以为报告坏了，而报告其实一个字都不缺。
+        self.assertIsNone(
+            analysis.ml_note_section(Path(tempfile.mkdtemp()) / "没有这份.txt"))
+
+    def test_标题就是ML的局限(self):
+        item = analysis.ml_note_section(self.write("8 条训练太少。\n"))
+        self.assertEqual(item["title"], "ML 的局限")
+        self.assertIn("8 条训练太少。", item["html"])
+
+    def test_写的话原样进正文(self):
+        item = analysis.ml_note_section(self.write("前 8 条都是夜里的读数。\n"))
+        self.assertIn("<p>前 8 条都是夜里的读数。</p>", item["html"])
+
+    def test_空行分段(self):
+        item = analysis.ml_note_section(self.write("第一段。\n\n第二段。\n"))
+        self.assertEqual(item["html"], "<p>第一段。</p>\n<p>第二段。</p>")
+
+    def test_段内换行保留(self):
+        # 一行一条地写，就该一行一条地显示 —— 不保留的话，几条原因会被 HTML
+        # 挤成一整段，读的人分不清到底写了几条
+        item = analysis.ml_note_section(self.write("一是样本少。\n二是只有 dorm-a。\n"))
+        self.assertEqual(item["html"], "<p>一是样本少。<br>二是只有 dorm-a。</p>")
+
+    def test_首尾的空行不留空段落(self):
+        item = analysis.ml_note_section(self.write("\n\n  只有这一段。  \n\n\n"))
+        self.assertEqual(item["html"], "<p>只有这一段。</p>")
+
+    def test_尖括号和与号被转义(self):
+        # 这份是手写的：想说「温度 < 18 ℃」就会写个尖括号进去，不挡的话标签就破了
+        item = analysis.ml_note_section(self.write("<script>alert(1)</script> A & B\n"))
+        html = item["html"]
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn("A &amp; B", html)
+
+    def test_记事本写的CRLF文件也认(self):
+        path = Path(tempfile.mkdtemp()) / "ml_note.txt"
+        path.write_bytes("第一段。\r\n\r\n第二段。\r\n".encode("utf-8"))
+        # 段与段之间不许夹一个空段落 —— \r 没处理干净就会多出一个 <p></p>
+        self.assertEqual(analysis.ml_note_section(path)["html"],
+                         "<p>第一段。</p>\n<p>第二段。</p>")
+
+    def test_空文件说清楚是空的(self):
+        item = analysis.ml_note_section(self.write(""))
+        self.assertIn("是空的", item["html"])
+        self.assertNotIn("<p></p>", item["html"])
+
+    def test_只有空白也说清楚是空的(self):
+        item = analysis.ml_note_section(self.write("  \n\n \t\n"))
+        self.assertIn("是空的", item["html"])
+
+    def test_存成GBK时报人话不抛(self):
+        # 老记事本默认存 GBK，中文 Windows 上很容易踩到。报告不能因为一份
+        # 可选的手写说明就整个出不来，但也不能装作没这回事。
+        path = Path(tempfile.mkdtemp()) / "ml_note.txt"
+        path.write_bytes("前 8 条训练太少。".encode("gbk"))
+        item = analysis.ml_note_section(path)
+        self.assertIn("这一段没读进来", item["html"])
+        self.assertIn("UTF-8", item["html"])
+
+    def test_读不了的时候说人话(self):
+        # 路径上是个目录（权限不够也是这一路）
+        folder = Path(tempfile.mkdtemp()) / "ml_note.txt"
+        folder.mkdir()
+        self.assertIn("这一段没读进来", analysis.ml_note_section(folder)["html"])
+
+    def test_默认路径就是data里那份(self):
+        self.assertEqual(analysis.DEFAULT_ML_NOTE.name, "ml_note.txt")
+        self.assertEqual(analysis.DEFAULT_ML_NOTE.parent.name, "data")
+
+    def test_note_html是纯函数(self):
+        self.assertEqual(analysis.note_html(""), "")
+        self.assertEqual(analysis.note_html("   \n  "), "")
+        self.assertEqual(analysis.note_html("a"), "<p>a</p>")
+        self.assertEqual(analysis.note_html("a\nb"), "<p>a<br>b</p>")
 
 
 class TestMlResultJson(unittest.TestCase):

@@ -658,6 +658,85 @@ export function snapshotSummary(snapshot) {
   return parts.join(' · ');
 }
 
+/* ---------- Phase9 D4：core 还在不在 ---------- */
+
+/**
+ * 秒数 -> 人话。**内部的**，不导出。
+ *
+ * 和 rules.format_duration / logic.js 里那个 fmtDuration 不是一套口径：
+ * 那两个说的是「这段异常持续了多久」（最小单位是分钟，「不到 1 分钟」）。
+ * 这一句说的是「这一帧有多旧」，15 秒和 40 秒的区别正是它要表达的东西 ——
+ * 一律说成「不到 1 分钟」就把要看的那个数抹掉了。
+ */
+function ageText(sec) {
+  const total = Math.floor(sec);
+  if (total < 60) return total + ' 秒';
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return minutes + ' 分钟';
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? hours + ' 小时' : hours + ' 小时 ' + rest + ' 分钟';
+}
+
+/**
+ * core 还在不在。**读的是快照自己带的心跳**（snapshot.core），不是页面的连接状态。
+ *
+ * 【为什么这么判】快照是 retained 的：core 死了之后 broker 手里那一份还在，
+ * 后开的页面照样收得到它，而它长得和活着的时候**一模一样**。所以「收没收到」
+ * 完全不能说明 core 活着 —— 唯一靠得住的判据是「收到的那一帧有多旧」。
+ * 快照里 core.epochMs 就是那一帧的时刻，core.staleAfterSec 是 core 自己算好的
+ * 「多久算久」（它心跳间隔的 3 倍）。
+ *
+ * 【为什么不读 core.online】那一格恒为 true —— 它只可能由活着的 core 写下来，
+ * 死了就没人写了，所以它什么也证明不了（retained 的那一帧会一直带着它）。
+ * 留着它是给「core 状态」这件事一个名字，判活看的是下面两格。
+ *
+ * 【为什么把 nowMs 传进来】不是这边算不出「现在」，是**这个文件不许看时钟**
+ * （tests/logic.test.js 会剥掉注释查源码里的 Date）。传进来之后它就是纯函数，
+ * 「3 秒前的帧算不算旧」这种边界能在测试里直接摆出来，不用等真实的 15 秒。
+ *
+ * @param {Object|null} snapshot 最新那一帧快照
+ * @param {number} nowMs 调用方此刻的毫秒时间戳（Date.now()）
+ * @returns {{state: 'live'|'stale'|'unknown', ageSec: ?number, text: string}}
+ */
+export function coreLiveness(snapshot, nowMs) {
+  const block = snapshot && isObject(snapshot.core) ? snapshot.core : null;
+
+  /* 三种「判不了」，一句话说清楚是哪一种 —— 它们的处置完全不同：
+       没收到过快照   -> 去查 broker / core 起没起
+       快照里没有这块 -> core 太旧了（老版本的 core 配新页面）
+       心跳被关掉了   -> 配置决定的，页面如实说，不猜 */
+  if (!block || !Number.isFinite(block.epochMs)) {
+    return {
+      state: 'unknown', ageSec: null,
+      text: snapshot
+        ? '这一帧快照里没有 core 的心跳（core 是旧版本？）'
+        : '还没有收到 core 的快照',
+    };
+  }
+  if (!Number.isFinite(block.staleAfterSec)) {
+    return {
+      state: 'unknown', ageSec: null,
+      text: 'core 把心跳关掉了（core/config.json 的 stateHeartbeatSec=0），判不了它还在不在',
+    };
+  }
+
+  /* 负数表示「这一帧的时刻比我的表还晚」—— 两个时钟对不齐，不拿它当证据说
+     core 出事了（把年龄夹到 0，就当它刚刚到）。 */
+  const ageSec = Math.max(0, (nowMs - block.epochMs) / 1000);
+  if (ageSec > block.staleAfterSec) {
+    return {
+      state: 'stale', ageSec: ageSec,
+      text: 'core 没声了：快照已经 ' + ageText(ageSec) + ' 没更新'
+        + '（屏幕上那些数字停在那一刻）',
+    };
+  }
+  return {
+    state: 'live', ageSec: ageSec,
+    text: 'core 在线（这一帧是 ' + ageText(ageSec) + '前的）',
+  };
+}
+
 /* ---------- Step 9-3 的进阶项：看板读 report/ml_result.json ---------- */
 
 /* 看板这一侧**不复算** ML、也不重念一遍规则：它只是把 analysis.py 上一次跑完

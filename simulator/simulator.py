@@ -72,6 +72,12 @@ SOURCE_MANUAL = "manual"
 # 剧本发的指令。它和 SOURCE_SIM 分开，是因为 core 的日志里要能一眼看出
 # 「这个 handle 是剧本按的，不是人按的」—— 演示翻车时先看的就是这一栏。
 SOURCE_SCRIPT = "script"
+# Phase8 D5 的构造样本（data/constructed_samples.json，由 replay_samples.py 发）。
+# 它是**训练时必须跳过**的那一类：这些读数是专门造出来触发「规则和 ML 判得不一样」
+# 的，训进模型里它们就成了「这个宿舍的常态」，案例就复现不出来了 ——
+# 而这件事不会报错，只会静默地把结论反过来。判据在 analysis/make_report.py 的
+# SOURCE_KINDS（全项目只有那一处把 token 归成「构造样本」）。
+SOURCE_CONSTRUCTED = "constructed"
 
 # 报文里 time 字段的形状。和统一 JSON 的约定一致：固定 YYYY-MM-DD HH:mm:ss。
 TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")

@@ -696,6 +696,257 @@ class TestRunMlSynthetic(unittest.TestCase):
         self.assertEqual(result["history_flagged"], 0)
 
 
+class TestMergeSides(unittest.TestCase):
+    """两种训练量的并排（纯函数，不用 sklearn）。"""
+
+    def sides(self, labels_full, labels_small, rule_statuses=None):
+        """两套判断，同一条数：labels_full 是完整那一套的 ±1，labels_small 是小样本那套。"""
+        statuses = rule_statuses or ["正常"] * len(labels_full)
+        records = [record(status, moment="2026-09-23 11:%02d:00" % index)
+                   for index, status in enumerate(statuses)]
+        return (compare(records, labels_full), compare(records, labels_small))
+
+    def test_两套的说法都在同一行上(self):
+        full, small = self.sides([1], [-1])
+        row = ml.merge_sides(full, small)[0]
+        self.assertEqual(row["full_text"], ml.ML_INLIER_TEXT)
+        self.assertEqual(row["small_text"], ml.ML_OUTLIER_TEXT)
+        self.assertEqual(row["full_score"], full[0]["score"])
+        self.assertEqual(row["small_score"], small[0]["score"])
+
+    def test_前缀分得开(self):
+        full, small = self.sides([1], [-1])
+        row = ml.merge_sides(full, small)[0]
+        self.assertTrue(row["full_normal"])
+        self.assertFalse(row["small_normal"])
+
+    def test_原始那几列只留一份(self):
+        # 两边判的是同一条数据，原始值存两份迟早会对不上
+        full, small = self.sides([1], [1])
+        row = ml.merge_sides(full, small)[0]
+        self.assertEqual(row["time"], "2026-09-23 11:00:00")
+        self.assertNotIn("full_time", row)
+        self.assertNotIn("small_time", row)
+
+    def test_differs只比两个模型的看法(self):
+        # 关键：differs 跟规则无关。规则说正常、两个模型也都说不同 —— 那不是 differs，
+        # 那是两套各自的 mismatch（规则和 ML 说不到一块儿）。
+        full, small = self.sides([-1, 1], [-1, 1])
+        rows = ml.merge_sides(full, small)
+        self.assertEqual([row["differs"] for row in rows], [False, False])
+        self.assertTrue(rows[0]["full_mismatch"])
+        self.assertTrue(rows[0]["small_mismatch"])
+
+    def test_改口的那条标出来(self):
+        full, small = self.sides([1, 1, -1], [-1, 1, -1])
+        self.assertEqual([row["differs"] for row in ml.merge_sides(full, small)],
+                         [True, False, False])
+
+    def test_条数对不上就报错(self):
+        full, small = self.sides([1, 1], [1])
+        with self.assertRaises(ValueError) as caught:
+            ml.merge_sides(full, small)
+        self.assertIn("2 对 1", str(caught.exception))
+
+    def test_空表给空表(self):
+        self.assertEqual(ml.merge_sides([], []), [])
+
+    def test_每格都是内置类型(self):
+        # 这份结果要交给命令行和报告，numpy 的 float64 在那儿打印出来是另一个样子
+        full, small = self.sides([1, -1], [-1, -1])
+        for row in ml.merge_sides(full, small):
+            for key, value in row.items():
+                self.assertIsInstance(value, (str, int, float, bool), key)
+        json.dumps(ml.merge_sides(full, small))
+
+
+@unittest.skipUnless(HAS_SKLEARN, "需要 scikit-learn")
+class TestSmallSampleReal(unittest.TestCase):
+    """真数据上的小样本实验（Step 9-4）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.result = ml.small_sample_experiment(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+
+    def test_只用前八条训练(self):
+        self.assertEqual(self.result["train_rows"], ml.SMALL_TRAIN_ROWS)
+        self.assertEqual(self.result["history_rows"], 40)
+        self.assertFalse(self.result["same_as_full"])
+
+    def test_完整那一列就是run_ml那一套(self):
+        # 上面那张表、报告里那张表、这里的「完整 40 条」那一列，三处必须是同一组数。
+        # 各算一遍的话，参数、种子、读法任何一处不同都会让它们分岔。
+        plain = ml.run_ml(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+        self.assertEqual(self.result["full_text"], plain["text"])
+        for row, plain_row in zip(self.result["rows"], plain["rows"]):
+            self.assertEqual(row["full_text"], plain_row["ml_text"])
+            self.assertEqual(row["full_score"], plain_row["score"])
+            self.assertEqual(row["full_mismatch"],
+                             plain_row["rule_normal"] != plain_row["ml_normal"])
+
+    def test_两个模型真的都在历史那份上fit的(self):
+        # 结构性守卫：fit 两次，第二次只能用前 8 条。
+        # 光比两列结果看是看不出这一点的 —— 小样本那一列要是也拿 40 条训出来，
+        # 数字会跟「完整」那列一模一样，看着反倒最正常。
+        seen = []
+        real = ml.build_model
+
+        def spy(x_history):
+            seen.append(x_history.copy())
+            return real(x_history)
+
+        with mock.patch.object(ml, "build_model", spy):
+            ml.small_sample_experiment(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+
+        self.assertEqual(len(seen), 2, "两个训练量该各 fit 一次")
+        full_frame, small_frame = seen
+        self.assertEqual(len(full_frame), 40)
+        self.assertEqual(len(small_frame), ml.SMALL_TRAIN_ROWS)
+        # 「前 8 条」是文件里的前 8 行：逐行对上，不是随便取的 8 条
+        self.assertEqual(small_frame.reset_index(drop=True).to_dict("list"),
+                         full_frame.head(ml.SMALL_TRAIN_ROWS)
+                         .reset_index(drop=True).to_dict("list"))
+
+    def test_两个模型的参数一模一样(self):
+        # 差别只能有训练条数。种子各给各的话，「判断不同」就分不清是样本少了
+        # 还是随机流不一样了 —— 这一节要看的正是样本量的影响。
+        models = []
+        real = ml.build_model
+
+        def spy(x_history):
+            model = real(x_history)
+            models.append(model)
+            return model
+
+        with mock.patch.object(ml, "build_model", spy):
+            ml.small_sample_experiment(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+
+        self.assertEqual(models[0].get_params(), models[1].get_params())
+        self.assertEqual(models[0].get_params()["random_state"], 42)
+
+    def test_门槛松紧两套各一个数(self):
+        self.assertEqual(self.result["history_flagged"], REAL_HISTORY_FLAGGED)
+        self.assertLessEqual(self.result["train_flagged"], ml.SMALL_TRAIN_ROWS)
+
+    def test_差的条数就是differs的长度(self):
+        differs = [row for row in self.result["rows"] if row["differs"]]
+        self.assertEqual(self.result["differs"], differs)
+        # 方向和 full/small 两列一致：说「两边判断不同」的行，两列真的不一样
+        for row in self.result["differs"]:
+            self.assertNotEqual(row["full_normal"], row["small_normal"])
+
+    def test_两套的结论句各自跟着自己那套数(self):
+        # 句子里的「不一致 N 条」就是各自那个数 —— 小样本那句要是抄了完整的数，
+        # 这里会红。两个方向的数合起来才是那句话里的数。
+        for prefix in ("full", "small"):
+            counted = self.result[prefix + "_inconsistent"]
+            sentence = self.result[prefix + "_text"]
+            if counted:
+                self.assertIn(f"不一致的有 {counted} 条", sentence)
+            else:
+                self.assertIn("未出现规则与 ML 不一致", sentence)
+
+    def test_不一致条数两个方向都数(self):
+        # 和 render_comparison 那句里说的「不一致 N 条」是同一个数
+        for prefix in ("full", "small"):
+            counted = sum(1 for row in self.result["rows"]
+                          if row[prefix + "_mismatch"])
+            self.assertEqual(self.result[prefix + "_inconsistent"], counted)
+
+    def test_每格都是内置类型(self):
+        for key, value in self.result.items():
+            if key in ("rows", "differs"):
+                continue
+            self.assertIsInstance(value, (str, int, float, bool, dict), key)
+        json.dumps(self.result)
+
+    def test_一样跑两次结果一样(self):
+        again = ml.small_sample_experiment(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+        self.assertEqual(again["rows"], self.result["rows"])
+        self.assertEqual(again["train_flagged"], self.result["train_flagged"])
+
+
+@unittest.skipUnless(HAS_SKLEARN, "需要 scikit-learn")
+class TestSmallSampleSynthetic(unittest.TestCase):
+    """自己造数据，把真数据上碰不到的分支走一遍。"""
+
+    def test_历史不够八条时有几条用几条(self):
+        result = ml.small_sample_experiment(
+            write_csv(wide_history()[:3], "h.csv"),
+            write_csv(centered_new(), "n.csv"),
+        )
+        self.assertEqual(result["train_rows"], 3)
+        self.assertEqual(result["history_rows"], 3)
+        self.assertTrue(result["same_as_full"])
+
+    def test_正好八条时也说没有可比的东西(self):
+        result = ml.small_sample_experiment(
+            write_csv(wide_history()[:8], "h.csv"),
+            write_csv(centered_new(), "n.csv"),
+        )
+        self.assertEqual(result["train_rows"], 8)
+        self.assertTrue(result["same_as_full"])
+
+    def test_两列真的是两套判断(self):
+        # 拿假模型把两种判断钉死。真数据上这两个训练量恰好判得一样也说不定，
+        # 用它来证明「并排的是两套判断」就成了碰运气。这里让前 8 条训出来的那个
+        # 模型一律说 -1、完整那个一律说 1 —— 两列就必须一列一种说法。
+        class Stub:
+            def __init__(self, label, score):
+                self.label, self.score = label, score
+
+            def predict(self, frame):
+                return [self.label] * len(frame)
+
+            def decision_function(self, frame):
+                return [self.score] * len(frame)
+
+        calls = []
+
+        def fake(x_history):
+            calls.append(len(x_history))
+            # 标签和分数的符号要对得上：_judge 里那道门槛核对会当场拆穿假的
+            return (Stub(ml.ML_OUTLIER, -0.5)
+                    if len(x_history) == ml.SMALL_TRAIN_ROWS else Stub(ml.ML_INLIER, 0.5))
+
+        with mock.patch.object(ml, "build_model", fake):
+            result = ml.small_sample_experiment(write_csv(wide_history(), "h.csv"),
+                                                write_csv(centered_new(), "n.csv"))
+
+        self.assertEqual(calls, [40, ml.SMALL_TRAIN_ROWS])
+        self.assertEqual([row["full_text"] for row in result["rows"]],
+                         [ml.ML_INLIER_TEXT] * result["new_rows"])
+        self.assertEqual([row["small_text"] for row in result["rows"]],
+                         [ml.ML_OUTLIER_TEXT] * result["new_rows"])
+        self.assertEqual(len(result["differs"]), result["new_rows"])
+
+    def test_训练条数不合法时说人话(self):
+        with self.assertRaises(ValueError) as caught:
+            ml.small_sample_experiment(write_csv(wide_history(), "h.csv"),
+                                       write_csv(centered_new(), "n.csv"), train_rows=0)
+        self.assertIn("至少要 1 条", str(caught.exception))
+
+    def test_历史是空的时候说人话(self):
+        with self.assertRaises(ValueError) as caught:
+            ml.small_sample_experiment(write_csv([], "h.csv"),
+                                       write_csv(centered_new(), "n.csv"))
+        self.assertTrue(str(caught.exception).startswith("历史"))
+
+    def test_新数据是空的时候说人话(self):
+        with self.assertRaises(ValueError) as caught:
+            ml.small_sample_experiment(write_csv(wide_history(), "h.csv"),
+                                       write_csv([], "n.csv"))
+        self.assertTrue(str(caught.exception).startswith("新数据"))
+
+    def test_新数据里有空格子时说人话(self):
+        rows = centered_new()
+        rows[2] = ("dorm-a", "2026-09-23 11:30:00", "", 60.0, "正常")
+        with self.assertRaises(ValueError) as caught:
+            ml.small_sample_experiment(write_csv(wide_history(), "h.csv"),
+                                       write_csv(rows, "n.csv"))
+        self.assertIn("2026-09-23 11:30:00", str(caught.exception))
+
+
 @unittest.skipUnless(HAS_SKLEARN, "需要 scikit-learn")
 class TestMain(unittest.TestCase):
     """命令行入口。"""
@@ -737,6 +988,41 @@ class TestMain(unittest.TestCase):
     def test_结论那句和函数返回的是一句(self):
         text, _ = capture(ml._main, [])
         self.assertIn(ml.run_ml(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)["text"], text)
+
+    def test_并排打出两种训练量(self):
+        text, code = capture(ml._main, [])
+        self.assertEqual(code, 0)
+        self.assertIn("小样本实验", text)
+        self.assertIn("训练量对照：", text)
+        self.assertIn("并排对照表：", text)
+        self.assertIn(f"小样本 {ml.SMALL_TRAIN_ROWS} 条", text)
+        self.assertIn("完整 40 条", text)       # 默认那份历史就是 40 条
+
+    def test_并排那两套结论句都打出来了(self):
+        # 两句都是函数算的那两句，不是命令行上另拼的
+        text, _ = capture(ml._main, [])
+        result = ml.small_sample_experiment(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+        self.assertIn(result["full_text"], text)
+        self.assertIn(result["small_text"], text)
+        # 上面 test_六条数据都在表里 那条 NotIn(".0 ") 查的是整段输出，
+        # 小样本这一段也在里面 —— 所以这一段里的数字也必须走 _num()
+
+    def test_并排表的备注只标两边改口的那些行(self):
+        # 主表那 2 处标记是上面 test_不一致的行有标记 数着的：这一列要是借用
+        # 同一串字，「规则和 ML 一致不一致」跟「换个训练量改不改口」就成了一句话，
+        # 那 2 处也会变成 4 处。
+        self.assertNotEqual(ml.DIFFERS_TEXT, ml.MISMATCH_TEXT)
+        text, _ = capture(ml._main, [])
+        self.assertEqual(text.count(ml.MISMATCH_TEXT), len(REAL_MISMATCH_TIMES))
+        result = ml.small_sample_experiment(ml.DEFAULT_HISTORY, ml.DEFAULT_NEW)
+        self.assertEqual(text.count(ml.DIFFERS_TEXT), len(result["differs"]))
+
+    def test_指定别的文件时小样本那一段也跟着(self):
+        text, code = capture(ml._main, [str(write_csv(wide_history(), "h.csv")),
+                                        str(write_csv(centered_new(), "n.csv"))])
+        self.assertEqual(code, 0)
+        self.assertIn("小样本实验", text)
+        self.assertIn("完整 40 条", text)      # 表头跟着传进来的历史走
 
     def test_可以指定别的两个文件(self):
         history = write_csv(wide_history(), "h.csv")

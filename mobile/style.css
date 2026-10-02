@@ -81,7 +81,11 @@ code, .mono {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  /* Phase9 D4 加的：core 心跳那一条在窄屏上要换到下一行去（见下面的
+     .core-hint 的 flex-basis）。不换行的话它会硬挤在标题和连接状态之间，
+     把「未连接」那句截断 —— 而排错时读的正是那句话。 */
+  flex-wrap: wrap;
+  gap: 8px 12px;
   margin-bottom: 14px;
 }
 
@@ -115,6 +119,30 @@ code, .mono {
 .conn--on .conn-dot { background: var(--status-good); }
 .conn--pending .conn-dot { background: var(--status-warning); }
 .conn--off .conn-dot { background: var(--status-critical); }
+
+/* core 心跳那一条（Phase9 D4）。和 .conn 并排，样式上要一眼分得出是两件事：
+   这条**不带圆点**（圆点已经成了「连接」那个意思），靠虚线边框和颜色区分。
+
+   ★ 手机上它单独占一行：顶栏在窄屏上放不下两个胶囊，挤一起会把「未连接」
+   那句截断 —— 而那句话正是排错时要读的。 */
+.core-hint {
+  flex-basis: 100%;
+  order: 9;
+  margin-top: 2px;
+  padding: 4px 10px;
+  border: 1px dashed var(--hairline);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* 文字本身说了算，颜色只是辅助 —— stale 那句写的是「core 没声了：……」，
+   去掉颜色照样读得懂。 */
+.core-hint--stale {
+  color: var(--status-critical);
+  border-color: var(--status-critical);
+  border-style: solid;
+}
 
 /* ---------- 大卡片（优先关注 / 跨端焦点） ---------- */
 
@@ -304,6 +332,20 @@ code, .mono {
   border-radius: 999px;
   color: var(--text-secondary);
   font-size: 11px;
+}
+
+/* 「已离线 · 3 分钟」—— 离线提示（Phase9 D4）。
+   和上面的 .node-flag 长得像但**颜色不同**：那个说的是「有人在办这件事」，
+   这个说的是「这个宿舍的话已经停了」。用警示色，而且**文字本身就说全了**
+   （带着时长），去掉颜色照样读得懂。 */
+.node-offline {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--status-critical);
+  border-radius: 999px;
+  color: var(--status-critical);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 /* 大卡片正在说的那个宿舍。用中性描边而不是状态色 —— 状态色是「它在报警」，

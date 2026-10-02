@@ -49,6 +49,11 @@ ML_THRESHOLD，并且每次都由 _check_threshold() 照着实际标签核一遍
 26 ℃ / 62 % 那条分数 -0.0564，离门槛只差一点点；29 ℃ / 72 % 是 -0.123，
 那才是真的走出去了。
 
+Step 9-4 的「小样本实验」在文件后半段：同样这两份数据，只用历史的前 8 条训练一个
+模型，同一批新数据再判一次，和整段历史训出来的结果并排。跑 `py -3.14 analysis/ml.py`
+时接在对照表后面一起打出来。它只报数，不下结论 —— 哪一条判得不理想、为什么，
+是看过输出之后写的（那份手写的说明放在 data/ml_note.txt，由 analysis.py 放进报告）。
+
 用 py -3.14 而不是 python：PATH 上的 python 是 32 位解释器，pandas / scikit-learn
 装不上（scikit-learn 依赖的 scipy 同样没有 32 位 Windows 包）。
 """
@@ -68,6 +73,8 @@ from analysis import rules  # noqa: E402  —— 必须在上面调整完 sys.pa
 
 __all__ = [
     "run_ml",
+    "small_sample_experiment",
+    "merge_sides",
     "build_model",
     "compare_rows",
     "find_mismatches",
@@ -80,9 +87,14 @@ __all__ = [
     "ML_OUTLIER",
     "ML_INLIER_TEXT",
     "ML_OUTLIER_TEXT",
+    "ML_STATUS_NORMAL",
+    "ML_STATUS_ABNORMAL",
+    "ML_STATUS",
     "ML_THRESHOLD",
     "MISMATCH_TEXT",
     "NO_ROWS_TEXT",
+    "SMALL_TRAIN_ROWS",
+    "DIFFERS_TEXT",
 ]
 
 # 交给模型的两列。只这两列，不加派生特征（差、均值之类）——
@@ -104,6 +116,20 @@ ML_OUTLIER_TEXT = "与历史明显不同"
 
 ML_TEXT = {ML_INLIER: ML_INLIER_TEXT, ML_OUTLIER: ML_OUTLIER_TEXT}
 
+# 落进 CSV / 快照的**机器可读**判词（Phase8 D5）。和上面那两句中文是两码事：
+#   * 1 / -1        —— predict() 的家，sklearn 内部的说法，只在进程里活。
+#   * normal/abnormal —— 写进 data/history.csv 第 6 列和 state 快照的家。
+#   * 接近历史常态   —— 给人看的家（report/ml_result.json 的 mlStatus、快照的 mlText）。
+# 为什么要 ASCII 而不是直接用中文那两句：CSV 是**数据**，读它的是
+# analysis/make_report.py 的 ml_section()，那边的判据是
+# `label.lower() in ("normal", "正常", "ok")` —— 它不是全项目唯一的判据，
+# 但把「接近历史常态」写进去的话，那一句会把这个词判成**不正常**，
+# 于是每一行都高亮成「两边不一致」。ASCII 的两个词那条判据本来就能认，
+# 而且和已经提交的 data/constructed_samples.csv 是同一套写法。
+ML_STATUS_NORMAL = "normal"
+ML_STATUS_ABNORMAL = "abnormal"
+ML_STATUS = {ML_INLIER: ML_STATUS_NORMAL, ML_OUTLIER: ML_STATUS_ABNORMAL}
+
 # predict 的判决门槛：分数低于它的判 -1。sklearn 1.9.1 的 IsolationForest.predict
 # 就是拿 0 切的（is_inlier[decision_func < 0] = -1），跟 model.offset_ 没关系 ——
 # contamination="auto" 时 offset_ 是 -0.5，照它写会写出和实际标签对不上的说明。
@@ -121,6 +147,17 @@ NO_ROWS_TEXT = "新数据一条都没有，没有可对照的东西。"
 
 DEFAULT_HISTORY = ROOT / "data" / "dorm-a_history_sim.csv"
 DEFAULT_NEW = ROOT / "data" / "new_samples.csv"
+
+# 小样本实验（Step 9-4）用几条历史训练。题目说的是前 8 条。
+SMALL_TRAIN_ROWS = 8
+
+# 并排表「备注」那一列的字：同一批新数据，两种训练量给出的判断不一样。
+#
+# 【不能借 MISMATCH_TEXT 来用】那一串说的是主表里的「规则说正常，ML 说不同」，
+# 命令行上有一处按出现次数数它的检查（tests/test_ml.py 的 test_不一致的行有标记）。
+# 借来用的话，主表那两处标记会被数成四处。两件事本来也不是一回事：这一列说的是
+# 「换了个训练量，ML 自己改口了」，跟规则怎么看一点关系都没有。
+DIFFERS_TEXT = "两边判断不同"
 
 NORMAL = rules.STATUS_NORMAL
 
@@ -316,6 +353,29 @@ def _records(df) -> list[tuple]:
     ]
 
 
+def _load_pair(history_csv, new_csv):
+    """两份 CSV -> (history, new, history_path, new_path)。
+
+    读法和复核都走 analysis.py：CSV 怎么读（utf-8-sig 吃 BOM、缺列报人话）、
+    status 一律用规则重算，这两条各只有一处实现。run_ml 和
+    small_sample_experiment 共用这一份 —— 各写一遍的话，两张表里的「规则」
+    那一列迟早会不是同一个口径。
+
+    「一份是空的」也在这儿拦下（_require_rows）。
+    """
+    from analysis import analysis as report
+
+    history_path = report.resolve_csv(str(history_csv))
+    new_path = report.resolve_csv(str(new_csv))
+
+    history = report.add_rule_status(report.load(history_path))
+    new = report.add_rule_status(report.load(new_path))
+
+    _require_rows(history, history_path, "历史")
+    _require_rows(new, new_path, "新数据")
+    return history, new, history_path, new_path
+
+
 # ---------------------------------------------------------------- 模型
 
 def build_model(x_history):
@@ -340,6 +400,30 @@ def build_model(x_history):
     return model
 
 
+def _flagged(forest, frame) -> int:
+    """模型回看自己学过的那些，判了几条 -1。
+
+    写成一趟数而不是 `(forest.predict(frame) == ML_OUTLIER).sum()`：后者要
+    predict 返回的是 numpy 数组（sklearn 确实给数组），换成别的实现——哪怕是
+    测试里一个假模型给个列表——`list == -1` 会当场变成一个 False，
+    再 .sum() 就是「bool 没有 sum」这种和本意毫无关系的报错。
+    """
+    return sum(1 for label in forest.predict(frame) if int(label) == ML_OUTLIER)
+
+
+def _judge(forest, x_new, records) -> list[dict]:
+    """训好的模型判一批新数据 -> 对照行。
+
+    predict、decision_function、门槛核对这三步合成一处：小样本实验要拿两个
+    训练量各判一次（见 small_sample_experiment），散着抄两遍的话，第二套漏掉
+    _check_threshold 就会悄悄发出去 —— 而命令行上那句「分数 < 0 判 -1」照常打印。
+    """
+    labels = forest.predict(x_new)
+    scores = forest.decision_function(x_new)
+    _check_threshold(labels, scores)
+    return compare_rows(records, labels, scores)
+
+
 def run_ml(history_csv, new_csv) -> dict:
     """历史当基准、新数据待判断，跑一遍对照。返回的结果只有内置类型，
     可以直接 json.dumps，也可以直接交给报告那一侧拼区块。
@@ -361,36 +445,20 @@ def run_ml(history_csv, new_csv) -> dict:
     这个数不参与任何判断，但它是这张表的读法说明 —— 不知道它的话，
     「ML 认为与历史明显不同」很容易被读成「这条读数离谱」。
     """
-    from analysis import analysis as report   # 延迟 import：理由见 _records
-
-    history_path = report.resolve_csv(str(history_csv))
-    new_path = report.resolve_csv(str(new_csv))
-
-    # 读法和复核都走 analysis.py：CSV 怎么读（utf-8-sig 吃 BOM、缺列报人话）、
-    # status 一律用规则重算，这两条规则各只有一处实现。
-    history = report.add_rule_status(report.load(history_path))
-    new = report.add_rule_status(report.load(new_path))
-
-    _require_rows(history, history_path, "历史")
-    _require_rows(new, new_path, "新数据")
+    history, new, history_path, new_path = _load_pair(history_csv, new_csv)
 
     x_history = _feature_frame(history, history_path, "历史")
     x_new = _feature_frame(new, new_path, "新数据")
 
     forest = build_model(x_history)
-    labels = forest.predict(x_new)
-    scores = forest.decision_function(x_new)
-    _check_threshold(labels, scores)
-
-    rows = compare_rows(_records(new), labels, scores)
+    rows = _judge(forest, x_new, _records(new))
 
     return {
         "history_file": str(history_path),
         "new_file": str(new_path),
         "history_rows": len(history),
         "new_rows": len(new),
-        # int() 是必须的：.sum() 给的是 numpy 的 int64，json.dumps 不认
-        "history_flagged": int((forest.predict(x_history) == ML_OUTLIER).sum()),
+        "history_flagged": _flagged(forest, x_history),
         "features": list(FEATURES),
         "params": dict(MODEL_PARAMS),
         "threshold": ML_THRESHOLD,
@@ -401,11 +469,181 @@ def run_ml(history_csv, new_csv) -> dict:
     }
 
 
+# ---------------------------------------------------------------- 小样本实验（Step 9-4）
+
+def merge_sides(rows_full, rows_small) -> list[dict]:
+    """两套判断逐条并排（纯函数，不碰 pandas / sklearn）。
+
+    两个入参是 compare_rows() 两次的输出：一份是整段历史训出来的，
+    一份是只用前几行训出来的。判的是**同一批新数据**，所以顺序一样、条数一样。
+
+    两套的键名会撞（都有 ml_text / score / ml_normal），并排时各加一个前缀：
+    full_ 是完整那一套，small_ 是小样本那一套。原始的那几列（时刻、读数、
+    规则状态）只留一份 —— 两边判的是同一条数据，存两份迟早会对不上。
+
+    differs 是这张表存在的理由：它比的是**两个模型**的看法，跟规则无关。
+    规则怎么看是 full_mismatch / small_mismatch 那两个（各自表里高亮的判据）。
+    """
+    if len(rows_full) != len(rows_small):
+        raise ValueError(
+            f"两套判断的条数不一样（{len(rows_full)} 对 {len(rows_small)}）——"
+            " 能并排的前提是它们判的是同一批新数据，条数对不上说明调用方拿错了东西。"
+        )
+
+    merged = []
+    for full, small in zip(rows_full, rows_small):
+        row = {key: full[key] for key in
+               ("nodeId", "time", "temperature", "humidity",
+                "rule_status", "rule_normal")}
+        for prefix, side in (("full", full), ("small", small)):
+            row[prefix + "_text"] = side["ml_text"]
+            row[prefix + "_score"] = side["score"]
+            row[prefix + "_normal"] = side["ml_normal"]
+            # 这一套里规则和 ML 说不到一块儿（两个方向都算，和表里高亮一个判据）
+            row[prefix + "_mismatch"] = side["rule_normal"] != side["ml_normal"]
+        row["differs"] = full["ml_normal"] != small["ml_normal"]
+        merged.append(row)
+    return merged
+
+
+def small_sample_experiment(history_csv, new_csv,
+                            train_rows=SMALL_TRAIN_ROWS) -> dict:
+    """只用历史的前 N 条训练，同一批新数据再判一次，和用整段历史的结果并排。
+
+    返回的字典（命令行拿它打印）：
+        history_rows / train_rows    历史一共几条、这一套只用了几条
+        same_as_full                 训练行数和整段历史一样多（没有「小」可言了）
+        history_flagged              完整模型回看它学过的那些，判了几条 -1
+        train_flagged                小样本模型回看它学过的那些，判了几条 -1
+        rows                         逐条并排，见 merge_sides
+        differs                      两个模型看法不一样的行
+        full_text / small_text       两套各自的结论那句话（render_comparison）
+        full_inconsistent / small_inconsistent
+                                     两套各自「规则与 ML 不一致」的条数（两个方向都算）
+        params / threshold           两个模型共用的参数和判决门槛
+
+    【完整那一套不另算一遍】它就是把 run_ml() 的结果拿来用：命令行上面那张表、
+    报告里那张表、这里的「完整」那一列，三处说的必须是同一组数。各算一遍的话，
+    参数、随机种子、读法任何一处不同都会让它们分岔 —— 而那种不一致没人会去核对。
+
+    【两个模型的参数一模一样】连 random_state=42 都一样，差别只有训练行数。
+    种子各给各的话，「判断不同」就分不清是样本少了还是随机流不一样了；
+    这一节要看的正是样本量的影响，别的变量得按住。
+
+    【「前 N 条」是文件里的前 N 行】按 CSV 的行序取，不按时间重排 ——
+    重排的话「前 8 条」会随数据里的时间戳变，而这里要的是一个能重复的实验。
+    行序和 FeatureFrame 的列序都不会变，所以取 x_history 的前 N 行和
+    history.head(N) 是同一批数据。
+    """
+    if train_rows < 1:
+        raise ValueError(
+            f"小样本实验至少要 1 条训练数据，给的是 {train_rows} ——"
+            " 一条都没有就 fit 不出模型（sklearn 只会报「0 sample(s)」）。"
+        )
+
+    history, new, history_path, new_path = _load_pair(history_csv, new_csv)
+
+    x_history = _feature_frame(history, history_path, "历史")
+    x_new = _feature_frame(new, new_path, "新数据")
+    records = _records(new)
+
+    full_forest = build_model(x_history)
+    full_rows = _judge(full_forest, x_new, records)
+
+    # 小样本那一侧：同一份历史，只取前 N 行。历史不够 N 条时有几条用几条 ——
+    # 这不是错误，报出来的是实际用了几条（train_rows）。
+    x_small = x_history.head(train_rows)
+    small_forest = build_model(x_small)
+    small_rows = _judge(small_forest, x_new, records)
+
+    rows = merge_sides(full_rows, small_rows)
+    return {
+        "history_file": str(history_path),
+        "new_file": str(new_path),
+        "history_rows": len(history),
+        "new_rows": len(new),
+        "train_rows": len(x_small),
+        "same_as_full": len(x_small) == len(history),
+        "history_flagged": _flagged(full_forest, x_history),
+        "train_flagged": _flagged(small_forest, x_small),
+        "params": dict(MODEL_PARAMS),
+        "threshold": ML_THRESHOLD,
+        "rows": rows,
+        "differs": [row for row in rows if row["differs"]],
+        "full_text": render_comparison(full_rows),
+        "small_text": render_comparison(small_rows),
+        "full_inconsistent": (len(find_mismatches(full_rows))
+                              + len(find_reverse(full_rows))),
+        "small_inconsistent": (len(find_mismatches(small_rows))
+                               + len(find_reverse(small_rows))),
+    }
+
+
 # ---------------------------------------------------------------- 入口
 
 # 对照表的列。数字列右对齐（见 _table 的 right 参数），这样位数不同也对得齐；
 # 「备注」那一列只在不一致的行上有字，空着就是一致。
 TABLE_HEADER = ["时间", "温度 ℃", "湿度 %", "规则", "ML", "分数", "备注"]
+
+
+def _small_header(result) -> list:
+    """并排表的表头。两列数各自的训练条数写进表头里 —— 这张表看的就是训练量。"""
+    return ["时间", "温度 ℃", "湿度 %", "规则",
+            f"完整 {result['history_rows']} 条", "分数",
+            f"小样本 {result['train_rows']} 条", "分数", "备注"]
+
+
+def _print_small_sample(result) -> None:
+    """把 small_sample_experiment() 的结果并排打出来（Step 9-4）。
+
+    数字和表格都走 analysis.py 里那一份（中文按两列宽算、31.0 打成 31）：
+    上面那张对照表就是用它打的，这里再抄一份的话两张表的数字写法会各自跑偏。
+    """
+    from analysis import analysis as report
+
+    print(f"小样本实验（Step 9-4）：只用历史的前 {result['train_rows']} 条训练，"
+          "同一批新数据再判一次")
+    print(f"　　　两个模型的参数一模一样（{_params_text(result['params'])}），"
+          "差别只有训练条数")
+    if result["same_as_full"]:
+        # 历史本来就没几条：这时候两列是同一个模型。不说这一句的话，人会对着
+        # 两列一样的数字猜「小样本到底差在哪」。
+        print(f"　　　注意：历史一共就只有 {result['history_rows']} 条，"
+              "「前 N 条」已经等于整段历史，这两列没有可比的东西")
+    print()
+    print("训练量对照：")
+    for label, used, flagged in (
+            (f"完整 {result['history_rows']} 条", result["history_rows"],
+             result["history_flagged"]),
+            (f"小样本 {result['train_rows']} 条", result["train_rows"],
+             result["train_flagged"])):
+        print(f"  {label}：回看自己学过的 {used} 条，"
+              f"其中 {flagged} 条也会被判「{ML_OUTLIER_TEXT}」")
+    print()
+
+    print("并排对照表：")
+    report._table(
+        [_small_header(result)]
+        + [[row["time"], report._num(row["temperature"]),
+            report._num(row["humidity"]), row["rule_status"],
+            row["full_text"], report._num(row["full_score"]),
+            row["small_text"], report._num(row["small_score"]),
+            DIFFERS_TEXT if row["differs"] else ""]
+           for row in result["rows"]],
+        right=(1, 2, 5, 7),
+    )
+    print()
+    print(f"规则与 ML 不一致的条数：完整 {result['history_rows']} 条训练 "
+          f"{result['full_inconsistent']} 条，"
+          f"小样本 {result['train_rows']} 条训练 {result['small_inconsistent']} 条")
+    changed = f"{result['new_rows']} 条里有 {len(result['differs'])} 条"
+    if result["differs"]:
+        changed += f"（表里标了「{DIFFERS_TEXT}」）"
+    print(f"两种训练量判断不同的：{changed}")
+    print()
+    print("结论（同一批新数据，两种训练量各说一句）：")
+    print(f"  完整 {result['history_rows']} 条训练：{result['full_text']}")
+    print(f"  小样本 {result['train_rows']} 条训练：{result['small_text']}")
 
 
 def _params_text(params) -> str:
@@ -468,6 +706,18 @@ def _main(argv: list[str] | None = None) -> int:
     print()
     print("结论：")
     print(f"  {result['text']}")
+
+    # 小样本实验（Step 9-4）：同一批数据、同一组参数，只用前 8 条历史训练再判一次。
+    # 和上面那张表并排看，差的就是训练量。
+    print()
+    try:
+        small = small_sample_experiment(args.history, args.new)
+    except ValueError as exc:
+        # 上面那张表已经打出来了，这一节降级成一句话就行 —— 不必把整个命令
+        # 变成非零退出（`&& 下一步` 会就此断掉，而错的只是这一段）。
+        print(f"小样本实验：这一段没跑\n  {exc}")
+    else:
+        _print_small_sample(small)
     return 0
 
 

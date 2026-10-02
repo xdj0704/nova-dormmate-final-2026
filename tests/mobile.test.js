@@ -64,7 +64,7 @@ const els = {};
    getElementById 对没登记的 id 会现场造一个新的，那样测试读到的
    els['nodes'] 和 mobile.js 里 el.nodes 拿到的就不是同一个对象，
    断言全是假绿 —— 页面上明明没变，测试却看见变了。 */
-['app', 'conn', 'conn-text', 'focus', 'nodes', 'node-count',
+['app', 'conn', 'conn-text', 'core-hint', 'focus', 'nodes', 'node-count',
   'action-handle', 'action-state', 'cmd-note', 'log-body', 'log-count',
   'never-used'].forEach((id) => { els[id] = makeEl(id); });
 
@@ -115,11 +115,18 @@ const consoleStub = {
    mobile.js 读的是 window.DormMateConfig —— 只有把这两个当成同一个东西，
    才和浏览器里的行为一致。分成两个对象的话，config.js 挂到 A、
    mobile.js 读 B，页面上永远是「未加载 shared/config.js」。 */
+/* 只记不执行：mobile.js 现在有一条 setInterval 在刷 core 心跳那行字
+   （Phase9 D4）。真让它跑起来，测试进程会挂着不退出；而且「隔一秒重画」
+   这件事本身不需要在这里测 —— 要测的是那行字算得对不对，测试自己挑时候
+   调 renderCoreHint()。 */
+const intervals = [];
+
 const context = {
   document: documentStub,
   mqtt: mqttStub,
   location: { hostname: 'localhost' },
   console: consoleStub,
+  setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
   JSON, Math, Date, Number, Object, Array, String, Boolean,
   isNaN, parseInt, RegExp, TypeError, undefined,
 };
@@ -375,6 +382,68 @@ check('★ 一个宿舍都没有时也不装作有', (function () {
 })(), '');
 check('（那种情况下写的是「还没有收到快照」，不是「都正常」）',
   els.nodes.innerHTML.indexOf('还没有收到 core 的快照') > 0, true);
+
+/* ============ C2. core 心跳 / 节点离线（Phase9 D4） ============ */
+
+section('C2. core 心跳与离线提示（Phase9 D4）');
+
+/* 【为什么不能靠「收没收到快照」判断 core 死活】
+   state 是 **retained** 的：core 一死 broker 把最后那一帧留着，手机上
+   照样立刻收到，长得和实时消息一模一样。判据只能是「这一帧是多久以前的」
+   —— 时间戳由 core 写进快照，「多旧算太旧」也由 core 定，页面只翻译成人话。 */
+feed(snapshotOf({ core: { online: true, epochMs: Date.now(), staleAfterSec: 15 } }));
+check('★ core 在发帧时那条提示说「在线」',
+  [els['core-hint'].textContent.indexOf('core 在线') === 0,
+    els['core-hint'].className], [true, 'core-hint core-hint--live']);
+
+feed(snapshotOf({ core: { online: true, epochMs: Date.now() - 60000, staleAfterSec: 15 } }));
+check('★★ core 一停就翻成「没声了」，并说清数字停在那一刻',
+  [els['core-hint'].textContent.indexOf('core 没声了') === 0,
+    els['core-hint'].textContent.indexOf('停在那一刻') > 0,
+    els['core-hint'].className], [true, true, 'core-hint core-hint--stale']);
+
+/* core.online 恒为 true（只有活着的 core 能写下它），retained 帧一样带着它。
+   底下填 false、帧是新的，结论照样「在线」—— 这就是「它没被读」的证据。 */
+feed(snapshotOf({ core: { online: false, epochMs: Date.now(), staleAfterSec: 15 } }));
+check('★★ core.online 那个字段不参与判断',
+  els['core-hint'].className, 'core-hint core-hint--live');
+
+feed(snapshotOf({}));
+check('★ core 没写心跳时点明「core 是旧版本？」，不是笼统说「离线」',
+  els['core-hint'].textContent.indexOf('旧版本') > 0, true);
+feed(snapshotOf({ core: { online: true, epochMs: Date.now(), staleAfterSec: null } }));
+check('★ 心跳被关掉时说「判不了」，并说去哪改（stateHeartbeatSec）',
+  [els['core-hint'].textContent.indexOf('判不了') > 0,
+    els['core-hint'].textContent.indexOf('stateHeartbeatSec') > 0], [true, true]);
+
+/* ---- 节点离线 ---- */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { online: false, offlineSec: 185, offlineText: '3 分钟' }),
+  nodeRow('dorm-b', { temperature: 31, humidity: 60, status: '偏热',
+    online: false, offlineSec: 12, offlineText: '不到 1 分钟' }),
+  nodeRow('dorm-c', { temperature: 25, humidity: 80, status: '偏湿' }),
+] }));
+check('★ 离线的宿舍带一个单独的标，写着停了多久',
+  [els.nodes.innerHTML.indexOf('已离线 3 分钟') >= 0,
+    els.nodes.innerHTML.indexOf('已离线 不到 1 分钟') >= 0], [true, true]);
+check('★ 那个标不挤进状态徽章里（状态还是原样那个字）',
+  els.nodes.innerHTML.indexOf('data-status="偏热"') >= 0, true);
+check('★ 在线的宿舍一个小标都没有（不写「已离线 0 秒」这种废话）',
+  els.nodes.innerHTML.split('data-focus-node="dorm-c"')[1].split('</button>')[0]
+    .indexOf('已离线'), -1);
+/* 渲染的是 core 给的那串字（offlineText），不是拿 offlineSec 现算一遍 ——
+   185 这个数一个都不该出现在页面上（那串字是「3 分钟」）。 */
+check('★ 渲染的是 core 给的那串字，不是拿秒数现算',
+  [els.nodes.innerHTML.indexOf('185'),
+    els.nodes.innerHTML.indexOf('3 分钟') >= 0], [-1, true]);
+
+/* 「从来没报过数据」和「来过又断了」不是一回事：前者 offlineSec/offlineText
+   都是 null，这时只写「已离线」，后面不挂一个空时长。 */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { online: false, offlineSec: null, offlineText: null })] }));
+check('★ 从没报过数据的宿舍只写「已离线」，后面不挂空时长',
+  [els.nodes.innerHTML.indexOf('已离线') >= 0,
+    els.nodes.innerHTML.indexOf('已离线 ')], [true, -1]);
 
 /* ============ D. 这个文件里没有第二份规则 ============ */
 
@@ -688,7 +757,7 @@ check('★ 没有第二份规则（页面上不写阈值）',
    而报错要等到下一次重画才出现（“Cannot set properties of null”），
    现场看起来像「页面卡住了」。 */
 check('★ 每个 id 都对得上 mobile.js 里 getElementById 的那个',
-  ['app', 'conn', 'conn-text', 'focus', 'nodes', 'node-count',
+  ['app', 'conn', 'conn-text', 'core-hint', 'focus', 'nodes', 'node-count',
     'action-handle', 'action-state', 'cmd-note', 'log-body', 'log-count']
     .filter((id) => html.indexOf('id="' + id + '"') < 0), []);
 

@@ -55,6 +55,25 @@
 
   .conn.is-on .conn-dot { background: #0ca30c; }
 
+  /* core 心跳那一条（Phase9 D4）。和 .conn 并排，样式上要一眼分得出是两件事：
+     这条**不带圆点**（圆点已经成了「连接」那个意思），靠虚线边框和颜色区分。
+
+     ★ 文字本身说了算，颜色只是辅助 —— stale 那句写的是「core 没声了：……」，
+     去掉颜色照样读得懂。 */
+  .core-hint {
+    margin-top: 4px;
+    font-size: 13px;
+    color: #52514e;
+  }
+
+  /* 还没收到快照 / 心跳被关掉：不表态，用中性色（就是上面那个颜色）。
+     **不是**红色 ——「还没收到」和「收到了但很旧」是两件事。 */
+  .core-hint.is-stale { color: #c0392b; }
+  .core-hint.is-stale::before {
+    /* 一条竖杠代替圆点：颜色之外还有形状，色觉障碍下也分得出 */
+    content: '▌ ';
+  }
+
   /* 3D 容器。四条不能省的：
      - 必须有确定的高度。高度是 0 的话 clientWidth/Height 就是 0，
        相机算不出宽高比（world.js 那边兜了一下，但别指望它兜）。
@@ -79,7 +98,8 @@
   /* ---- 房间头顶的悬浮标签（CSS2DRenderer 造出来的那一层） ----
 
      这一层里的元素是 world.js 用 document.createElement 建出来的，
-     结构固定是 .scene-tag > .tag-node / .tag-read / .tag-status / .tag-handling。
+     结构固定是 .scene-tag > .tag-node / .tag-read / .tag-status / .tag-handling
+     / .tag-offline（最后那一格是 Phase9 D4 加的离线提示）。
      页面的职责只有一条：**给它们上色**。
 
      配色靠 [data-status] 属性挑，和移动端 style.css 一个做法。状态词出现在
@@ -132,6 +152,23 @@
   }
 
   .tag-handling[hidden] { display: none; }
+
+  /* 「已离线 3 分钟」那一格（Phase9 D4）。和 .tag-handling 长得像但**颜色不同**：
+     那个说的是「有人在办这件事」（暖黄），这个说的是「这个宿舍的话停了」（红）。
+
+     ★ 文字本身就说全了（带时长），颜色只是辅助 —— 去掉颜色照样读得懂。
+     和 .tag-handling 一样，world.js 还会直接把 hidden 开/关，
+     不指望只靠下面那条 CSS 挡着。 */
+  .tag-offline {
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 650;
+    color: #ffffff;
+    background: #c0392b;
+    border-radius: 999px;
+  }
+
+  .tag-offline[hidden] { display: none; }
 
   /* 焦点那间：加一圈蓝。焦点是「镜头在看哪间」，和地上那圈脉冲
      （「哪间最该管」）不是一回事，所以**两种记号长得不一样**。 */
@@ -230,6 +267,12 @@
     <p class="conn" id="conn">
       <span class="conn-dot"></span><span id="conn-text">准备连接…</span>
     </p>
+    <!-- core 在不在（Phase9 D4）。和上面那一条**不是一回事**：上面那条说的是
+         「这个浏览器到 broker」，这一条说的是「core 有没有在发快照」。
+         这一页尤其要分开 —— 快照是 retained 的，core 死了之后 broker 手里
+         那一份还在，三间房的读数、地板颜色、光圈全都停在那一刻，
+         而画面上看起来一切正常。 -->
+    <p class="core-hint" id="core-hint"></p>
   </header>
 
   <!-- index.html 只管四件事：把容器摆好、调 createDormWorld、把快照交给它、
@@ -313,7 +356,7 @@
   <script type="module">
     import { createDormWorld } from './world.js';
     import { LOOK, STATUS } from './room.js';
-    import { readSnapshot, openEvent, focusBanner } from '../dashboard/logic.js';
+    import { readSnapshot, openEvent, focusBanner, coreLiveness } from '../dashboard/logic.js';
 
     /* shared/config.js 是普通 script，配置挂在 globalThis 上。
        这个页面里**没有** 'dormmate/v1/...' 这样的字符串 —— topic 只在那一处写。
@@ -406,6 +449,8 @@
 
     const connEl = document.getElementById('conn');
     const connText = document.getElementById('conn-text');
+    /* core 心跳那一条（D4）。和 conn 并排，说的却是另一件事。 */
+    const coreHintEl = document.getElementById('core-hint');
     const readoutEl = document.getElementById('readout');
     const readoutSubEl = document.getElementById('readout-reason');
     const cmdNoteEl = document.getElementById('cmd-note');
@@ -413,6 +458,21 @@
     function setConn(on, text) {
       connEl.className = on ? 'conn is-on' : 'conn';
       connText.textContent = text;
+    }
+
+    /**
+     * 「core 还在不在」那一条（Phase9 D4）。
+     *
+     * ★ 由定时器驱动，不在 render() 里 —— 它要说的那件事恰恰是「快照不来了」，
+     * 挂在渲染上就等于永远不报（core 一死就没有渲染了）。
+     *
+     * 判据在 logic.js 的 coreLiveness 里（纯函数），这边只把 now 传进去、
+     * 把结果贴到 DOM 上。看板、手机、这里用的是**同一个函数、同一句话**。
+     */
+    function renderCoreHint() {
+      const live = coreLiveness(snapshot, Date.now());
+      coreHintEl.textContent = live.text;
+      coreHintEl.className = 'core-hint' + (live.state === 'stale' ? ' is-stale' : '');
     }
 
     /* 当前那根连接。null 表示还没连上。 */
@@ -506,6 +566,10 @@
     function render() {
       if (!snapshot) return;
 
+      /* core 那一条也跟着刷新：收到新帧就立刻变成「这一帧是 0 秒前的」，
+         不必等下一个 tick。真正的巡检在下面那个 setInterval 里。 */
+      renderCoreHint();
+
       const nodes = Array.isArray(snapshot.nodes) ? snapshot.nodes : [];
       nodes.forEach(function (node) {
         world.setReading(node.nodeId, {
@@ -514,6 +578,9 @@
           temperature: node.temperature,
           humidity: node.humidity,
           online: node.online,
+          /* 离线多久了 —— core 算好放进快照的，world.js 只往标签上加几个字，
+             不自己拿 lastSeen 去减（那是第二个算法，会跟 core 的差一截）。 */
+          offlineText: node.offlineText,
         });
         // 顺序无所谓：两个 setter 各自重算一次风扇（syncFan 是唯一那个开关），
         // 谁后到都是同一个结果 —— 这正是不写成「后调用的说了算」的原因。
@@ -649,6 +716,11 @@
         handleMessage(topic, payload.toString());
       });
     }
+
+    /* core 心跳的巡检。**每隔一秒看一眼**，不跟着快照走 —— 要报的就是
+       「快照不来了」这件事，等快照来触发等于永远不报。 */
+    setInterval(renderCoreHint, 1000);
+    renderCoreHint();
 
     /* 打开就连。快照是 retained 的，core 活着的话连上就能立刻拿到一帧，
        用不着等模拟器发下一条。 */

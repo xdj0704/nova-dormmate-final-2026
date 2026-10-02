@@ -221,10 +221,19 @@ export function createDormWorld(container) {
     const tagHandling = document.createElement('span');
     tagHandling.className = 'tag-handling';
     tagHandling.textContent = HANDLING_TEXT;
+    // 离线提示（Phase9 D4）。**单独一格**，不并进上面的 tag-status 里：
+    // 那个格子说的是「这个宿舍现在什么状况」，而离线是**状态之外**的事实
+    // （core 的优先排序不排离线的节点）。并在一起会出现「偏热 · 已离线」
+    // 这种一格两义的字，看的人分不清「已离线」是在描述环境还是在描述链路。
+    //
+    // 和 tag-handling 一样，平时是空的、也不占位（CSS 里 :empty 隐藏）。
+    const tagOffline = document.createElement('span');
+    tagOffline.className = 'tag-offline';
     el.appendChild(tagNode);
     el.appendChild(tagRead);
     el.appendChild(tagStatus);
     el.appendChild(tagHandling);
+    el.appendChild(tagOffline);
 
     const label = new CSS2DObject(el);
     // 挂在房间**上方**：墙高 4，标签放 4.6，正好在屋顶上方一点，不挡屋里。
@@ -239,6 +248,7 @@ export function createDormWorld(container) {
       tagRead,
       tagStatus,
       tagHandling,
+      tagOffline,
       reading: null,     // 快照里这一格；null = 还没收到过
       lookFan: false,    // 状态说「这间热，风扇该转」（LOOK 表里那一列）
       handling: false,   // 这个节点的事件正在处理中（HANDLING）
@@ -363,6 +373,19 @@ export function createDormWorld(container) {
     // 少了这一句，页面少写一条 CSS 就会变成三间房都挂着「处理中」，
     // 而这种错在控制台里一点动静都没有。
     entry.tagHandling.hidden = !entry.handling;
+
+    /* 离线提示（D4）。两件事都是**照抄快照里的值**，这边一个字都不判：
+         * 在不在线    -> reading.online（core 算的）
+         * 多久没来了  -> reading.offlineText（core 算好的那句话）
+       「多久」那句不在这边拿 lastSeen 去减 —— 那是第二个算法，
+       而它和 core 的迟早会差一截，差的时候谁都不报错。
+       快照里没 offlineText 这一格（老 core 配新页面）时退回「已离线」四个字。 */
+    const offline = !!(entry.reading && entry.reading.online === false);
+    entry.tagOffline.textContent = offline
+      ? '已离线' + (entry.reading.offlineText ? ' ' + entry.reading.offlineText : '')
+      : '';
+    // 和 tagHandling 同样的做法：直接写 DOM 属性，不指望页面 CSS。
+    entry.tagOffline.hidden = !offline;
   }
 
   /* ================= 脉冲光圈 ================= */

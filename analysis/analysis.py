@@ -29,6 +29,10 @@ analysis/daily_summary.py，报告这边只负责把算好的那段话和事件�
 摘要用的 df 就是手上这一份（已经 add_rule_status 过），不另读一次文件 ——
 同一份报告上下两截说的必须是同一份数据。
 
+Step 9-4 干的事：报告末尾加一块「ML 的局限」——内容是 `data/ml_note.txt` 里手写的
+那段话（这套 ML 在这次的输出上哪里不理想、为什么），原样放进报告。文件不在就不出
+这一节；在但是空的、或者不是 UTF-8，则出一个区块如实说清楚。见 ml_note_section()。
+
 用 py -3.14 而不是 python：PATH 上的 python 是 32 位解释器，
 pandas 和 matplotlib 都不发布 32 位 Windows 包，装不上。64 位那个两个都装好了。
 """
@@ -1162,6 +1166,82 @@ def ml_skip_section(reason: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------- ML 的局限（Step 9-4）
+
+ML_NOTE_TITLE = "ML 的局限"
+
+# 手写的那份说明。**故意是一个跟着仓库走的纯文本文件、由人来写**：这一节说的是
+# 「这套 ML 在这次的输出上哪里不理想、为什么」，那是看过真实输出之后的判断，
+# 代码编不出来，也不该由代码编。文件不在就不出这一节（见 ml_note_section）。
+DEFAULT_ML_NOTE = ROOT / "data" / "ml_note.txt"
+
+
+def _note_blocks(text: str) -> list[list[str]]:
+    """一段手写文字 -> 按空行分好的几段，段里保留原来的断行。"""
+    blocks, current = [], []
+    for line in text.strip().splitlines():
+        if line.strip():
+            current.append(line.strip())
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def note_html(text: str) -> str:
+    """手写文字 -> HTML 段落（纯函数，读文件那一步在 ml_note_section 里）。
+
+    空行分段。段内的换行原样保留（`<br>`）：这份说明是人一行一行写的，
+    写成一行一条就该按一行一条显示 —— 不保留的话，几条原因会被 HTML 挤成
+    一整段，读的人分不清到底是几条。首尾的空行不产生空段落。
+
+    每一行都过 _esc：文件是手写的，里面写一个 < 或者 & 就会把标签撑破
+    （也许只是想说「温度 < 18 ℃」）。
+    """
+    return "\n".join(
+        "<p>" + "<br>".join(_esc(line) for line in block) + "</p>"
+        for block in _note_blocks(text)
+    )
+
+
+def ml_note_section(path: Path | None = None) -> dict | None:
+    """「ML 的局限」区块（Step 9-4）。文件不在就返回 None —— 报告里不出这一节。
+
+    返回值和其他区块一样：{"title": ..., "html": ...}，直接塞进 sections。
+
+    【文件不在为什么是不出这一节，而不是出一句占位】这一段是可选的手写说明
+    （`data/ml_note.txt`），没写就是没写。出一个空标题比不出更糟：读报告的人
+    会以为报告坏了，而报告其实一个字都不缺。
+
+    【文件在但是空的、或者读不了，则要出一个区块说清楚】那两种情况下人是特意
+    写了东西的，什么都不显示，他只会以为程序没读。存成 GBK（老记事本默认就是）
+    是中文 Windows 上很容易踩到的一脚：报告不能因为一份可选说明就整个出不来，
+    但也不能装成没这回事 —— 说清楚是哪一种，人自己两下就改好了。
+    """
+    path = DEFAULT_ML_NOTE if path is None else Path(path)
+    if not path.exists():
+        return None
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {"title": ML_NOTE_TITLE,
+                "html": f'<p class="empty">这一段没读进来：{_esc(path.name)} 不是 '
+                        "UTF-8 编码（多半是存成了 GBK）—— 用编辑器另存为 UTF-8，"
+                        "再跑一次 analysis.py。</p>"}
+    except OSError as exc:
+        return {"title": ML_NOTE_TITLE,
+                "html": f'<p class="empty">这一段没读进来：读不了 '
+                        f"{_esc(path.name)}（{_esc(exc.strerror or exc)}）。</p>"}
+
+    if not text.strip():
+        return {"title": ML_NOTE_TITLE,
+                "html": f'<p class="empty">这一段没写：{_esc(path.name)} 是空的。</p>'}
+    return {"title": ML_NOTE_TITLE, "html": note_html(text)}
+
+
 def _json_number(value) -> int | float:
     """JSON 里的温湿度写成 25 而不是 25.0。
 
@@ -1391,9 +1471,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"跳过 {DEFAULT_REPORT_HTML.name}（--no-report）")
         return 0
 
+    # 「ML 的局限」（Step 9-4）是手写的那份说明（data/ml_note.txt）：在就放进报告，
+    # 不在就不出这一节。排在 ML 区块后面 —— 先说这张表算出了什么，
+    # 再说这套算法哪里靠不住，读的顺序才对。
+    # 只有真要出报告时才读它：--no-report 时既不写报告，也就没有要说明的那一节。
+    note = ml_note_section()
+    if note is not None:
+        sections.append(note)
+
     print()
     report_path = write_report(summary, sections=sections)
     print(f"报告：{report_path}")
+    if note is None:
+        print(f"ML 的局限：没写（{DEFAULT_ML_NOTE} 不存在，报告里不出这一节）")
+    else:
+        print(f"ML 的局限：已放进报告（{DEFAULT_ML_NOTE.name}）")
 
     if ml_result is not None:
         # 这份是给看板 fetch 的（report/ml_result.json）。跟报告一起写、也一起跳过：

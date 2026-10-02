@@ -37,3 +37,38 @@ dormmate (2).csv
 data/events.json
 data/events.json.bad
 data/events.json.tmp
+
+# data/history.csv 是 Phase7 起 core 每收到一条合法遥测就追加一行的历史表
+# （Phase7 是九列，Phase8 D5 起十列 —— 多了 agree，见 history.py 的 HEADER）。
+# 和 events.json 完全同一个道理：
+# 它是**运行期**产生的数据，一秒一行、每次跑都在变，入库的话每回演示完
+# 都会多一个「改动」，真正要提交的东西反而被淹掉。
+# data/ 下那几份 *_sim.csv / constructed_samples.csv 是**输入**，那些要提交。
+data/history.csv
+
+# Phase7 那三份报告是 analysis/make_report.py 的输出（--csv 指哪份输入，名字就
+# 跟着是哪份）。不跟踪的原因是它们**必须**由脚本重新生成：
+#
+#   1. 一个替换一份 CSV 就是一次全量重排 —— 几百 KB 的 HTML，改一行代码就
+#      整篇变样，进仓库只会把真正要提交的东西淹在 diff 里；
+#   2. 「报告结果禁止手工修改」这条约束的前提就是「报告是跑出来的」，一旦
+#      入库，看到的人第一反应是去改文件而不是改输入再跑一遍；
+#   3. history-report.html 的输入 data/history.csv 本来就是运行期数据、上面
+#      刚忽略掉，这份报告离开那台机器就**再也复现不出来**，单独入库是孤儿。
+#
+# 想留档就直接把 HTML / 截图交上去，或者 git add -f 强制加。
+# 注意：report/report.html（Phase7 之前 analysis/analysis.py 那份）**不在**
+# 这个列表里，它是早就入库的交付物，别一起忽略了。
+report/history-report.html
+report/day-sim-report.html
+report/constructed-report.html
+
+# models/ 是 Phase8 D5 的训练产物：analysis/train_iforest.py 按 data/history.csv
+# 给每个宿舍训一个 Isolation Forest，写在这里（.joblib + MANIFEST.json）。
+# 不入库的理由和上面那几份报告一样 —— 它由输入唯一决定，重跑一条命令就有：
+#     py -3.14 analysis/train_iforest.py --csv data/history.csv --out-dir models
+# 而 .joblib 是二进制、几十 KB 起步，每次灌一批新历史就整份变样，
+# 进仓库只会把真正要提交的东西淹在 diff 里。
+# 要留档就把 MANIFEST.json 和训练时的终端输出交上去（那里面才有信息量：
+# 用了哪份 CSV、每个宿舍几条、sklearn 什么版本）。
+models/

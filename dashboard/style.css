@@ -175,6 +175,30 @@ button:focus-visible {
 .conn--on  .conn-dot { background: var(--status-good); }
 .conn--off .conn-dot { background: var(--status-critical); }
 
+/* core 心跳那一条（Phase9 D4）。和上面的 .conn 并排，所以样式上要一眼分得出
+   是两件事：这条**不带圆点**（圆点已经成了「连接」那个意思），靠颜色和边框虚线
+   区分。
+
+   ★ 文字本身说了算，颜色只是辅助 —— stale 那一句写的是「core 没声了：……」，
+   去掉颜色照样读得懂。色觉障碍、黑白打印、强制高对比模式下都还在。 */
+.core-hint {
+  padding: 5px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 还没收到快照 / 心跳被关掉：不表态，用中性色。**不是**红色 ——
+   「还没收到」和「收到了但很旧」是两件事，后者才是要报警的那一种。 */
+.core-hint--live  { color: var(--text-secondary); border-color: var(--border); }
+.core-hint--stale {
+  color: var(--status-critical);
+  border-color: var(--status-critical);
+  border-style: solid;
+}
+
 .sub code {
   font-size: 12px;
   color: var(--text-secondary);
@@ -836,6 +860,16 @@ tbody tr:last-child td { border-bottom: none; }
   word-break: break-all;
   color: var(--text-secondary);
 }
+
+/* ---------- 实时 Rule-ML 对照（Phase8 D5） ---------- */
+
+/* 两边判得不一样的行染一下。**和上面 .log-row--warn 是同一个做法**（整行淡染、
+   不加左边那道竖条），所以看板上「该多看一眼的行」全是一个长相。
+
+   用警告色不用错误色：规则和 ML 分家**不是故障**，它正是这一块要展示的现象 ——
+   规则看的是「越没越线」，ML 看的是「像不像这个宿舍平时」，两者本来就会分家。
+   染成红色会让人以为哪里坏了，接着去查一个根本不存在的 bug。 */
+tbody tr.mlc-mismatch { background: color-mix(in srgb, var(--status-warning) 8%, transparent); }
 
 /* ---------- 页脚 ---------- */
 

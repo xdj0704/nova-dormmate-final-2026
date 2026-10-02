@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DormMate Final · 综合作品 PPT 文案（14 页）</title>
+<!-- 这个文件是 docs/make_ppt_preview.py 从 docs/ppt-copy.md 生成的产物。
+     别手改这里 —— 改了文案就重跑那个脚本。 -->
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #898781;
+  --hairline: #e1e0d9;
+  --blue: #2a78d6;
+  --blue-bg: #e8f0fc;
+  --mag: #a33066;
+  --good: #0a7a0a;
+  --serious: #b04a12;
+  --critical: #d03b3b;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: var(--page); color: var(--ink);
+  font-family: var(--sans); font-size: 16px; line-height: 1.62;
+}
+
+/* 顶部工具栏 */
+#bar {
+  position: fixed; inset: 0 0 auto 0; height: 46px; z-index: 10;
+  display: flex; align-items: center; gap: 14px; padding: 0 16px;
+  background: var(--surface); border-bottom: 1px solid var(--hairline);
+}
+#bar .brand { font-weight: 700; font-size: 14px; }
+#bar .hint { color: var(--ink-3); font-size: 12px; }
+#bar .spacer { flex: 1; }
+#bar button {
+  font: inherit; font-size: 12.5px; padding: 5px 12px; cursor: pointer;
+  color: var(--ink-2); background: var(--page);
+  border: 1px solid var(--hairline); border-radius: 999px;
+}
+#bar button:hover { border-color: var(--blue); color: var(--blue); }
+
+/* 幻灯片容器 */
+#deck { height: 100%; padding: 46px 0 0; }
+.slide {
+  display: none; height: 100%; overflow: auto; padding: 34px 56px 64px;
+}
+.slide.on { display: block; }
+
+.slide h1 { font-size: 34px; line-height: 1.3; margin: 0 0 6px; }
+.slide h2 { font-size: 27px; line-height: 1.32; margin: 0 0 18px; }
+.slide h3 { font-size: 19px; margin: 22px 0 8px; }
+
+.slide .tag {
+  display: inline-block; margin-bottom: 10px; padding: 3px 12px;
+  font-size: 12px; font-weight: 700; border-radius: 999px;
+  color: #1c5bab; background: var(--blue-bg); border: 1px solid var(--blue);
+}
+.slide.kind-cover .tag { color: var(--mag); background: #fbe9f1; border-color: #c9407f; }
+.slide.kind-note .tag,
+.slide.kind-appendix .tag { color: var(--ink-2); background: #f0efec; border-color: var(--ink-3); }
+
+.slide p { margin: 0 0 12px; max-width: 62em; }
+.slide ul, .slide ol { margin: 0 0 14px; padding-left: 24px; }
+.slide li { margin-bottom: 5px; }
+.slide li > ul { margin-top: 5px; }
+
+.slide blockquote {
+  margin: 14px 0; padding: 10px 16px; max-width: 62em;
+  border-left: 3px solid var(--hairline); border-radius: 0 8px 8px 0;
+  background: var(--surface); color: var(--ink-2);
+}
+.slide blockquote p:last-child { margin-bottom: 0; }
+
+.slide code {
+  font-family: var(--mono); font-size: 0.88em;
+  background: #f1f0ec; padding: 1px 5px; border-radius: 4px;
+}
+.slide pre {
+  margin: 14px 0; padding: 14px 16px; overflow-x: auto;
+  background: var(--surface); border: 1px solid var(--hairline); border-radius: 10px;
+}
+.slide pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.65; }
+
+.slide table {
+  border-collapse: collapse; margin: 14px 0; font-size: 14px; max-width: 100%;
+}
+.slide th, .slide td {
+  border: 1px solid var(--hairline); padding: 7px 11px; text-align: left;
+  vertical-align: top;
+}
+.slide th { background: var(--surface); font-weight: 700; white-space: nowrap; }
+.slide tbody tr:nth-child(even) td { background: #fcfcfa; }
+
+.slide hr { margin: 22px 0; border: 0; border-top: 1px solid var(--hairline); }
+.slide a { color: var(--blue); }
+
+.slide .fig { margin: 18px 0 0; }
+.slide .fig img {
+  width: 100%; max-width: 1180px; height: auto; display: block;
+  border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface);
+}
+.slide .fig figcaption { margin-top: 7px; color: var(--ink-3); font-size: 12px; }
+
+/* 页脚 */
+#foot {
+  position: fixed; inset: auto 0 0 0; height: 30px; z-index: 10;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; background: var(--surface); border-top: 1px solid var(--hairline);
+  color: var(--ink-3); font-size: 11.5px;
+}
+
+/* 左右两块点击区 */
+.zone {
+  position: fixed; top: 46px; bottom: 30px; width: 14%; z-index: 5;
+  cursor: pointer; opacity: 0; transition: opacity .15s;
+}
+.zone:hover { opacity: 1; background: linear-gradient(to right, rgba(42,120,214,.10), transparent); }
+#zr { right: 0; }
+#zr:hover { background: linear-gradient(to left, rgba(42,120,214,.10), transparent); }
+#zl { left: 0; }
+#zl:hover { background: linear-gradient(to right, rgba(42,120,214,.10), transparent); }
+.zone span {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  font-size: 26px; color: var(--blue);
+}
+#zl span { left: 14px; }
+#zr span { right: 14px; }
+
+/* 打印 / 导出 PDF：所有页摊开 */
+@media print {
+  @page { size: A4 landscape; margin: 10mm; }
+  #bar, #foot, .zone { display: none !important; }
+  #deck { height: auto; padding: 0; }
+  .slide { display: block !important; height: auto; overflow: visible;
+            padding: 0 0 18mm; page-break-after: always; font-size: 12.5px; }
+  .slide:last-child { page-break-after: auto; }
+  .slide h1 { font-size: 26px; }
+  .slide h2 { font-size: 21px; }
+  .slide h3 { font-size: 15px; }
+  .slide table { font-size: 10.5px; }
+  .slide pre code { font-size: 9.5px; }
+  .slide .fig img { max-width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <span class="brand">DormMate Final · 综合作品 PPT 文案（14 页）</span>
+  <span class="hint">← → 翻页　·　点左右两侧也行　·　Home / End 跳首尾</span>
+  <span class="spacer"></span>
+  <button type="button" onclick="window.print()">打印 / 导出 PDF</button>
+</div>
+
+<div class="zone" id="zl" onclick="step(-1)" title="上一页"><span>‹</span></div>
+<div class="zone" id="zr" onclick="step(1)" title="下一页"><span>›</span></div>
+
+<div id="deck">
+<section class="slide kind-cover" data-label="DormMate Final · 综合作品 PPT 文案（14 页）">
+<span class="tag">DormMate Final · 综合作品 PPT 文案（14 页）</span>
+<h1>DormMate Final · 综合作品 PPT 文案（14 页）</h1><blockquote><p>这份文件是<strong>答辩 PPT 的逐页文案</strong>，不是系统的一部分。 每一页给三样东西：<strong>页面标题</strong> / <strong>正文文字</strong> / <strong>建议插入什么图</strong>。</p><p>配图有两张是现成的矢量图，直接用：</p><ul><li><a href="ppt-architecture.svg"><code>ppt-architecture.svg</code></a> → 第 3 页</li><li><a href="ppt-event-fsm.svg"><code>ppt-event-fsm.svg</code></a> → 第 7 页</li></ul><p>🖥 <strong>想看整体效果</strong>：双击 <a href="ppt-preview.html"><code>ppt-preview.html</code></a> —— 这份文案渲染出来的 翻页预览（← → 翻页，点左右两侧也行，右上角能直接打印 / 导出 PDF）。 ⚠ 那个 HTML 是<strong>产物</strong>：它由 <code>make_ppt_preview.py</code> 从<strong>这份文件</strong>生成。 要改内容改这里，别去改那个 HTML —— 改了两边就对不上了。</p><p>⚠ 凡是正文里出现的数字，出处都在 <code>README.md</code> 里查得到； 讲的时候如果有人追问「这个数怎么来的」，翻 README 对应的那一节就能对上。</p></blockquote><hr>
+</section>
+<section class="slide kind-note" data-label="讲述纪律">
+<span class="tag">讲述纪律</span>
+<ol><li><strong>不许按 M1/M2/M3 模块顺序讲。</strong> 主线是「一个值班的人在一个晚上遇到的八句话」， 模块名只在配图角落出现。</li><li><strong>判断只由 <code>core.py</code> 做</strong>，<code>dashboard/</code> <code>mobile/</code> <code>three/</code> 三个页面<strong>一条阈值都不认识</strong> —— 这是整套东西的立命之本，每讲一个终端都要回到这句。 ⚠ <strong><code>web/</code> 那一版是例外</strong>（M1 阶段的单节点页，自己引 <code>shared/rules.js</code> 算状态）， 被问到就直说，别含糊过去。</li><li><strong>八问是从已实现行为反推的</strong>（仓库里没有任务书文件）。讲第 2 页时顺口说一句， 比被追问时现解释好。</li></ol><hr>
+</section>
+<section class="slide kind-page" data-label="第 1 页">
+<span class="tag">第 1 页</span>
+<p><strong>页面标题</strong></p><blockquote><p><strong>DormMate Final</strong> 多节点宿舍环境助手 —— 一个值班的人，三间宿舍</p></blockquote><p><strong>正文</strong></p><ul><li>副标题：<strong>判断只由一个进程做，前端只负责画</strong>。从采集到分析，四段闭环。</li><li>一句话内容：三间宿舍的温湿度经 MQTT 进来，<code>core.py</code> 判状态、挑重点、跑事件闭环、 跑 ML 对照，一块看板实时显示；同一份数据落成档案，出报告。</li><li>技术栈角标：<code>Mosquitto 2.1.2</code> · <code>Python 3.14</code> · <code>paho-mqtt</code> · <code>three.js 0.160</code> · <code>Chart.js 4.5</code> · 纯静态前端（<strong>不打包、不需要构建工具</strong>）</li><li>规模角标：<strong>2797 条自动化测试</strong>（Python 1230 + JS 1567，11 份套件）</li><li>页脚：课程设计 · 2026 秋 · 仓库 <code>nova-dormmate-final-2026</code></li></ul><p><strong>建议配图</strong></p><ul><li>主视觉：右边一张 <code>dashboard/</code> 首屏截图（三张状态卡 + 顶部「当前重点」那一行）， 左边一张 <code>three/</code> 三间房并排截图。两张同框，一眼看出「同一份数据的两种看法」。</li><li>右下角小字放技术栈角标，不要做成一排 logo 墙。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 2 页">
+<span class="tag">第 2 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>三个宿舍，一个值班的人 —— 我们要替他回答的八句话</p></blockquote><p><strong>正文</strong></p><ul><li><strong>背景</strong>：宿舍环境的异常（偏冷、偏热、偏湿）现在靠人巡、靠体感。值班的人面对的不是 「没有数据」，而是<strong>一堆孤立数字</strong> —— 三个宿舍、六个读数，他不知道哪条要紧、 哪条已经持续了半小时、处理完到底好了没有。</li><li><strong>我们把它变成三句心里话</strong>：① 现在什么状况？② 先看哪一间？③ 处理完好了没有？</li><li><strong>八个核心问题</strong>（一行一句话）：</li></ul><table><thead><tr><th>#</th><th>问题</th><th>答案落在哪</th></tr></thead><tbody><tr><td>1</td><td>这三间宿舍现在各是什么状况？</td><td>三张状态卡 + <code>status</code> 徽章</td></tr><tr><td>2</td><td>三个都异常时，先看哪一个？</td><td>顶部「当前重点」那一行 + 3D 里的脉冲光圈</td></tr><tr><td>3</td><td>它有多严重、已经持续多久了？</td><td>卡片上的时长、<code>priority.reason</code> 里那句人话</td></tr><tr><td>4</td><td>处理完到底好了没有？</td><td>事件表：待处理 → 处理中 → 已恢复 / 未恢复</td></tr><tr><td>5</td><td>页面上这个数可信吗？我看的是哪一版？</td><td>快照带版本号；前端一条阈值都不认识</td></tr><tr><td>6</td><td>数据断了、节点失联了，知不知道？</td><td>卡片上的「已离线 X 分钟」+ core 心跳提示</td></tr><tr><td>7</td><td>这一天到底发生了什么？（不是此刻）</td><td>档案 CSV → 单文件 HTML 报告</td></tr><tr><td>8</td><td>规则说正常，模型也说正常吗？</td><td>看板的 Rule-ML 对照表 + 报告的案例分析</td></tr></tbody></table><ul><li>⚠ <strong>诚实标注一行</strong>（建议小字，讲的时候口头说）：这八条是从<strong>已实现的行为</strong>反推的， 仓库里没有任务书原文；每一条都能指着一段代码、一条测试和一个页面现象说清楚。</li></ul><p><strong>建议配图</strong></p><ul><li>左边：一张「值班室」的场景照片/插画（值班表、三把钥匙、一块屏），建立人的视角。</li><li>右边：上面那张八问表，<strong>第 1、2、4 三行加底色</strong> —— 它们是后面 D1/D2/D3 的引子。</li><li>表格底部小字：<code>1230 + 1567 条测试</code>，暗示「这八条不是口号」。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 3 页">
+<span class="tag">第 3 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>四个进程，一个 Broker，两条链</p></blockquote><p><strong>正文</strong></p><ul><li><strong>没有服务器、没有数据库、没有构建工具。</strong> 前端全静态，后端只有本机一个 Mosquitto。</li><li><strong>链 ①：实时链（上行 + 下行）</strong> 采集端（模拟器 / 脚本 / 剧本）→ <code>publish</code> 到 <code>dormmate/v1/nodes/+/telemetry</code> （TCP <strong>1883</strong>，<strong>retained</strong>）→ <code>core.py</code> 校验 → 判状态 → 存档案 → 算优先关注 → 跑事件机 → 跑 ML → 发一帧<strong>全局快照</strong> <code>dormmate/v1/state</code> → 浏览器经 WebSocket <strong>9001</strong> 拿到 → <code>dashboard/</code> <code>mobile/</code> <code>three/</code> <strong>只订这一条</strong>； <code>web/</code> 两条都订（快照 + 遥测）—— 它是 M1 那版单节点页，保留原样。</li><li><strong>链 ②：指令链（反向，人 → core）</strong> 前端按钮 / 语音 / <code>send_cmd.py</code> / 剧本 → <code>publish</code> 到 <code>dormmate/v1/cmd</code> （<strong>不 retained</strong>）→ core 校验 → 只把事件推成「处理中」，<strong>不判恢复</strong>。</li><li><strong>挂在实时链尾巴上的第三条：档案链（不参与实时）</strong> <code>core.py</code> 追加写 <code>data/history.csv</code>、落盘 <code>data/events.json</code> → <code>analysis/</code> 出<strong>单文件 HTML 报告</strong>和 Isolation Forest 模型。</li><li><strong>一句立命之本</strong>：上行的是「读数」，下行的是「判断」。<strong>新写的三个页面拿到的是算好的结论， 不是原材料</strong> —— 所以它们永远不会对「这间算不算偏热」有分歧。</li><li>⚠ <strong>仓库里同时存在两个世界，这一点要主动讲</strong>（被追问才说就晚了）： <code>dashboard/</code> <code>mobile/</code> <code>three/</code> <strong>一条阈值都不认识</strong>（<code>logic.js</code> 里出现 <code>18 / 30 / 75</code> 会被测试拦下）；而 <code>web/</code> 是 <strong>M1 阶段的单节点页</strong>，自己引 <code>shared/rules.js</code> 调 <code>judgeStatus()</code> 算状态。<strong>这不是没改干净，是活化石</strong> —— README 里明写了这两者 「故意不一样」。要证「前端不算」，看的是那三个页面。</li></ul><p><strong>建议配图</strong></p><ul><li>主图：<strong>直接用 <a href="ppt-architecture.svg"><code>ppt-architecture.svg</code></a></strong>。三个横向色带 （实时链 / 指令链 / 档案链），方向用颜色区分。这是全篇最重要的一张图。</li><li>右上角配一张「四个终端窗口并排」的实拍照片（Broker / core / 模拟器 / http）， 让人看到这东西真的只有四个窗口。</li></ul><hr><figure class="fig"><img src="ppt-architecture.svg" alt="ppt-architecture.svg"><figcaption>ppt-architecture.svg　（点图可看原尺寸）</figcaption></figure>
+</section>
+<section class="slide kind-page" data-label="第 4 页">
+<span class="tag">第 4 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>同一个系统的五种出口，不是同一张页面复制五份</p></blockquote><p><strong>正文</strong></p><ul><li><strong>它们各自解决不同的问题，所以长得不一样</strong>：</li></ul><table><thead><tr><th>出口</th><th>它替人回答的问题</th><th>保留什么</th><th>砍掉什么</th></tr></thead><tbody><tr><td><code>dashboard/</code> 看板</td><td>全部八个问题</td><td>三张卡 + 趋势图 + 事件表 + 被拒绝消息 + 内嵌 3D</td><td>——</td></tr><tr><td><code>mobile/</code> 手机</td><td>只答三件事：<strong>谁该管 / 点一下看它 / 按开始处理</strong></td><td>大卡片 + 迷你列表 + 处理按钮</td><td>趋势图、事件表、3D、语音</td></tr><tr><td><code>three/</code> 3D</td><td>「哪一间需要关注」让<strong>画面自己说</strong></td><td>三间房并排 + 悬浮标签 + 脉冲</td><td>所有数字表格</td></tr><tr><td><code>web/</code> 老页面</td><td>单节点手动录入 / 摄像头 / 语音指令</td><td>录入、导 CSV、拍照、语音、<strong>自己算状态</strong></td><td>多节点、跨端</td></tr><tr><td><code>miniapp/</code> 小程序</td><td>移动端另一种形态</td><td>手动录入 + 同一套规则</td><td>（见下方说明）</td></tr></tbody></table><ul><li><strong>但「怎么说人话」是同一份代码</strong>：<code>dashboard/logic.js</code> 是纯函数库， <code>focusBanner</code> / <code>speakLine</code> / <code>alertLine</code> 多端共用 —— 所以<strong>同一帧快照在看板顶部、 手机大卡片、3D 读数条、念出来的那句话上永远是同一句话</strong>。分叉的时候不会报错， 那才是最难查的，所以我们从结构上消灭了它。</li><li><strong>「谁能发焦点」不是按端分的，是按「那个界面看不看得见三间并排」分的</strong>： 手机发（迷你列表把三间摆一起）、3D 发（三间房并排）、 <strong>看板不发</strong>（它那块 3D 面板只看一间，「大家看这一间」对它没有意义）。</li><li>⚠ <strong>小程序要如实说明</strong>：它<strong>不接 MQTT</strong>，是本地规则演示端 —— 微信代码根目录就是 <code>miniapp/</code>，<code>../shared/rules.js</code> 进不了包，所以规则抄了第三份。 我们用 <strong>8211 组温湿度</strong>逐个把它和网页版对齐。</li></ul><p><strong>建议配图</strong></p><ul><li><strong>最有说服力的一张</strong>：<code>dashboard/</code> <code>mobile/</code> <code>three/</code> <strong>同一时刻</strong>的截图拼在一起 —— 同一帧快照的三种呈现。这一张图直接回答「为什么不是复制」。 <strong>把 <code>web/</code> 单独摆在旁边</strong>，标一句「M1 单节点页，自己算状态」—— 这个对照本身就是「分工不是复制」的最好注脚，不要藏。</li><li>配一张信息分工的对比表（就是上面那张表）。</li><li>右下角小图：<code>logic.js</code> 一个模块、三条箭头指向三个页面的示意图。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 5 页">
+<span class="tag">第 5 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>D1 · 三间宿舍同时在线 —— 一条规则、四种状态、来几个节点画几张卡</p></blockquote><p><strong>正文</strong></p><ul><li><strong>场景</strong>：晚上 20:30，三间宿舍的读数开始跳。</li><li><strong>判定规则只有一条，而且顺序不可调换</strong>：</li></ul><table><thead><tr><th>顺序</th><th>条件</th><th>结果</th></tr></thead><tbody><tr><td>1</td><td>温度 &lt; 18℃</td><td>偏冷</td></tr><tr><td>2</td><td>否则 温度 ≥ 30℃</td><td>偏热</td></tr><tr><td>3</td><td>否则 湿度 ≥ 75%</td><td>偏湿</td></tr><tr><td>4</td><td>其余</td><td>正常</td></tr></tbody></table><p>⚠ <strong><code>31℃ / 80%</code> 是「偏热」不是「偏湿」</strong> —— 第 2 条先命中。这条规矩最容易被人事后 改错，所以 Python 侧和 JS 侧<strong>各钉死了一遍</strong>（回归数据：<code>25/60</code> 正常、<code>16/60</code> 偏冷、 <code>31/60</code> 偏热、<code>25/80</code> 偏湿）。</p><ul><li><strong>多节点成本为零</strong>：订阅的是通配符 <code>dormmate/v1/nodes/+/telemetry</code>，每个节点各存一份 互不相干的状态，<strong>来几个节点画几张卡</strong> —— 节点名单不写在前端任何一个字面量里。</li><li><strong>刷新页面不用等</strong>：遥测是 retained 的，core 一算完就把快照留在 broker 上， 页面一订上就有数。（老页面 <code>web/</code> 不 retained，刷新要等下一轮 —— 这是<strong>故意不同</strong>的， 得知道自己在哪个页面上。）</li><li><strong>守着它的是 2797 条测试</strong>：Python 1230 条 + 十一份 JS 套件 1567 条。</li></ul><p><strong>建议配图</strong></p><ul><li>主图：<code>dashboard/</code> 三张状态卡的截图 —— 徽章要有<strong>颜色 + 图标</strong> （颜色不是唯一编码，色盲也分得清）。</li><li>左下：<code>simulator</code> 终端滚动的 JSON（能看到 <code>status</code> 字段）；右下：<code>core</code> 终端那三行 <code>[数据]</code>。<strong>两处并排</strong>，证明页面上的字是从这条链上来的。</li><li>规则表单独放一块，用箭头强调「顺序」。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 6 页">
+<span class="tag">第 6 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>D2 · 三个都异常，先管哪个？ —— 规则四步，每一步都给得出理由</p></blockquote><p><strong>正文</strong></p><ul><li><strong>场景</strong>：三间同时异常，值班的人只有一双手。</li><li><strong>排序四步，命中即停</strong>：</li></ul><table><thead><tr><th>步</th><th>比什么</th><th>它赢的时候理由要说什么</th></tr></thead><tbody><tr><td>1</td><td>连续异常的<strong>持续时长</strong></td><td>「持续时间最长」</td></tr><tr><td>2</td><td>并列时比这一段的<strong>消息条数</strong></td><td>「持续时间一样长、异常次数最多」</td></tr><tr><td>3</td><td>还并列时比<strong>严重度权重</strong></td><td>「持续时间和次数都一样，但偏湿比偏冷更要紧」</td></tr><tr><td>4</td><td>最后按 <code>nodeId</code> 字典序</td><td>保证结果<strong>稳定可复现</strong>，不留随机</td></tr></tbody></table><ul><li><strong>理由必须是真的那一步</strong>：第 2 步赢的那行要提「异常次数最多」，不能顺手写 「持续时间最长」。这一条由三套剧本逐帧喂给 core 断言，<strong>不用眼睛盯</strong>。</li><li><strong>三套剧本、三条换人轨迹</strong>（每一套都在逼出不同的决胜步）：</li></ul><table><thead><tr><th>剧本</th><th>换人轨迹</th><th>逼出的是哪一步</th></tr></thead><tbody><tr><td><code>d2_case1</code></td><td><code>→ dorm-b → dorm-c → 空</code></td><td>时长决出，靠恢复交接</td></tr><tr><td><code>d2_case2</code></td><td><code>dorm-a → dorm-b → dorm-a → dorm-b → dorm-a → 空</code></td><td>时长并列比条数，再被更长的接管</td></tr><tr><td><code>d2_case3</code></td><td><code>dorm-a → dorm-b → dorm-a → 空</code></td><td>时长、条数全平，<strong>严重度</strong>决出</td></tr></tbody></table><ul><li><strong>换人才是新闻</strong>：core 只在<strong>焦点真的换人时</strong>打 <code>[重点]</code> 那行 —— 同一个宿舍一直领先不重复打（时长在涨不是新闻）。</li></ul><p><strong>建议配图</strong></p><ul><li>上面那张四步排序表（做成阶梯状）。</li><li><strong>三套剧本各一张顶部「当前重点」截图</strong>，横向排开 —— 三张截图里被点名的宿舍不同， 一眼看出规则真的在工作。</li><li>配一段 <code>core</code> 终端 <code>[重点]</code> 的原文（能看到括号里那句理由），用小字号，重在「理由是对的」。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 7 页">
+<span class="tag">第 7 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>D3 · 按了「开始处理」，到底好了没有？ —— 那条不许越的红线</p></blockquote><p><strong>正文</strong></p><ul><li><strong>状态机只有四个状态</strong>：<code>OPEN</code>（待处理）→ 收到 <code>handle</code> 指令 → <code>HANDLING</code>（处理中） → 后来连着 3 条正常就 <code>RECOVERED</code>（已恢复），连着 3 条异常就 <code>UNRESOLVED</code>（未恢复）。</li><li><strong>红线一句话</strong>：<strong>按一下按钮，不能让事件变成「已恢复」。</strong> 恢复只能由<strong>后来收到的数据</strong>判出来。</li><li><strong>它不是靠自觉，是结构上成立的</strong>：</li><ul><li><code>Core.handle_command()</code> <strong>拿不到节点状态</strong>，它想改也改不了；</li><li><code>event.state = RECOVERED</code> 这个赋值<strong>只出现在一个函数里</strong>（<code>_close_recovered()</code>）， 而那个函数<strong>只被 <code>observe()</code> 调</strong>；</li><li>另有一组静态检查<strong>拿 <code>ast</code> 把函数体抠出来</strong>，盯着这件事。</li></ul><li><strong>连点很多次呢？</strong> 只多记 N 笔动作，<strong>验证窗口一次都不重置</strong>。重置的话连点几下就能把 判据一直往后推，事件永远判不出未恢复。</li><li><strong>一次完整闭环（D3 剧本 14 帧，两幕）</strong>：dorm-b 处理 → <strong>恢复</strong>； dorm-c 处理 → <strong>未恢复</strong>。<code>recovered_at</code> 保持 <code>null</code>（<strong>不是空串</strong> —— 空串会让「没恢复」和「没记录」长得一样）。</li></ul><p><strong>建议配图</strong></p><ul><li>状态机图：<strong>直接用 <a href="ppt-event-fsm.svg"><code>ppt-event-fsm.svg</code></a></strong>，红线那一步标红。</li><li><strong>三张连拍截图</strong>：事件表从「待处理」→「处理中」→「已恢复 / 未恢复」。 重点让人看到<strong>中间那一步会停住</strong>。</li><li>小图：<code>data/events.json</code> 里一条事件的片段（能看到 <code>state</code> / <code>recovered_at</code> / 验证计数）。</li><li>代码截图：<code>ast</code> 那组静态检查的一小段 —— 「红线是结构上成立的」这句话要靠它落地。</li></ul><hr><figure class="fig"><img src="ppt-event-fsm.svg" alt="ppt-event-fsm.svg"><figcaption>ppt-event-fsm.svg　（点图可看原尺寸）</figcaption></figure>
+</section>
+<section class="slide kind-page" data-label="第 8 页">
+<span class="tag">第 8 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>E1 · 让画面自己说出「该看哪一间」</p></blockquote><p><strong>正文</strong></p><ul><li><strong>动机</strong>：数字看板得先<strong>读一遍</strong>才知道该看哪间。3D 想把这一步省掉 —— 三间房并排摆在一个世界里，「谁需要关注」由画面自己说。</li><li><strong>会动的东西只有四样，各跟着一条不同的线</strong>：</li></ul><table><thead><tr><th>画面里</th><th>跟着谁</th><th>数据从哪来</th></tr></thead><tbody><tr><td>地板颜色 / 窗户</td><td>环境状态（正常/偏冷/偏热/偏湿）</td><td>快照 <code>nodes[].status</code></td></tr><tr><td>风扇转不转</td><td>环境状态（偏热）<strong>或</strong>事件状态（处理中）</td><td>前者 <code>status</code>，后者 <code>events[].state</code></td></tr><tr><td>脉冲光圈</td><td>谁是当前重点</td><td>快照 <code>priority</code></td></tr><tr><td>相机飞过去</td><td>焦点是谁</td><td>快照 <code>focus</code></td></tr></tbody></table><ul><li><strong>脉冲和焦点是两件事</strong>：脉冲说「这三间里最该管这间」（不动视角）， 相机飞过去说「现在在看这间」（不动画面）。两个都不做，人还是得先读一遍数字。</li><li><strong>三个坑（都是「控制台一条错都没有」那种）</strong>：</li></ul><ol><li><strong>一盏灯没法同时是三种颜色</strong> → 灯固定，状态只落在<strong>长在那间房自己身上</strong>的零件上 （地板色 / 窗扇 / 风扇），跑不出那间房；</li><li><strong>标签层没设 <code>pointer-events: none</code> 会吃掉所有鼠标事件</strong> → 表现是「点房间没反应」， <strong>控制台无任何报错</strong>；</li><li><strong>相机每帧都得重调 <code>lookAt</code></strong> → 只改位置不改朝向，画面挪了一下但没转过去，同样不报错。</li></ol><ul><li><strong>17 个变异逐个塞回源码，17 个全被抓住、0 个存活</strong>，跑完逐字节还原比对 sha256。 191 条测试盯着这个页面。</li></ul><p><strong>建议配图</strong></p><ul><li>主图：<code>three/</code> 页面截图 —— 三间房并排 + 房间头顶的悬浮标签 + <strong>某一间在脉冲</strong>。 这一张要占半页。</li><li>特写：一个悬浮标签（温湿度 + 状态 + 「处理中」那一格）。</li><li>「点房间 → 下一帧才飞」的对比图（点完那一刻画面不动）。</li><li>角落小表：变异测试那几条（挑「风扇 <code>or</code> 改成 <code>and</code> 被 5 条抓住」这类最直观的）。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 9 页">
+<span class="tag">第 9 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>E2 · 手上拿着东西的时候 —— 一句话走完一条链：说 → 认 → 做 → 回帧确认</p></blockquote><p><strong>正文</strong></p><ul><li><strong>场景</strong>：值班的人刚搬完东西、手上不空，不想碰键盘。</li><li><strong>四句固定指令，顺序就是优先级</strong>（关键词用「<strong>包含</strong>」判断 —— 识别引擎会把语气词和 标点一起吐出来，「朗读一下。」这样整句比对永远匹配不上）：</li></ul><table><thead><tr><th>说什么</th><th>干什么</th><th>关键设计</th></tr></thead><tbody><tr><td>「查看 dorm-b」</td><td>发一条 <code>focus</code> 指令</td><td><strong>本地不动镜头</strong> —— 等 core 发回的新快照说了算</td></tr><tr><td>「记录现场」</td><td>摄像头拍照 + 打水印</td><td>水印第一行是<strong>这条证据的身份</strong>：<code>宿舍 · 事件编号 · 时刻</code></td></tr><tr><td>「朗读状态」</td><td>TTS 念出当前状况</td><td>念哪句由 <code>logic.js</code> 的 <code>speakLine</code> <strong>现算</strong>，页面一个字都不拼</td></tr><tr><td>「开始处理」</td><td>发一条 <code>handle</code> 指令</td><td>和按钮走<strong>同一条</strong>指令链，同样不判恢复</td></tr></tbody></table><ul><li><strong>完整链路（本页的核心图）</strong>： <code>麦克风 → 浏览器 ASR（Chrome 走云端识别，要联网）→ 词表路由 → 四件事之一 → publish 指令 → core 处理 → 发回快照 → 页面据</code><strong>新快照</strong><code>改口</code></li><li><strong>一处必须讲清的诚实设计</strong>：<strong>照片本身只留在浏览器</strong>（画布里的 base64，页面上显示那一张）， 过 MQTT 的只有<strong>文件信息</strong>（宽高、字节数、文件名、水印文本）。core 把它登记到那件事的案卷里。 → 所以<strong>确认方式是「下一帧快照里 <code>cameraCount</code> 变大了」</strong>。指令没发出去、或者 core 拒收 （那间此刻没有未结案的事件），屏幕上<strong>不许</strong>写「已登记」。这是全项目最不该出现的一类假话。</li><li>⚠ <strong>限制要提前说</strong>：麦克风、摄像头、语音识别都只在<strong>安全上下文</strong>里可用 —— <code>localhost</code> ✓，<code>file://</code> ✗，<strong>手机扫码走局域网 IP 的 http 也不安全</strong> ✗。演示要老实用本机。</li></ul><p><strong>建议配图</strong></p><ul><li>左：<code>web/</code> 页面截图（麦克风按钮 + 四个结果区：听到了什么 / 要做什么 / 焦点 / 指令结果）。</li><li>中：一次「记录现场」的完整结果区文字截图（能看见「已拍下 1280×720（…字节）， 水印：dorm-b · 事件 dorm-b-… · 时刻」），<strong>再加一张带水印的照片特写</strong>。</li><li>右：<code>core</code> 终端 <code>[指令] dorm-b snapshot（web）-&gt; 接受：…</code> 那一行。</li><li>底部一条横向链路图：<strong>说 → 认 → 发指令 → core 登记 → 下一帧回帧确认</strong>， 最后的「回帧确认」用高亮，因为它就是这条链区别于「假成功」的地方。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 10 页">
+<span class="tag">第 10 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>E3 · 在手机上点一下，大屏跟着切过去</p></blockquote><p><strong>正文</strong></p><ul><li><strong>场景</strong>：值班的人拿着手机在楼道里，值班室那块大屏上大家在看。 他在手机上点了 <code>dorm-b</code>，三个屏幕同时跟过去。</li><li><strong>一条 <code>focus</code> 指令走完全程</strong>：</li></ul><pre><code>  手机点一下 dorm-b
+     └ publish dormmate/v1/cmd  {&quot;nodeId&quot;:&quot;dorm-b&quot;,&quot;action&quot;:&quot;focus&quot;,&quot;source&quot;:&quot;mobile&quot;}
+       （不 retained：指令是一次性的，留在 broker 上等于下次起 core 时凭空切一次焦点）
+       ▼
+  core 校验 → 记进焦点 → 终端：[指令] dorm-b focus（mobile）-&gt; 接受：焦点切到 dorm-b
+       ▼
+  publish dormmate/v1/state（retained）  focus: {nodeId, by:&quot;mobile&quot;, at}
+       ├─▶ mobile      大卡片换成 dorm-b、列表那一行点亮
+       ├─▶ dashboard   顶栏标签变「跨端焦点」、趋势图切过去
+       └─▶ three       场景切到 dorm-b</code></pre><ul><li><strong>红线（和 D3 那条是同一类）</strong>：<strong>点完那一刻页面上一个字都不改。</strong> 手机端 <code>tapNode</code> 只做两件事 —— 把指令发出去、把说明写出来。焦点归谁要<strong>等 core 发回来的新快照</strong>。 本地先把那一行点亮就是「伪造同步」，而题目里点名禁止的正是这件事。 所以移动端<strong>连一个输入框都没有</strong>，有测试盯着。</li><li><strong>「谁能发焦点」的判据不是端，是「那个界面看不看得见三间并排」</strong> （手机发、3D 发、看板不发）—— 判据看得见、可查，而不是一句关于人在干什么的推测。</li><li><strong>跟随的优先级也得说清</strong>：<strong>焦点变了就跟着切，跟过之后就不再抢</strong> —— 比的是「这个目标跟过了没有」，不是「这一帧里有没有焦点」。 不然用户点到别处看，下一条一模一样的快照又会把他拽回去。</li></ul><p><strong>建议配图</strong></p><ul><li>主图：<strong>手机 + 大屏同框的实拍</strong>（手机在楼道、大屏在值班室），这是这一页最有冲击力的图。</li><li>中图：上面的时序图（三条箭头汇到三个出口）。</li><li>右下：<code>core</code> 终端 <code>[指令] … focus</code> 那行 + 快照里 <code>focus</code> 三格 （<code>nodeId</code> / <code>by</code> / <code>at</code>）的 JSON 片段。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 11 页">
+<span class="tag">第 11 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>D4 · 演示到一半，Broker 挂了 —— 三类故障的现场记录</p></blockquote><p><strong>正文</strong></p><ul><li><strong>每一类都是一个完整的五步记录</strong>：制造 → 现象 → 定位 → <strong>手动修复</strong> → 验证恢复。</li></ul><table><thead><tr><th>故障</th><th>怎么制造</th><th>最直接的定位手段</th></tr></thead><tbody><tr><td>① <strong>停掉 Broker</strong></td><td>终端 1 里 <code>Ctrl+C</code></td><td>三个页面右上角翻成「未连接 / 重连中…」；core 打<strong>一行</strong>断开；<code>netstat</code> 上 1883/9001 没了</td></tr><tr><td>② <strong>Topic 写错 / 对不上</strong></td><td><code>…/telemetery</code>（少一个 <code>y</code>）、<code>…/v2/…</code>、或 topic 与报文里的 <code>nodeId</code> 不一致</td><td>前两种：core <strong>什么也没有</strong>，MQTTX 订 <code>v1/#</code> 能看见那条孤儿消息。第三种：core 打 <code>[拒绝]</code> 并写明两边不一致</td></tr><tr><td>③ <strong>非法报文</strong></td><td>一条脚本发全九类（非法 JSON / 缺字段 / 未知节点 / 数值离谱 / …）</td><td><code>inject_faults</code> 自己那张表：逐条写着「core 拦住了没有、理由对不对」——<strong>core 没在跑时那张表全红，它不会假装绿</strong></td></tr></tbody></table><ul><li><strong>现场最反直觉的一处（这一页的高潮）</strong>：把 broker 停掉再起回来，</li><ul><li>三个页面右上角<strong>自己回到「已连接」</strong>了；</li><li>但卡片<strong>冻在最后一帧</strong>，一动不动；</li><li>只有 core 心跳那条说「core 没声了」。</li></ul></ul><p><strong>为什么？四个进程里只有 <code>core.py</code> 不会自己重连。</strong> 前端走 mqtt.js（自带 2 秒重连）， 模拟器走 <code>loop_start()</code>（内部是带自动重连的 <code>loop_forever()</code>），而 core 的主循环是 <strong>轮询式</strong>的 <code>while True: client.loop(timeout=0.5)</code>，paho 的自动重连 <strong>只在 <code>loop_forever()</code> 里</strong>。 → <strong>「页面已连接 + 数字不动」这个组合，答案就是 core 没回来。</strong> 去 core 那个终端重启一遍。 D4 的要求本来就是「不需要写自动修复」，手动修复是修复动作的一部分，不是漏做。</p><ul><li><strong>还有一类更常见、题干里没写</strong>：<strong>core 自己停了</strong>。判断方法<strong>不是</strong>「页面有没有数据」—— 快照是 retained 的，core 死了页面照样有数据、而且<strong>长得一模一样</strong>； 唯一可靠的判据是<strong>页面顶部那条 core 心跳</strong>：超过 15 秒没有新帧（<code>staleAfterSec</code>） 就说「core 没声了」。</li></ul><p><strong>建议配图</strong></p><ul><li><strong>首选截图</strong>：「页面右上角写着『已连接』、数字一动不动」那张 —— 它一张图就把上面那段话讲完了。</li><li>配 <code>netstat</code> 故障前/后的对比（有 <code>ESTABLISHED</code> vs 只有 <code>LISTENING</code>）。</li><li>配 <code>inject_faults</code> 终端那张九条表（拦住了 / 理由对不对）。</li><li>右下角小图：<strong>两条判据的对照</strong> —— 「节点失联」看卡片（30 秒超时）、 「core 死了」看顶部心跳（15 秒没新帧）。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 12 页">
+<span class="tag">第 12 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>D5 · 规则说正常，模型也说正常吗？ —— 两个方向的不一致，都要点出来</p></blockquote><p><strong>正文</strong></p><ul><li><strong>两条链，同一套判据</strong>：</li><ul><li><strong>离线链</strong>：<code>analysis/ml.py</code> → 出一份报告，进 <code>report/</code>；</li><li><strong>在线链</strong>：core 收到每条遥测就跑一次<strong>该宿舍自己的</strong>模型 → 写进档案第 6 列 <code>ml_label</code> 和第 10 列 <code>agree</code>，同时进快照给看板。</li></ul><li><strong>规则和模型问的不是同一个问题</strong>：规则问「<strong>越没越线</strong>」（阈值）， 模型问「<strong>像不像这间宿舍平时</strong>」（在温湿度两维上切）。所以两边分家是正常的， <strong>我们要做的是把它显式地摆出来</strong>。</li><li><strong>构造案例（可复现）</strong>：<code>data/constructed_samples.json</code> 里几条样本 <code>source</code> 无条件写 <code>constructed</code>，<strong>训练时一律跳过</strong>。 ⚠ 不跳的话，那些极端值会被当常态训进去，之后模型判它们「正常」—— <strong>案例静默地复现不出来</strong>。跳过判据全项目只有一处。</li><li><strong>词表各有各的家</strong>（这一条讲出来很加分）：</li></ul><table><thead><tr><th>位置</th><th>值</th></tr></thead><tbody><tr><td><code>predict()</code> 的返回值</td><td><code>1</code> / <code>-1</code></td></tr><tr><td>档案第 6 列 + 快照 <code>mlLabel</code></td><td><code>normal</code> / <code>abnormal</code></td></tr><tr><td>报告里给人看的</td><td>「接近历史常态 / 与历史明显不同」</td></tr><tr><td>档案第 10 列 <code>agree</code></td><td><code>yes</code> / <code>no</code></td></tr></tbody></table><p>⚠ <code>agree</code> <strong>不能写 Python 布尔</strong> —— 落盘那层的 <code>_cell()</code> 把 <code>bool</code> 当缺值打成空串， 写进去整格会消失，于是「<strong>没判</strong>」和「<strong>判了不一致</strong>」在档案里长得一模一样。 <strong>留空 = 没判，不是判成正常。</strong></p><ul><li><strong>一条实测（本页最硬的一处）</strong>：sklearn 1.9.1 的 <code>predict</code> 是拿 <code>decision_function &lt; 0</code> 切的，<strong>和 <code>offset_</code>（-0.5）无关</strong>；如果改用 <code>score_samples &lt; 0</code>，在同一份真数据上会 <strong>差 1/6 行</strong>。两套口径并存，两条 ML 链就会在同一行上给出不同结论 —— 所以<strong>两条链统一只用 <code>predict()</code></strong>，并有一条测试钉死这件事。</li><li><strong>边界（题目给的，不许越）</strong>：不做 train/test 划分、<strong>不算 accuracy / F1</strong>、 <strong>不调参去刻意制造不一致</strong>。</li></ul><p><strong>建议配图</strong></p><ul><li>左：报告里 <strong>「Rule-ML 对比」表 + 下方的「案例分析」板块</strong>同屏 —— 能看到「是 / 不是」<strong>两个方向都高亮</strong>。</li><li>右：看板的「实时 Rule-ML 对照」表（构造样本那几行）。</li><li>下：<code>train_iforest</code> 终端逐节点汇总（能看到 <code>constructedSkipped</code> 那一列不是 0）。</li><li>小字：<code>models/MANIFEST.json</code> 的片段。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 13 页">
+<span class="tag">第 13 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>我们自己拍板的地方，和往哪走</p></blockquote><p><strong>正文</strong></p><p><strong>A. 自主设计决策</strong>（每一条都有「为什么」，不是随手选的）</p><table><thead><tr><th>决定</th><th>为什么</th></tr></thead><tbody><tr><td><strong>没有服务器、没有数据库</strong></td><td>一个 Broker + 四个进程就够，前端纯静态不打包 —— 复现门槛压到最低（解压完照着五步走）</td></tr><tr><td><strong><code>core.py</code> 是唯一业务大脑</strong></td><td>前端<strong>一条阈值都不认识</strong>（<code>logic.js</code> 里不许出现 <code>18 / 30 / 75</code>，有测试盯着）。前端再算一遍就是同一件事写两份，两边迟早说两套话</td></tr><tr><td><strong>三份「只有一处」</strong></td><td>规则实现、topic 字符串、快照形状 —— 第二份一出现就是 bug，每个都有测试</td></tr><tr><td><strong>判定顺序不可调换</strong></td><td><code>31/80</code> 是偏热不是偏湿，Python 与 JS 两侧各钉死一遍</td></tr><tr><td><strong><code>staleAfterSec</code> 由 core 算好放进快照</strong></td><td>三个前端不能各算各的 —— 它们算出不同答案时会<strong>静默地</strong>给出互相矛盾的提示</td></tr><tr><td><strong>retained 的取舍</strong></td><td>遥测和快照 retained（刷新即见）；<code>cmd</code> <strong>不</strong> retained（否则下次起 core 凭空把事件推进「处理中」）；<code>reject</code> <strong>不</strong> retained（坏消息不许留在 broker 上）</td></tr><tr><td><strong>部分更新，不整份替换</strong></td><td>前端只遍历快照里提到的节点 —— <strong>「缺数据」和「正常」是两件事</strong>，显示层没资格替谁做主</td></tr></tbody></table><p><strong>B. 亮点</strong></p><ul><li><strong>红线是结构上成立的，不是靠自觉</strong>：指令处理函数<strong>拿不到节点状态</strong>； 「置为已恢复」那个赋值<strong>只出现在一个函数里</strong>；还有一组用 <code>ast</code> 抠源码的静态检查盯着。</li><li><strong>测试是靠变异验证过的</strong>：2797 条（Python 1230 + JS 1567），而且大量场景是 <strong>把 bug 真的塞回源码</strong>，确认被抓住、跑完逐字节还原。3D 那块 17 个变异 0 存活。</li><li><strong>每个页面都会「说真话」</strong>：core 没跑时卡片区写「先起 core.py」而不是灰着不说话； 指令没发出去就<strong>明说没发出去</strong>；照片没被 core 登记就不写「已登记」。</li></ul><p><strong>C. Open Enhancement 拓展</strong>（这些不是没想到，是刻意留的）</p><ol><li><strong>core 自动重连</strong> —— 约 6 行：主循环里 <code>client.loop()</code> 返回非 0 时调一次 <code>client.reconnect()</code>。D4 明确不要求，<code>on_connect</code> 那边的重新订阅逻辑<strong>早就写好了</strong>。</li><li><strong><code>history.csv</code> 轮转 / 归档</strong> —— 现在只追加、无上限，一天约 5 万行。 档案一条都不许丢，所以得做归档而不是截断。</li><li><strong>报文乱序保护</strong> —— 现在 <code>latest</code> 一律被<strong>最后收到</strong>的顶掉，比的是到达顺序而不是报文时间。 真正的防线目前是剧本里同节点时间必须递增。</li><li><strong>图片真的上传与存储</strong> —— 现在只有元数据过 MQTT，图留在浏览器。</li><li><strong>规则三处实现 → 单源生成</strong> —— 网页 / Python / 小程序各一份，靠 8211 组数据对拍保证一致； 更好的做法是从一份源生成三份。</li><li><strong>ML 从「对照」推进到「告警」</strong> —— 需要 train/test 划分和阈值标定，当前<strong>刻意不做</strong>。</li></ol><p><strong>建议配图</strong></p><ul><li>左上：那张「决定 / 为什么」表（用两列，别塞第三列）。</li><li>右上：测试规模的柱状图（Python 1230 / JS 1567，再按套件拆开）。</li><li>中下：<code>ast</code> 静态检查的一小段代码截图 —— 「红线是结构上成立的」这句要靠它落地。</li><li>底部：一条<strong>拓展路线图</strong>（六个箭头，1~2 标「小改动」，3~6 标「下一阶段」）。</li></ul><hr>
+</section>
+<section class="slide kind-page" data-label="第 14 页">
+<span class="tag">第 14 页</span>
+<p><strong>页面标题</strong></p><blockquote><p>我们知道它哪里不行</p></blockquote><p><strong>正文</strong></p><ul><li><strong>局限分三类，一共六十多条，全部写在 README 的三张表里</strong>（这是这一页最该说的一句： 不是没想到，是<strong>逐条记着</strong>，并且每条都配了复现步骤或一条测试）。</li></ul><table><thead><tr><th>类别</th><th>挑三条最该讲的</th></tr></thead><tbody><tr><td><strong>设计如此</strong></td><td>① 前端不算 <code>status</code>（刻意的，见第 3 页）；② <code>web/</code> 与 <code>dashboard/</code> 对 <code>status</code> 的态度是<strong>两个世界</strong>（一个信发布端发来的、一个连阈值都不认识）；③ 快照是<strong>部分更新</strong>，「缺数据」不写成「正常」</td></tr><tr><td><strong>还没做</strong></td><td>① <code>core.py</code> <strong>断线不会自己重连</strong>（第 11 页那段，手动修复是 D4 的一部分）；② <code>history.csv</code> <strong>只追加、无轮转</strong>；③ <strong>无乱序保护</strong>；④ 照片<strong>不上传</strong>，只有元数据</td></tr><tr><td><strong>环境依赖</strong></td><td>① 必须 <strong>64 位</strong> <code>py -3.14</code>（32 位会装上一堆跑不起来的包）；② Mosquitto 2.x 装完<strong>会自己占住 1883</strong>；③ 麦克风 / 摄像头 / 语音识别<strong>只在安全上下文</strong>里可用 —— 手机扫码走局域网 IP 打不开（这条最容易在答辩现场被误判成 bug）</td></tr></tbody></table><ul><li><strong>改进的顺序也有想法</strong>：先做「小改动、高收益」的两条（core 自动重连 ≈ 6 行、档案轮转）， 再碰「需要设计」的三条（乱序保护、图片存储、规则单源化）， 最后才是「需要数据和方法论」的 ML 告警化。</li><li><strong>收尾一句</strong>：这套东西的自我要求不是「功能多」，而是 <strong>屏幕上写的每一句话，都有一条代码或一条数据能对得上</strong>。</li></ul><p><strong>建议配图</strong></p><ul><li>主图：README 里那三张表（设计如此 / 还没做 / 环境依赖）的截图，<strong>做旧一点、字小一点</strong>， 视觉上传达「我们真的列了六十多条」。</li><li>配一张「真机 localhost 限制」的示意（安全上下文那张：localhost ✓ / 局域网 IP ✗）。</li><li>右下角：改进路线图的缩略版，和第 13 页呼应。</li></ul><hr>
+</section>
+<section class="slide kind-appendix" data-label="附录">
+<span class="tag">附录</span>
+<pre><code># 1. 起演示环境（拍照截图用）
+start_broker.bat
+py -3.14 core.py                                           # 终端 2
+py -3.14 -m simulator.simulator --all-nodes --interval 4    # 终端 3
+py -3.14 -m http.server 8000 --bind 0.0.0.0 --directory .
+explorer.exe http://localhost:8000/dashboard/
+explorer.exe http://localhost:8000/three/
+
+# 2. 第 6 页那三套剧本（各截一张顶部「当前重点」）
+py -3.14 -m simulator.simulator --script simulator/scenarios/d2_case1.json
+py -3.14 -m simulator.simulator --script simulator/scenarios/d2_case2.json
+py -3.14 -m simulator.simulator --script simulator/scenarios/d2_case3.json
+
+# 3. 第 7 页 D3 闭环（截三张连拍）
+py -3.14 -m simulator.simulator --script simulator/scenarios/d3_event.json
+
+# 4. 第 11 页故障现场
+py -3.14 -m simulator.inject_faults        # 九条表
+# 然后 Ctrl+C 停掉 broker、再起回来 —— 截那张「已连接 + 数字不动」
+
+# 5. 第 12 页 D5
+py -3.14 -m simulator.simulator --all-nodes --count 60 --mode random
+py -3.14 analysis/train_iforest.py --csv data/history.csv --out-dir models
+# 训完重启 core，再：
+py -3.14 -m simulator.replay_samples --file data/constructed_samples.json
+py -3.14 analysis/make_report.py --csv data/history.csv</code></pre><h3>数字出处</h3><table><thead><tr><th>文案里的数</th><th>出处</th></tr></thead><tbody><tr><td>1230 / 1567 / 2797</td><td><code>README.md</code>「跑测试」那一节 + 十一份 <code>tests/*.test.js</code> 的实测输出</td></tr><tr><td>四条规则与判定顺序、<code>25/60 · 16/60 · 31/60 · 25/80</code></td><td><code>README.md</code> 5.3「统一约定」</td></tr><tr><td>30 秒离线超时 / 5 秒心跳 / 15 秒判 stale</td><td><code>core/config.json</code> + <code>README.md</code> 第 1 节第 6 条</td></tr><tr><td>连续 3 条正常算恢复、3 条异常算没治好</td><td><code>core/config.json</code> 的 <code>recoverConsecutiveNormal</code> / <code>verifyConsecutiveAbnormal</code></td></tr><tr><td>三套剧本的换人轨迹</td><td><code>simulator/scenarios/d2_case*.json</code> + <code>tests/test_scenarios.py</code></td></tr><tr><td>17 个变异 0 存活 / 191 条</td><td><code>README.md</code> 的 <code>## Step E1</code></td></tr><tr><td>8211 组温湿度对拍</td><td><code>tests/miniapp-rules.test.js</code></td></tr><tr><td>差 1/6 行（<code>predict</code> vs <code>score_samples</code>）</td><td><code>analysis/ml.py</code> 的注释 + <code>tests/test_ml.py</code></td></tr><tr><td>「只有 core 不会自己重连」</td><td><code>README.md</code> 的 <code>## Phase9 D4</code>（实测方法也记在那里）</td></tr></tbody></table>
+</section>
+
+</div>
+
+<div id="foot">
+  <span>本页内容由 <code>docs/ppt-copy.md</code> 生成 —— 改文案请改那份，别改这里</span>
+  <span id="pos"></span>
+</div>
+
+<script>
+var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+var cur = 0;
+
+function show(n) {
+  if (n < 0) n = 0;
+  if (n > slides.length - 1) n = slides.length - 1;
+  slides[cur].classList.remove('on');
+  cur = n;
+  slides[cur].classList.add('on');
+  slides[cur].scrollTop = 0;
+  document.getElementById('pos').textContent =
+    (cur + 1) + ' / ' + slides.length + '　·　' + slides[cur].dataset.label;
+  if (location.hash !== '#' + (cur + 1)) {
+    history.replaceState(null, '', '#' + (cur + 1));
+  }
+}
+
+function step(d) { show(cur + d); }
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
+    e.preventDefault(); step(1);
+  } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+    e.preventDefault(); step(-1);
+  } else if (e.key === 'Home') { e.preventDefault(); show(0); }
+  else if (e.key === 'End') { e.preventDefault(); show(slides.length - 1); }
+});
+
+var start = parseInt((location.hash || '').slice(1), 10);
+show(isNaN(start) ? 0 : start - 1);
+</script>
+</body>
+</html>

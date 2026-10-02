@@ -1,0 +1,21 @@
+{
+  "comment": "Phase8 D5 构造样本：source 一律 constructed，训练时跳过，用来复现「固定规则和 ML 判得不一样」。喂入用 simulator/replay_samples.py。note 只写「这条读数在规则边界上的位置 + 它想问什么」——**不写预测的结论**：结论取决于你灌出来的那份历史，写死就成了假话，实测也不该由这份文件来宣布。",
+  "source": "constructed",
+  "interval": 0.3,
+  "samples": [
+    {"node": "dorm-a", "temperature": 18.5, "humidity": 58, "time": "2026-09-26 10:00:00",
+     "note": "贴着偏冷线上面一格（18.5 >= 18）：规则说正常。问的是「规则没越线、ML 会不会说这条读数和历史不像」"},
+    {"node": "dorm-a", "temperature": 29.5, "humidity": 60, "time": "2026-09-26 10:00:01",
+     "note": "贴着偏热线下面一格（29.5 < 30）：规则说正常。同上 —— 两个边界各贴一条"},
+    {"node": "dorm-a", "temperature": 31, "humidity": 78, "time": "2026-09-26 10:00:02",
+     "note": "两条线都越了：规则说偏热。模拟器 --mode random 灌的历史里 31/78 这种读数很常见，问 ML 认不认它是常态"},
+    {"node": "dorm-a", "temperature": 25, "humidity": 80, "time": "2026-09-26 10:00:03",
+     "note": "只越湿度线：规则说偏湿。历史里也出现过，问 ML 认不认"},
+    {"node": "dorm-a", "temperature": 25, "humidity": 60, "time": "2026-09-26 10:00:04",
+     "note": "正中：两条线都不越，规则说正常。当基线用 —— 这一条要是两边也对不上，那说明模型本身有问题"},
+    {"node": "dorm-b", "temperature": 25, "humidity": 60, "time": "2026-09-26 10:00:05",
+     "note": "和上一条**同样的温湿度**，换个宿舍：一个模型一个森林，同一组读数在不同宿舍可能判得不一样"},
+    {"node": "dorm-c", "temperature": 16, "humidity": 60, "time": "2026-09-26 10:00:06",
+     "note": "越了偏冷线：规则说偏冷。问 dorm-c 自己的历史里这种读数多不多"}
+  ]
+}

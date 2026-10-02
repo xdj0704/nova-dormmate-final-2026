@@ -64,7 +64,8 @@ const els = {};
   'scene3d', 'focus', 'speak', 'speak-note',
   'event-body', 'event-count', 'export-events',
   'reject-body', 'reject-count',
-  'clear', 'conn', 'conn-text', 'toggle',
+  'mlc-body', 'mlc-count', 'mlc-note',
+  'clear', 'conn', 'conn-text', 'core-hint', 'toggle',
   'ml-count', 'ml-text', 'ml-note',
   'chart-temp', 'chart-humidity']
   .forEach((id) => { els[id] = makeEl(id); });
@@ -107,6 +108,8 @@ const removedNodes = [];
 /* 只记不执行：setTimeout 在 dashboard.js 里只用于「延迟回收 objectURL」那一处，
    立刻执行就把「隔了一会儿才 revoke」这个行为测没了。测试自己挑时候触发。 */
 const timers = [];
+/* 同上，只记不执行（Phase9 D4 的 core 心跳定时器）。 */
+const intervals = [];
 
 const documentStub = {
   documentElement: makeEl('html'),
@@ -260,6 +263,11 @@ const context = {
   Blob: BlobStub,
   URL: URLStub,
   setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+  /* 和上面同一个道理：dashboard.js 用 setInterval 每秒刷一次 core 心跳那行字
+     （Phase9 D4）。真跑起来测试进程会挂着不退出，而且「隔一秒重画一次」
+     这件事不需要在这里测 —— 要测的是那行字算得对不对，测试自己挑时候
+     调 renderCoreHint()。 */
+  setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
   console: consoleStub,
   JSON, Math, Date, Number, Object, Array, String, Set, Boolean,
   isNaN, parseInt, Promise, Error, RegExp, TypeError, undefined,
@@ -1158,8 +1166,8 @@ const logicExports = (fs.readFileSync(LOGIC_SRC, 'utf8')
   .map((l) => l.replace(/^export\s+(?:function|const|let)\s+/, ''));
 const importedNames = (dashText.match(/^import\s*\{([^{}]*)\}\s*from\s*'\.\/logic\.js';/m) || [])[1]
   .split(',').map((s) => s.trim()).filter(Boolean);
-check('★ 从 logic.js 引了十二个名字', importedNames.length, 12);
-check('★★ 这十二个每一个都在 logic.js 的导出清单里',
+check('★ 从 logic.js 引了十三个名字', importedNames.length, 13);
+check('★★ 这十三个每一个都在 logic.js 的导出清单里',
   importedNames.filter((n) => logicExports.indexOf(n) < 0), []);
 
 /* 【不许自己实现业务判断】这一条查的是**源码文本**：阈值、状态名一旦出现，
@@ -1238,6 +1246,15 @@ check('★ 那两张图的 canvas 还在（Chart.js 要靠它）',
 check('★ ML 那一块的位置留着（Rule-ML 预留展示区）',
   [html.indexOf('id="ml-count"') > 0, html.indexOf('id="ml-text"') > 0,
     html.indexOf('id="ml-note"') > 0], [true, true, true]);
+/* Phase8 D5 的实时对照表。和上面那块「ML 辅助判断」是**两条链**：这一块跟着
+   快照走（core 在线判的），上面那块读 report/ml_result.json（离线跑的）。
+   两块的容器 id 各自独立，别合并 —— 合并了就看不出哪个数字是活的。 */
+check('★ 实时对照那一块也有容器，和三列文字都在',
+  [html.indexOf('id="mlc-body"') > 0, html.indexOf('id="mlc-count"') > 0,
+    html.indexOf('id="mlc-note"') > 0], [true, true, true]);
+check('★ 那七列是 宿舍 / 时间 / 温度 / 湿度 / 固定规则 / ML / 是否一致',
+  /<th>宿舍<\/th>\s*<th>时间<\/th>\s*<th>温度 ℃<\/th>\s*<th>湿度 %<\/th>\s*<th>固定规则<\/th>\s*<th>ML<\/th>\s*<th>是否一致<\/th>/
+    .test(html), true);
 check('★ 3D 那个容器还在', html.indexOf('id="scene3d"') > 0, true);
 
 /* 页面的每个 id 都得在测试的登记表里 —— 漏一个就会假绿，
@@ -1248,6 +1265,217 @@ check('★ index.html 里那些 id 测试全都登记了（漏了就是假绿）
   idList.filter((id) => !Object.prototype.hasOwnProperty.call(els, id)), []);
 check('★ 而且登记的那些一个不多（多出来的是已经不存在的元素）',
   Object.keys(els).filter((id) => idList.indexOf(id) < 0), []);
+
+/* ---------- Q. 实时 Rule-ML 对照（Phase8 D5） ---------- */
+
+console.log('\n=== Q. 实时 Rule-ML 对照（Phase8 D5）===');
+
+/* 这一块的数据**和上面几块是同一路**：core 在收到每条遥测时判一次 ML，
+   判词挂在快照每个节点的 history 里，跟着 dormmate/v1/state 一起过来。
+
+   「判过没有」的标志是 mlLabel 是不是 null（不是「mlLabel 等于什么」）：
+   core 判不出来时（这个宿舍没模型、没装 scikit-learn、这条读数缺温湿度）
+   那三个字段**根本不写**，读回来是 null，这一行就不画。
+   把「没判」画成一行「正常」是这一块最容易犯、也最看不出来的错。 */
+function mlItem(over) {
+  const it = {
+    time: '2026-09-22 20:30:00', temperature: 25, humidity: 60, status: '正常',
+    mlLabel: null, mlText: null, agree: null,
+  };
+  Object.keys(over || {}).forEach(function (k) { it[k] = over[k]; });
+  return it;
+}
+
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { history: [
+    mlItem({ time: '2026-09-22 20:29:00', temperature: 18.5, humidity: 58,
+      status: '正常', mlLabel: 'abnormal', mlText: '与历史明显不同', agree: false }),
+    mlItem({ time: '2026-09-22 20:30:00', temperature: 31, humidity: 78,
+      status: '偏热', mlLabel: 'normal', mlText: '接近历史常态', agree: false }),
+    /* 这一条 core 没判（就是「没模型」那种情况）：它不该在表里出现 */
+    mlItem({ time: '2026-09-22 20:31:00' }),
+  ] }),
+  nodeRow('dorm-b', { history: [] }),
+  nodeRow('dorm-c', { history: [] }),
+] }));
+const mlcHtml = els['mlc-body'].innerHTML;
+check('★★ 判过 ML 的行才画（没判的那条不出现）',
+  [mlcHtml.indexOf('20:29:00') > 0, mlcHtml.indexOf('20:30:00') > 0,
+    mlcHtml.indexOf('20:31:00') > 0], [true, true, false]);
+check('★ 条数按判过的那些算，不是按 history 有几条',
+  els['mlc-count'].textContent, '共 2 条');
+
+const mlcRow = (mlcHtml.match(/<tr[\s\S]*?<\/tr>/) || [''])[0];
+const mlcOrder = ['dorm-a', '20:29:00', '18.5', '58', '正常', '与历史明显不同', '不是']
+  .map((s) => mlcRow.indexOf(s));
+check('★★ 一行的七格按 宿舍 / 时间 / 温度 / 湿度 / 规则 / ML / 一致 排',
+  [mlcOrder.every((i) => i >= 0),
+    mlcOrder.slice().sort((a, b) => a - b).join() === mlcOrder.join()],
+  [true, true]);
+check('★ 一行就是七格', (mlcRow.match(/<td/g) || []).length, 7);
+check('★ 「一致」那格是两个字，不是把 ML 判词照搬过去',
+  [mlcRow.indexOf('>不是<') > 0, mlcRow.indexOf('>是<')], [true, -1]);
+check('★ 最新那一帧的内容（换帧之后上一帧的行不残留）',
+  [mlcHtml.indexOf('18.5') < mlcHtml.indexOf('>31<')], [true]);
+
+/* 两边不一样的行染一下 —— 和报告里那张对照表高亮的是同一件事。
+   这里数的是**两次**：这一帧两条都不一致。 */
+check('★ 两边不一样的行带 mlc-mismatch',
+  (mlcHtml.match(/mlc-mismatch/g) || []).length, 2);
+check('★ 下面那行说明数得出有几条不一样',
+  els['mlc-note'].textContent.indexOf('其中 2 条两边不一样') > 0, true);
+check('★ 说明用的是 textContent（这一行不认 markdown，写了 ** 会原样显示）',
+  els['mlc-note'].textContent.indexOf('**'), -1);
+
+/* 一致的行不染。 */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { history: [
+    mlItem({ mlLabel: 'normal', mlText: '接近历史常态', agree: true }),
+  ] }),
+  nodeRow('dorm-b'), nodeRow('dorm-c'),
+] }));
+check('★ 两边一致的行不带 mlc-mismatch',
+  els['mlc-body'].innerHTML.indexOf('mlc-mismatch'), -1);
+check('★ 一致那格这时写「是」', els['mlc-body'].innerHTML.indexOf('>是<') > 0, true);
+check('★ 说明也改成「这几条两边判的一样」',
+  els['mlc-note'].textContent.indexOf('这几条两边判的一样') > 0, true);
+
+/* 【页面只渲染，不判】核心断言：给一个**自相矛盾**的帧 —— 规则说偏热、
+   ML 说不像（两边其实不一样），可 core 报上来的 agree 是 true。
+   页面必须老老实实显示「是」。它要是自己拿两边结论比一遍，这里就会露馅：
+   那正是「业务判断溜回前端」。 */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { history: [
+    mlItem({ time: '2026-09-22 20:40:00', temperature: 31, humidity: 60, status: '偏热',
+      mlLabel: 'abnormal', mlText: '与历史明显不同', agree: true }),
+  ] }),
+  nodeRow('dorm-b'), nodeRow('dorm-c'),
+] }));
+check('★★ 一致与否照抄 core 的布尔：给 true 就显示「是」，页面不自己比两边结论',
+  [els['mlc-body'].innerHTML.indexOf('>是<') > 0,
+    els['mlc-body'].innerHTML.indexOf('mlc-mismatch')], [true, -1]);
+
+/* 一条判词都没有：**说清为什么**，不是画一行「正常」。
+   两种原因要去查的地方完全不同：模型没训 / 训完没重启 core。 */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { history: [mlItem({})] }),
+  nodeRow('dorm-b'), nodeRow('dorm-c'),
+] }));
+check('★★ 一条判词都没有时给的是原因，不是画一行「正常」',
+  [els['mlc-body'].innerHTML.indexOf('core 还没判过 ML') > 0,
+    els['mlc-body'].innerHTML.indexOf('train_iforest') > 0,
+    els['mlc-body'].innerHTML.indexOf('重启 core') > 0], [true, true, true]);
+check('★ 这时条数是空的（不是「共 0 条」）', els['mlc-count'].textContent, '');
+check('★ 说明那行也清掉（不然留着上一帧的话，看着像这一帧说的）',
+  els['mlc-note'].textContent, '');
+
+/* 截断：一次全画出来页面会很长。截了就得说清截了多少，
+   不然「共 150 条」和屏幕上 60 行对不上，看的人会以为漏画了。 */
+const many = [];
+for (let i = 0; i < 70; i += 1) {
+  many.push(mlItem({ time: '2026-09-22 21:' + String(i % 60).padStart(2, '0') + ':00',
+    mlLabel: 'normal', mlText: '接近历史常态', agree: true }));
+}
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { history: many }),
+  nodeRow('dorm-b'), nodeRow('dorm-c'),
+] }));
+check('★ 太多了就截断', (els['mlc-body'].innerHTML.match(/<tr/g) || []).length, 60);
+check('★ 截断了就说清楚截到多少',
+  els['mlc-count'].textContent, '共 70 条（显示最近 60 条）');
+
+/* 清空这一块 —— 快照没了，它就该回到「还没有收到快照」，
+   而不是留着上一帧那几行（那会让屏幕上的数字像是活的）。 */
+clickClear();
+check('★ 清空之后这一块也回到「还没有收到 core 的快照」',
+  els['mlc-body'].innerHTML.indexOf('还没有收到 core 的快照') > 0, true);
+check('★ 而且不是那句「还没判过 ML」（两种原因要说对）',
+  els['mlc-body'].innerHTML.indexOf('core 还没判过 ML'), -1);
+
+/* ML 那套词表不在前端。core 发过来的 mlText 已经是人话，mlLabel 是
+   normal / abnormal —— 前端一个字都不认，只往格子里摆。 */
+check('★★ ML 的词表不在前端（normal / abnormal 一个都不出现）',
+  [dashCode.indexOf('abnormal'), dashCode.indexOf('normal')], [-1, -1]);
+
+/* ---------- R. core 心跳 / 节点离线时长（Phase9 D4） ---------- */
+
+console.log('\n=== R. core 心跳与离线时长（Phase9 D4）===');
+
+/* 【为什么不能靠「收没收到快照」判断 core 死活】
+   state 是 **retained** 的：core 一死，broker 把最后那一帧留着，
+   页面打开照样立刻收到，长得和实时消息一模一样。唯一的判据是
+   「这一帧是多久以前的」—— 时间戳由 core 写进快照（core.epochMs），
+   「多旧算太旧」也由 core 定（staleAfterSec），页面只负责翻译成人话。 */
+feed(snapshotOf({
+  core: { online: true, epochMs: Date.now(), staleAfterSec: 15 },
+}));
+check('★ core 在发帧时那条提示说「在线」，并报出这一帧的年龄',
+  [els['core-hint'].textContent.indexOf('core 在线') === 0,
+    els['core-hint'].className], [true, 'core-hint core-hint--live']);
+
+feed(snapshotOf({
+  core: { online: true, epochMs: Date.now() - 60000, staleAfterSec: 15 },
+}));
+check('★★ core 一停，那条提示就翻成「没声了」—— 不看有没有收到过帧',
+  [els['core-hint'].textContent.indexOf('core 没声了') === 0,
+    els['core-hint'].className], [true, 'core-hint core-hint--stale']);
+check('★ 而且说清楚屏幕上的数字停在那一刻（不是「数据有误」）',
+  els['core-hint'].textContent.indexOf('停在那一刻') > 0, true);
+check('★ 过期那句里带着时长（不是光说一句「没声了」）',
+  els['core-hint'].textContent.indexOf('1 分钟') > 0, true);
+
+/* core.online 那个字段恒为 true（只有活着的 core 能写下它），retained 帧
+   一样带着它 —— 拿它判断等于永远说「在线」。这条就是「它没被读」的证据：
+   底下填 false，只要帧是新的，结论照样是「在线」。 */
+feed(snapshotOf({
+  core: { online: false, epochMs: Date.now(), staleAfterSec: 15 },
+}));
+check('★★ core.online 那个字段不参与判断（改成 false，新帧还是判「在线」）',
+  els['core-hint'].className, 'core-hint core-hint--live');
+
+/* 三层降级各说各的话：这三种情况要修的地方完全不同
+   （等快照 / 升级 core / 去 config.json 开心跳）。 */
+feed(snapshotOf({}));
+check('★ 这份 core 没写心跳时点明「core 是旧版本？」，不是笼统说「离线」',
+  [els['core-hint'].textContent.indexOf('旧版本') > 0,
+    els['core-hint'].className], [true, 'core-hint core-hint--unknown']);
+
+feed(snapshotOf({ core: { online: true, epochMs: Date.now(), staleAfterSec: null } }));
+check('★ 心跳被关掉时说「判不了」，并告诉人去改 stateHeartbeatSec',
+  [els['core-hint'].textContent.indexOf('判不了') > 0,
+    els['core-hint'].textContent.indexOf('stateHeartbeatSec') > 0],
+  [true, true]);
+
+/* ---- 节点离线时长 ---- */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { online: false, offlineSec: 185, offlineText: '3 分钟' }),
+  nodeRow('dorm-b'), nodeRow('dorm-c')] }));
+check('★ 离线那个小标带上了停多久了（不是光写「已离线」）',
+  els.cards.innerHTML.indexOf('已离线 3 分钟') > 0, true);
+const offlineCard = els.cards.innerHTML.split('data-node="dorm-a"')[1].split('</button>')[0];
+const onlineCard = els.cards.innerHTML.split('data-node="dorm-b"')[1].split('</button>')[0];
+check('★ 在线的宿舍一个小标都不带（不写「已离线 0 秒」这种废话）',
+  onlineCard.indexOf('已离线'), -1);
+check('★ 离线标只在那一张卡上（不是三张都画）',
+  (els.cards.innerHTML.match(/已离线/g) || []).length, 1);
+
+/* 时长那串字是 core 给的（offlineText），页面不拿 last_seen 自己算 ——
+   改一个字，卡片跟着变，就是「不是这边算的」的证据。 */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { online: false, offlineSec: 5, offlineText: '改过的字' }),
+  nodeRow('dorm-b'), nodeRow('dorm-c')] }));
+check('★ 改掉 core 给的 offlineText，卡片跟着变（不是页面自己拿 last_seen 算的）',
+  els.cards.innerHTML.indexOf('已离线 改过的字') > 0, true);
+
+/* 还没报过数据的宿舍：online 是 false 但 offlineSec / offlineText 都是 null
+   （「从来没来过」和「来过又断了」不是一件事）。这时只写「已离线」，
+   后面不挂一个空的时长。 */
+feed(snapshotOf({ nodes: [
+  nodeRow('dorm-a', { online: false, offlineSec: null, offlineText: null }),
+  nodeRow('dorm-b'), nodeRow('dorm-c')] }));
+check('★ 从没报过数据的宿舍还是写「已离线」（照样看得见），只是后面不挂空时长',
+  [els.cards.innerHTML.indexOf('已离线') > 0,
+    els.cards.innerHTML.indexOf('已离线 ')], [true, -1]);
 
 /* 送进来的消息条数 —— 用来确认整份测试真的走了几百次投递，
    而不是某一段静悄悄跳过了。 */

@@ -28,6 +28,14 @@
     <span id="conn" class="conn conn--pending">
       <span class="conn-dot"></span><span id="conn-text">未连接</span>
     </span>
+    <!-- core 在不在（Phase9 D4）。和上面那一条**不是一回事**：上面那条说的是
+         「这台手机到 broker 的这条线」，这一条说的是「core 有没有在发快照」。
+
+         手机上这一条格外值得单独摆：手机连的 broker 地址是照着访问地址拼的
+         （见 shared/config.js 的 brokerUrlFor），最常坏的就是那一段 ——
+         「连上了 broker、但 core 那边没声了」和「压根没连上 broker」
+         在页面上的处置完全不同，混成一句话就没法查了。 -->
+    <span id="core-hint" class="core-hint"></span>
   </header>
 
   <!-- 优先关注大卡片（Step E3-3）。整块由 mobile.js 的 renderFocus() 现贴，
