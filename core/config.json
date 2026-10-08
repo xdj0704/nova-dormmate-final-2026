@@ -16,7 +16,21 @@
     "thresholds 这一份是**给人和给报告看的**，规则的真源仍然是 status_rules.py ——",
     "core 启动时会逐项核对，对不上直接拒绝启动并说清改哪一边。所以这里改成 20",
     "不会「悄悄生效」，而是启动时就报错。理由和 rules.py 转发 judge_status 一样：",
-    "同一件事有两个说法，迟早会有一次两边不一致。"
+    "同一件事有两个说法，迟早会有一次两边不一致。",
+    "",
+    "stateHeartbeatSec（Phase9 D4）是快照心跳：每隔这么多秒重发一帧",
+    "dormmate/v1/state，**哪怕内容一个字都没变**。",
+    "",
+    "为什么必须有它：快照是 retained 的 —— core 死了之后 broker 手里那一份还在，",
+    "后开的页面照样能收到它，而它长得和活着的时候一模一样。所以「core 还在不在」",
+    "唯一靠得住的判据是**这一帧有多旧**，而要让这个判据成立，活着的时候帧就必须",
+    "一直在更新。publish_state 平时只在内容变了才发，安静的时候可以几分钟不发一条",
+    "（刚起 core、模拟器还没开就是这种），那种安静会被读成「core 没了」。",
+    "",
+    "代价是每 stateHeartbeatSec 秒一条报文（5 秒 = 每分钟 12 条）。写 0 = 关掉心跳，",
+    "那时快照里 core.staleAfterSec 是 null，页面会说「判不了」而不是随便猜一个。",
+    "页面上的判定阈值是它的 3 倍（连着三次没来才说话），由 core 算好放进快照，",
+    "三个前端照读，不各自写一遍。"
   ],
 
   "nodes": ["dorm-a", "dorm-b", "dorm-c"],
@@ -32,6 +46,7 @@
   },
 
   "offlineTimeoutSec": 30,
+  "stateHeartbeatSec": 5,
   "recoverConsecutiveNormal": 3,
   "historyMax": 50,
 
